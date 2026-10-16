@@ -353,7 +353,8 @@ const defaultServeConfig = {
 };
 
 function App() {
-  const [selectedJobId, setSelectedJobId] = useState(null);
+  const [linkedJobId] = useState(() => new URLSearchParams(window.location.search).get("job"));
+  const [selectedJobId, setSelectedJobId] = useState(linkedJobId);
   const [trainConfig, setTrainConfig] = useState(defaultTrainConfig);
   const [serveConfig, setServeConfig] = useState(defaultServeConfig);
   const [agentPrompt, setAgentPrompt] = useState(() => localStorage.getItem(AGENT_DRAFT_STORAGE_KEY) || "");
@@ -367,7 +368,7 @@ function App() {
       return {};
     }
   });
-  const [activePage, setActivePage] = useState("overview");
+  const [activePage, setActivePage] = useState(linkedJobId ? "jobs" : "overview");
   const [jobFilter, setJobFilter] = useState("all");
   const [launcherMode, setLauncherMode] = useState("train");
   const [launcherModal, setLauncherModal] = useState(false);
@@ -379,7 +380,7 @@ function App() {
   const [datasetsOpen, setDatasetsOpen] = useState(false);
   const [endpointKey, setEndpointKey] = useState(null);
   const [jobPage, setJobPage] = useState(1);
-  const [jobDetailOpen, setJobDetailOpen] = useState(false);
+  const [jobDetailOpen, setJobDetailOpen] = useState(Boolean(linkedJobId));
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [followUpsLoading, setFollowUpsLoading] = useState(false);
   const [agentFailure, setAgentFailure] = useState(() => {

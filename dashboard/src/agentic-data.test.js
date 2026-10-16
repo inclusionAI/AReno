@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sampleTrace, rewardHistogram, stageSegments } from "./agentic-data.js";
+import {
+  sampleTrace,
+  rewardHistogram,
+  stageSegments,
+  matchingTurns,
+  prettyArguments,
+  turnLabel,
+} from "./agentic-data.js";
 test("live exact turns prevail over delayed snapshots and tool durations merge", () => {
   const events = [
     {
@@ -256,4 +263,105 @@ test("time windows follow the latest recorded timestamp and align memory series"
   );
   assert.deepEqual(timeWindowSeries([], 60), []);
   assert.equal(series[0].points.length, 3);
+});
+
+test("trajectory search includes collapsed reasoning, tool arguments and output across all turns", () => {
+  const turns = Array.from({ length: 65 }, (_, turn) => ({
+    turn,
+    response: { content: `Answer ${turn}` },
+    tools: [],
+  }));
+  turns[0].response.reasoning_content = "Inspect the MISSING fixture";
+  turns[1].messages = [
+    { role: "assistant", content: "Inspect the MISSING fixture" },
+  ];
+  turns[31].tools = [
+    {
+      name: "read",
+      arguments: '{"path":"src/loader.py"}',
+      result: "Permission denied",
+      status: "failed",
+    },
+  ];
+  turns[64].tools = [
+    { name: "test", result: "65 passed", status: "completed" },
+  ];
+  assert.deepEqual(
+    matchingTurns(turns, " missing ").map((t) => t.turn),
+    [0],
+  );
+  assert.deepEqual(
+    matchingTurns(turns, "loader.py").map((t) => t.turn),
+    [31],
+  );
+  assert.deepEqual(
+    matchingTurns(turns, "PERMISSION DENIED", "failed").map((t) => t.turn),
+    [31],
+  );
+  assert.deepEqual(
+    matchingTurns(turns, "", "tools").map((t) => t.turn),
+    [31, 64],
+  );
+  assert.equal(matchingTurns(turns, "65 passed", "failed").length, 0);
+  assert.equal(matchingTurns(turns, "").length, 65);
+  assert.equal(turns.length, 65);
+});
+
+test("partial live tool records are enriched from captured calls and results without inventing timing", () => {
+  const trace = sampleTrace([
+    { kind: "tool", time: 12, data: { tool_id: "call", status: "failed" } },
+    {
+      kind: "turn",
+      data: {
+        turn: 0,
+        response: {
+          tool_calls: [
+            {
+              id: "call",
+              function: { name: "shell", arguments: '{"command":"pytest"}' },
+            },
+          ],
+        },
+      },
+    },
+    {
+      kind: "turn",
+      data: {
+        turn: 1,
+        messages: [
+          {
+            role: "tool",
+            tool_call_id: "call",
+            content: "command failed",
+            is_error: true,
+          },
+        ],
+      },
+    },
+  ]);
+  assert.equal(trace.turns[0].tools[0].name, "shell");
+  assert.equal(trace.tools[0].arguments, '{"command":"pytest"}');
+  assert.equal(trace.tools[0].result, "command failed");
+  assert.equal(trace.tools[0].status, "failed");
+  assert.equal(trace.tools[0].start, null);
+  assert.equal(trace.tools[0].end, 12);
+  assert.equal(turnLabel(trace.turns[0]), "shell");
+});
+
+test("argument display formats valid JSON and preserves malformed and plain text verbatim", () => {
+  assert.equal(
+    prettyArguments('{"path":"a.py","lines":0}'),
+    '{\n  "path": "a.py",\n  "lines": 0\n}',
+  );
+  assert.equal(prettyArguments('{"path":'), '{"path":');
+  assert.equal(prettyArguments("ls -la"), "ls -la");
+  assert.equal(prettyArguments({ enabled: false }), '{\n  "enabled": false\n}');
+});
+
+test("tool timing requires an observed start and finish, including timestamp zero", async () => {
+  const { toolSeconds } = await import("./agentic-data.js");
+  assert.equal(toolSeconds({ start: null, end: 100 }), null);
+  assert.equal(toolSeconds({ start: 1, end: null }), null);
+  assert.equal(toolSeconds({ start: 0, end: 2 }), 2);
+  assert.equal(toolSeconds({ start: 4, end: 3 }), null);
 });

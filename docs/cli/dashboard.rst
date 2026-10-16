@@ -209,6 +209,20 @@ The Pi secondary proxy reports each completed model turn before returning it to
 the agent, with explicit prompt/sample identity. Deferred trajectory reconstruction
 preserves training data and does not duplicate those live turn events.
 
+The trajectory reader provides a turn outline and a jump selector for long
+attempts, while keeping at most 30 full turns mounted at a time. Search covers
+captured assistant output, reasoning, tool arguments, and tool results across
+all turns. Repeated conversation history does not create duplicate matches.
+Use the tool-call or failed-tool filter to narrow the trace; selecting a tool
+in the execution map opens its owning turn even outside the current page.
+
+Assistant output and reasoning render as Markdown, with a raw-text toggle for
+inspection. Tool cards separate formatted arguments from full output and offer
+copy, download, and expand/collapse controls. The summary preserves reward and
+finish reason separately. Exact recorded training masks appear above the reader
+when enabled. Missing tool start or finish timestamps display as unrecorded
+timing rather than a fabricated duration.
+
 Memory residency defaults to the last five minutes of recorded data, and MST
 to the last minute. Both offer one-, five-, and fifteen-minute windows. The
 windows follow the latest recorded timestamp, including for completed jobs.

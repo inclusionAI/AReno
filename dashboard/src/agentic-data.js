@@ -20,7 +20,7 @@ export function sampleTrace(events) {
         ...prev,
         ...d,
         arguments: d.arguments ?? prev.arguments,
-        start: prev.start ?? e.time,
+        start: prev.start ?? (d.status === "running" ? e.time : null),
         end: d.status === "running" ? null : e.time,
       });
     }
@@ -40,20 +40,20 @@ export function sampleTrace(events) {
   }
   for (const turn of ordered) {
     for (const call of turn.response?.tool_calls || []) {
-      if (!call.id || tools.has(call.id)) continue;
+      if (!call.id) continue;
       const result = recordedResults.get(call.id);
+      const recorded = tools.get(call.id);
       tools.set(call.id, {
+        ...recorded,
         tool_id: call.id,
-        name: call.function?.name || "Tool",
-        arguments: call.function?.arguments,
-        result: result?.content,
-        status: result
-          ? result.is_error
-            ? "failed"
-            : "completed"
-          : "recorded",
-        start: null,
-        end: null,
+        name: recorded?.name || call.function?.name || "Tool",
+        arguments: recorded?.arguments ?? call.function?.arguments,
+        result: recorded?.result ?? result?.content,
+        status:
+          recorded?.status ||
+          (result ? (result.is_error ? "failed" : "completed") : "recorded"),
+        start: recorded?.start ?? null,
+        end: recorded?.end ?? null,
       });
     }
   }
@@ -201,6 +201,53 @@ export function assistantText(turn) {
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
     .replace(/<\|(?:role_end|im_end|eot_id)\|>/g, "")
     .trim();
+}
+
+// Search the complete captured turn, including collapsed reasoning and outputs.
+export function matchingTurns(turns, query = "", kind = "all") {
+  const needle = query.trim().toLocaleLowerCase();
+  return turns.filter((turn) => {
+    if (kind === "tools" && !turn.tools?.length) return false;
+    if (
+      kind === "failed" &&
+      !turn.tools?.some((tool) => tool.status === "failed")
+    )
+      return false;
+    return (
+      !needle ||
+      valueText({
+        assistant: assistantText(turn),
+        response: turn.response,
+        tools: turn.tools,
+        toolResults: turn.toolResults,
+      })
+        .toLocaleLowerCase()
+        .includes(needle)
+    );
+  });
+}
+
+export function prettyArguments(value) {
+  if (typeof value !== "string") return valueText(value);
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+export function turnLabel(turn) {
+  return (
+    turn.tools?.map((tool) => tool.name).join(" · ") ||
+    assistantText(turn).replace(/\s+/g, " ").trim() ||
+    "Assistant"
+  );
+}
+
+export function toolSeconds(tool) {
+  return numeric(tool.start) && numeric(tool.end) && tool.end >= tool.start
+    ? tool.end - tool.start
+    : null;
 }
 
 export function timeWindowSeries(series, seconds, end) {
