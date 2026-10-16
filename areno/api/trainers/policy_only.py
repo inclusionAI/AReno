@@ -228,7 +228,14 @@ class PolicyOnlyTrainer:
                     if not self._should_train_policy(step):
                         result = self._augment_train_stats({"actor_train_skipped": 1.0})
                         self.logger.info("epoch=%d step=%d role=%s stage=train_skip", epoch, step, role)
-                        record_dashboard_state(self.areno, stage="train_skip", epoch=epoch, step=step, role=role)
+                        record_dashboard_state(
+                            self.areno,
+                            stage="train_skip",
+                            epoch=epoch,
+                            step=step,
+                            role=role,
+                            extra={"trained_samples": 0},
+                        )
                         self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                         self.areno.finish_step()
                         step += 1
@@ -254,7 +261,14 @@ class PolicyOnlyTrainer:
                         result[f"{role}_train_wall_time_s"] = train_time_s
                     result = self._augment_train_stats(result)
                     self.logger.info("epoch=%d step=%d role=%s stage=train_end", epoch, step, role)
-                    record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role=role)
+                    record_dashboard_state(
+                        self.areno,
+                        stage="train_end",
+                        epoch=epoch,
+                        step=step,
+                        role=role,
+                        extra={"trained_samples": len(rewards_all)},
+                    )
                     self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                     self._maybe_save(epoch, step)
                 step += 1
@@ -331,9 +345,34 @@ class PolicyOnlyTrainer:
             max_running_prompts=self.config.resolved_max_running_prompts(),
         ) as ctx:
             await ctx.sync_rollout_session_async()
-            trajectories = await maybe_await(self._get_agent_run_fn()(ctx, agent_batch))
+            recorder = getattr(self.areno, "record_agent_event", lambda *args, **kwargs: None)
+            for item in agent_batch.iter_samples():
+                recorder(
+                    "sample",
+                    prompt_idx=item.prompt_index,
+                    sample_idx=item.sample_index,
+                    status="queued",
+                    group_size=agent_batch.n_samples,
+                    prompt=item.prompt,
+                    source=item.record.get("source"),
+                    max_turns=item.record.get("max_turns"),
+                    harness=getattr(self.config, "agent_fn", None),
+                )
+            from areno.api.agent_events import capture_agent_turns
+
+            with capture_agent_turns(recorder):
+                trajectories = await maybe_await(self._get_agent_run_fn()(ctx, agent_batch))
             if trajectories is None:
                 raise RuntimeError("agent run function must return explicit trajectories")
+            for trajectory in trajectories if isinstance(trajectories, (list, tuple)) else [trajectories]:
+                for item in getattr(trajectory, "invalid_items", []):
+                    recorder(
+                        "sample",
+                        prompt_idx=item.prompt_index,
+                        sample_idx=item.sample_index,
+                        status="failed",
+                        reason="invalid_trajectory",
+                    )
             agent_filtered_count = self._agent_trajectory_invalid_count(trajectories)
             samples = []
             turn_samples_by_item = {}
@@ -366,9 +405,29 @@ class PolicyOnlyTrainer:
                     len(proxy_filtered_items),
                     len(filtered_without_sample),
                 )
+            unfiltered_samples = samples
             samples, filtered_count, filter_diagnostics = self._filter_overlong_agent_samples(
                 ctx, samples, sampling_params, turn_samples_by_item=turn_samples_by_item
             )
+            accepted_items = {(sample.item.prompt_index, sample.item.sample_index) for sample in samples}
+            for sample in unfiltered_samples:
+                item = sample.item
+                if (item.prompt_index, item.sample_index) not in accepted_items:
+                    recorder(
+                        "sample",
+                        prompt_idx=item.prompt_index,
+                        sample_idx=item.sample_index,
+                        status="filtered",
+                        reason="context_limit",
+                    )
+            for prompt_index, sample_index in filtered_without_sample:
+                recorder(
+                    "sample",
+                    prompt_idx=prompt_index,
+                    sample_idx=sample_index,
+                    status="filtered",
+                    reason="context_limit",
+                )
             expected = len(agent_batch)
             if len(samples) + filtered_count + agent_filtered_count != expected:
                 raise RuntimeError(
@@ -399,6 +458,44 @@ class PolicyOnlyTrainer:
                 train_samples.extend(item_turns)
                 row_reward_indices.extend([reward_index] * len(item_turns))
             rows = ctx._train_rows_from_samples(train_samples)
+            for reward_index, sample in enumerate(samples):
+                item = sample.item
+                for index, turn in enumerate(turn_samples_by_item[(item.prompt_index, item.sample_index)]):
+                    recorder(
+                        "turn_snapshot",
+                        prompt_idx=item.prompt_index,
+                        sample_idx=item.sample_index,
+                        turn=index,
+                        messages=turn.messages,
+                        response={
+                            "role": "assistant",
+                            "content": turn.last_response_text,
+                            "tool_calls": turn.last_tool_calls,
+                        },
+                        input_tokens=len(turn.token_row) - len(turn.response_tokens),
+                        output_tokens=len(turn.response_tokens),
+                    )
+                recorder(
+                    "reward",
+                    prompt_idx=item.prompt_index,
+                    sample_idx=item.sample_index,
+                    reward=float(rewards[reward_index]),
+                    status="completed",
+                )
+            item_turn_indices = {}
+            for index, turn in enumerate(train_samples):
+                key = (turn.item.prompt_index, turn.item.sample_index)
+                turn_index = item_turn_indices.get(key, 0)
+                item_turn_indices[key] = turn_index + 1
+                recorder(
+                    "loss_mask",
+                    turn=turn_index,
+                    prompt_idx=turn.item.prompt_index,
+                    sample_idx=turn.item.sample_index,
+                    input_tokens=len(rows.token_rows[index]),
+                    trained_tokens=sum(rows.loss_masks[index]),
+                    spans=_mask_spans(rows.loss_masks[index]),
+                )
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
             message_count = sum(len(record.messages) for record in reward_records)
@@ -575,7 +672,6 @@ class PolicyOnlyTrainer:
         import areno.api
         from areno.api.rewards import compute_group_advantages
 
-        del prompt_batch
         if agent_batch.rewards is None:
             raise ValueError("agentic policy training requires a reward_fn")
         train_batch = []
@@ -641,7 +737,49 @@ class PolicyOnlyTrainer:
                     routed_experts=routed_experts,
                 )
             )
+        if getattr(getattr(self, "areno", None), "record_agent_event", None):
+            self._record_learning_overview(
+                [[rewards_all[index] for index in indices] for indices in grouped.values()],
+                [
+                    (agent_batch.reward_records[index].source_record, row.tokens)
+                    for index, row in zip(row_reward_indices, train_batch, strict=True)
+                ],
+                [
+                    (record.source_record, reward)
+                    for record, reward in zip(agent_batch.reward_records, rewards_all, strict=True)
+                ],
+                requested=len(prompt_batch.items) * self.config.n_samples,
+                returned=len(prompt_batch.items) * self.config.n_samples,
+                accepted=len(rewards_all),
+            )
         return train_batch, rewards_all, logprob_stats
+
+    def _record_learning_overview(self, groups, rows, records, *, requested, returned, accepted):
+        recorder = getattr(self.areno, "record_agent_event", None)
+        if recorder is None:
+            return
+        from areno.api.agent_events import learning_summary, source_label
+
+        sources = {}
+        for record, reward in records:
+            label = source_label(record)
+            data = sources.setdefault(label, dict(label=label, samples=0, reward_sum=0, train_rows=0, train_tokens=0))
+            data["samples"] += 1
+            data["reward_sum"] += float(reward)
+        for record, tokens in rows:
+            data = sources[source_label(record)]
+            data["train_rows"] += 1
+            data["train_tokens"] += len(tokens)
+        recorder(
+            "batch",
+            step=getattr(self, "_dashboard_step", 0),
+            requested=requested,
+            returned=returned,
+            scored=sum(map(len, groups)),
+            accepted=accepted,
+            learning=learning_summary(groups),
+            sources=list(sources.values()),
+        )
 
     def _record_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
         # Capture one representative completion per step by default for the dashboard.
@@ -823,6 +961,20 @@ class PolicyOnlyTrainer:
                     routed_experts=seq.routed_experts,
                 )
             )
+        if getattr(getattr(self, "areno", None), "record_agent_event", None):
+            groups = []
+            offset = 0
+            for size in group_sizes:
+                groups.append(all_rewards[offset : offset + size])
+                offset += size
+            self._record_learning_overview(
+                groups,
+                [(item.record, tokens) for item, _seq, tokens, _logprobs, _reward in pending],
+                [(item.record, reward) for item, _seq, _tokens, _logprobs, reward in pending],
+                requested=len(prompt_batch.items) * self.config.n_samples,
+                returned=sum(len(result.sequences) for result in rollout_results),
+                accepted=len(all_rewards),
+            )
         return train_batch, all_rewards, logprob_stats
 
     def _score_reward_records(self, records):
@@ -852,3 +1004,14 @@ def _agentic_prompt_len(response_mask: list[bool]) -> int:
         if is_response:
             return idx
     return len(response_mask)
+
+
+def _mask_spans(mask):
+    """Compact exact token mask ranges; never decode approximate token boundaries."""
+    spans = []
+    for index, enabled in enumerate(mask):
+        if not spans or spans[-1][2] != bool(enabled):
+            spans.append([index, index + 1, bool(enabled)])
+        else:
+            spans[-1][1] = index + 1
+    return spans

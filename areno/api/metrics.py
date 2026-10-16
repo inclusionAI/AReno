@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+from areno.api.agent_events import AgentEvents
+
 
 class MetricsRecorder:
     """Small TensorBoard facade used by `Trainer.train`."""
@@ -30,6 +32,7 @@ class MetricsRecorder:
         self._state_file = self._log_dir / f"dashboard_state.{os.getpid()}.json"
         self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
         self._closed = False
+        self.agent_events = AgentEvents(log_dir)
 
     def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
         """Record rollout, training, and timing metrics for one step."""
@@ -74,6 +77,7 @@ class MetricsRecorder:
             payload["role"] = role
         if extra:
             payload.update(extra)
+        self.agent_events.record("stage", step=step or 0, stage=stage, status=status, **(extra or {}))
         tmp_file = self._state_file.with_suffix(self._state_file.suffix + ".tmp")
         tmp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_file.replace(self._state_file)
@@ -84,6 +88,7 @@ class MetricsRecorder:
         if self._closed:
             return
         self._closed = True
+        self.agent_events.close()
         self._writer.close()
 
     def __enter__(self) -> MetricsRecorder:

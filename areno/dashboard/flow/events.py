@@ -17,7 +17,7 @@ def lines(chunks):
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
             yield line
-        if len(buffer) > 65536:
+        if len(buffer) > (16 * 1024 * 1024 if PREFIX in buffer else 65536):
             yield buffer
             buffer = ""
     if buffer:

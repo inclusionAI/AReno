@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +29,7 @@ from uuid import uuid4
 from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
 from areno.cli.diagnostics import collect_env, run_checks
 from areno.dashboard.agent_context import agent_system_prompt
+from areno.dashboard.agent_events import EventIndex, timeline_overview
 from areno.dashboard.agent_files import AgentFileBrowser
 
 ROOT = Path(os.environ.get("ARENO_DASHBOARD_ROOT", Path.cwd())).resolve()
@@ -120,6 +122,7 @@ class Job:
         self._metric_keys: set[tuple[str, int, float]] = set()
         self._metric_file_offsets: dict[str, tuple[int, int]] = {}
         self._timeperf_keys: set[int] = set()
+        self.agent_index = None
         self._sample_keys: set[tuple[int, int, int]] = set()
 
     @property
@@ -335,7 +338,7 @@ class DashboardState:
         self._load_rollout_samples(job, path)
         self._load_run_config(job, path)
         for file in sorted(path.glob("*.jsonl")):
-            if file.name.startswith("rollout_samples"):
+            if file.name.startswith(("rollout_samples", "agent_events")):
                 continue
             try:
                 stat = file.stat()
@@ -2239,6 +2242,20 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
         return {"name": name, "ok": False, "error": str(exc)}
 
 
+def job_event_index(job):
+    if not job.metrics_dir:
+        return None
+    directory = Path(job.metrics_dir).expanduser()
+    if not directory.is_absolute():
+        directory = (Path(job.cwd) if job.cwd else ROOT) / directory
+    if not directory.is_dir():
+        return None
+    if job.agent_index is None:
+        job.agent_index = EventIndex(directory, job_pid(job))
+    job.agent_index.rollout_files = rollout_sample_sources(directory, job_pid(job))
+    return job.agent_index
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(f"{self.log_date_time_string()} - {fmt % args}\n")
@@ -2265,6 +2282,60 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(agent_recovery(query.get("job_id", [None])[0]))
             elif path == "/api/jobs":
                 self.json({"jobs": STATE.list_jobs()})
+            elif path.startswith("/api/jobs/") and path.endswith("/timeline"):
+                job = STATE.get_job(path.split("/")[-2])
+                if job is None:
+                    self.error("job not found", HTTPStatus.NOT_FOUND)
+                    return
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                try:
+                    step = int(query["step"][0]) if "step" in query else None
+                except ValueError:
+                    self.error("step must be an integer", HTTPStatus.BAD_REQUEST)
+                    return
+                index = job_event_index(job)
+                self.json(timeline_overview(job.timeperf, index.stages() if index else [], step=step))
+            elif path.startswith("/api/jobs/") and path.endswith(("/agentic", "/agent-events")):
+                job_id = path.split("/")[-2]
+                job = STATE.get_job(job_id)
+                if job is None:
+                    self.error("job not found", HTTPStatus.NOT_FOUND)
+                    return
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                index = job_event_index(job)
+                if index is None:
+                    self.json({"samples": [], "total": 0, "events": [], "cursor": 0})
+                    return
+                if path.endswith("/agentic"):
+                    self.json(
+                        index.overview(
+                            step=int(query["step"][0]) if "step" in query else None,
+                            offset=int(query.get("offset", [0])[0]),
+                            step_limit=int(query["step_limit"][0]) if "step_limit" in query else None,
+                        )
+                    )
+                else:
+                    after = max(int(query.get("after", [0])[0]), int(self.headers.get("Last-Event-ID", 0)))
+                    sample = query.get("sample", [None])[0]
+                    if query.get("stream", [None])[0] != "1":
+                        self.json({"events": index.read(after=after, sample=sample)})
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("X-Accel-Buffering", "no")
+                    self.end_headers()
+                    deadline = time.monotonic() + 25
+                    while time.monotonic() < deadline:
+                        events = index.read(after=after, sample=sample)
+                        for event in events:
+                            after = event["cursor"]
+                            self.wfile.write(f"id: {after}\ndata: {json.dumps(event)}\n\n".encode())
+                        if not events:
+                            self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                        if len(events) < 250:
+                            time.sleep(1)
             elif path.startswith("/api/jobs/") and path.endswith("/metrics"):
                 job_id = path.split("/")[-2]
                 self.json({"metrics": STATE.metric_summaries(job_id)})
@@ -2292,6 +2363,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.json({"job": job.to_json()})
             else:
                 self.static(path)
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except Exception as exc:
             self.error(MODAL_FLOW.app.controller.redact(str(exc)) if MODAL_FLOW else str(exc))
 

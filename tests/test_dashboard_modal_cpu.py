@@ -363,3 +363,30 @@ def test_auto_gpu_is_shared_with_agent_and_recomputed_on_plan_edit(flow):
     revised = flow.revise(preview["id"], edited)
     assert revised["gpu_recommendation"]["required_gib_per_gpu"] < preview["gpu_recommendation"]["required_gib_per_gpu"]
     assert revised["resources"]["gpu"] == revised["gpu_recommendation"]["recommended"]["gpu"]
+
+
+def test_modal_agentic_history_survives_log_pruning_and_reconnection(flow):
+    identifier = flow.execute(flow.preview(training())["id"])["job_id"]
+    raw = identifier.removeprefix("modal-")
+    store = flow.app.controller.store
+    event = dict(
+        id="worker:1",
+        pid=1,
+        step=0,
+        kind="sample",
+        time=1,
+        prompt_idx=0,
+        sample_idx=0,
+        data={"status": "completed", "prompt": "repair parser"},
+    )
+    message = {"type": "agent_event", "event": event, "index": 0}
+    store.event(raw, message)
+    store.event(raw, message)
+    with store.lock, store.db:
+        store.db.execute("DELETE FROM events WHERE job=?", (raw,))
+    job = flow.job(identifier, server.Job)
+    assert job.agent_index.overview()["total"] == 1
+    assert len(job.agent_index.read()) == 1
+    assert flow.job(identifier, server.Job).agent_index is job.agent_index
+    restored = ModalFlow(store.directory, application=flow.app)
+    assert restored.job(identifier, server.Job).agent_index.overview()["samples"][0]["prompt"] == "repair parser"

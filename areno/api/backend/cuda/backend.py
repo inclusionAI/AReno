@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -517,6 +518,10 @@ class CudaBackend(Backend):
         for start in range(0, len(batch_data), mini_bs):
             seqs = batch_data[start : start + mini_bs]
             pack = make_train_pack(seqs)
+            if getattr(self, "_dashboard_events_dir", None):
+                pack["_dashboard_events_dir"] = self._dashboard_events_dir
+                pack["_dashboard_owner_pid"] = os.getpid()
+                pack["_dashboard_step"] = ctx.global_step
             pack["_loss_fn"] = loss_fn
             packs.append(pack)
             if is_sft:
