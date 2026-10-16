@@ -1,40 +1,30 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import React, { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  ArrowDown,
   Check,
-  Copy,
   ChevronDown,
   Clock,
   Code,
   Download,
-  MessageSquare,
   Search,
-  Terminal,
-  Wrench,
   X,
 } from "lucide-react";
 import {
   sampleTrace,
   rewardHistogram,
   isAgenticJob,
-  messageText,
   valueText,
   numeric,
   rewardVariation,
   runtimeNotices,
   sampleSourceLabel,
-  assistantText,
   timeWindowSeries,
-  matchingTurns,
-  prettyArguments,
-  turnLabel,
   toolSeconds,
 } from "./agentic-data";
 import { sampleMetricPoints } from "./metrics";
 import "./agentic.css";
+import { TrajectoryViewer } from "./trajectory-viewer";
+import { SnapshotTree } from "./snapshot-tree";
 const fmt = (n) =>
   numeric(n)
     ? n.toLocaleString(undefined, { maximumFractionDigits: 3 })
@@ -203,557 +193,8 @@ function DownloadButton({ data, name }) {
     </button>
   );
 }
-function CopyButton({ text }) {
-  const [state, setState] = useState("idle");
-  useEffect(() => {
-    if (state === "idle") return;
-    const timer = setTimeout(() => setState("idle"), 2000);
-    return () => clearTimeout(timer);
-  }, [state]);
-  return (
-    <button
-      className="av-icon"
-      aria-label="Copy content"
-      title={
-        state === "error"
-          ? "Copy unavailable; select the text instead"
-          : "Copy content"
-      }
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text ?? "");
-          setState("copied");
-        } catch {
-          setState("error");
-        }
-      }}
-    >
-      {state === "copied" ? <Check size={14} /> : <Copy size={14} />}
-      <span className="av-copy-state" role="status">
-        {state === "copied"
-          ? "Copied"
-          : state === "error"
-            ? "Copy unavailable"
-            : ""}
-      </span>
-    </button>
-  );
-}
-function TraceText({ text, raw }) {
-  if (!text) return null;
-  return raw ? (
-    <pre className="av-raw-text">{text}</pre>
-  ) : (
-    <div className="av-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ children, ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer">
-              {children}
-            </a>
-          ),
-          // Remote images in captured model output must not make network requests.
-          img: ({ alt }) => (
-            <span className="av-muted">
-              [Image: {alt || "see captured media"}]
-            </span>
-          ),
-        }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
-}
-function Tool({ tool, prefix = "", query = "" }) {
-  const ref = useRef(null);
-  useEffect(() => {
-    if (
-      query.trim() &&
-      valueText(tool)
-        .toLocaleLowerCase()
-        .includes(query.trim().toLocaleLowerCase())
-    )
-      ref.current.open = true;
-  }, [query, tool]);
-  return (
-    <details
-      ref={ref}
-      className={`av-tool av-${tool.status}`}
-      id={`${prefix}av-tool-${tool.tool_id}`}
-    >
-      <summary>
-        <Wrench size={14} />
-        <strong>{tool.name}</strong>
-        <span>{tool.status}</span>
-        <small>{seconds(toolSeconds(tool))}</small>
-        <ChevronDown size={14} />
-      </summary>
-      <div className="av-toolbody">
-        <div className="av-block-head">
-          <strong>Arguments</strong>
-          <CopyButton text={valueText(tool.arguments)} />
-        </div>
-        <pre>{prettyArguments(tool.arguments) ?? "Not recorded"}</pre>
-        {tool.result != null && (
-          <>
-            <div className="av-block-head">
-              <strong>Output </strong>
-              <CopyButton text={valueText(tool.result)} />
-              <DownloadButton
-                data={tool.result}
-                name={`${tool.name}-output.txt`}
-              />
-            </div>
-            <pre>{valueText(tool.result)}</pre>
-          </>
-        )}
-      </div>
-    </details>
-  );
-}
-function Conversation({
-  events,
-  sample,
-  agentic,
-  renderMedia,
-  comparison = false,
-  toolFocus,
-}) {
-  const trace = useMemo(() => sampleTrace(events), [events]);
-  const instance = useId();
-  const prefix = comparison ? `${instance}-` : "";
-  const ref = useRef(null);
-  const follow = useRef(true);
-  const [unread, setUnread] = useState(false);
-  const [windowEnd, setWindowEnd] = useState(null);
-  const [signal, setSignal] = useState(false);
-  const [maskTurn, setMaskTurn] = useState("");
-  const [query, setQuery] = useState("");
-  const [kind, setKind] = useState("all");
-  const [raw, setRaw] = useState(false);
-  const [activeTurn, setActiveTurn] = useState(null);
-  const pending = useRef(null);
-  const positions = useRef(new Map());
-  useEffect(() => {
-    const el = ref.current;
-    if (el) {
-      el.scrollTop = positions.current.get(sample?.id) ?? 0;
-      follow.current = !positions.current.has(sample?.id);
-    }
-    setWindowEnd(null);
-    setUnread(false);
-    setQuery("");
-    setKind("all");
-    setActiveTurn(null);
-    setMaskTurn("");
-    pending.current = null;
-  }, [sample?.id]);
-  useEffect(() => {
-    if (follow.current && !query && kind === "all" && ref.current) {
-      ref.current.scrollTop = ref.current.scrollHeight;
-    } else if (events.length) setUnread(true);
-  }, [events.length]);
-  const selectedMask =
-    trace.masks.find((m) => String(m.turn) === maskTurn) || trace.mask;
-  const matches = useMemo(
-    () => matchingTurns(trace.turns, query, kind),
-    [trace, query, kind],
-  );
-  const end = Math.min(windowEnd ?? matches.length, matches.length);
-  const visible = matches.slice(Math.max(0, end - 30), end);
-  const navigate = (turn, toolId, reset = false) => {
-    const candidates = reset ? trace.turns : matches;
-    const index = candidates.findIndex((t) => t.turn === turn);
-    if (index < 0) return;
-    follow.current = false;
-    if (reset) {
-      setQuery("");
-      setKind("all");
-    }
-    setWindowEnd(Math.min(candidates.length, Math.max(30, index + 1)));
-    setActiveTurn(turn);
-    pending.current = { turn, toolId };
-  };
-  useEffect(() => {
-    if (!toolFocus) return;
-    const owner = trace.turns.find((t) =>
-      t.tools.some((tool) => tool.tool_id === toolFocus.id),
-    );
-    if (owner) navigate(owner.turn, toolFocus.id, true);
-    else pending.current = { toolId: toolFocus.id };
-  }, [toolFocus]);
-  useEffect(() => {
-    const target = pending.current;
-    if (!target || !ref.current) return;
-    const el = target.toolId
-      ? [...ref.current.querySelectorAll("details.av-tool")].find(
-          (node) => node.id === `${prefix}av-tool-${target.toolId}`,
-        )
-      : [...ref.current.querySelectorAll(".av-turn")].find(
-          (node) => node.dataset.turn === String(target.turn),
-        );
-    if (el) {
-      if (target.toolId) el.open = true;
-      ref.current.scrollTop +=
-        el.getBoundingClientRect().top -
-        ref.current.getBoundingClientRect().top -
-        12;
-      if (target.toolId) ref.current.scrollIntoView({ block: "center" });
-      pending.current = null;
-    }
-  });
-  const latest = () => {
-    follow.current = true;
-    setQuery("");
-    setKind("all");
-    setWindowEnd(null);
-    setActiveTurn(null);
-    setUnread(false);
-    requestAnimationFrame(() => {
-      if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-    });
-  };
-  const setToolsOpen = (open) => {
-    for (const el of ref.current?.querySelectorAll("details.av-tool") || [])
-      el.open = open;
-  };
-  const outputText = (turn) =>
-    raw
-      ? messageText(turn.response) || assistantText(turn)
-      : assistantText(turn);
-  return (
-    <div className="av-conversation">
-      <div className="av-conversation-head">
-        <MessageSquare size={17} />
-        <strong>
-          {sample
-            ? `${agentic ? "Task" : "Prompt"} ${sample.prompt_idx + 1} · Sample ${sample.sample_idx + 1}`
-            : "Select a sample"}
-        </strong>
-        <span className={`av-status av-${sample?.status}`}>
-          {sample?.status}
-        </span>
-        {trace.masks.length > 0 && (
-          <button
-            className={`av-chip ${signal ? "active" : ""}`}
-            aria-pressed={signal}
-            onClick={() => setSignal(!signal)}
-          >
-            Training signal
-          </button>
-        )}
-        <DownloadButton data={events} name="sample-events.json" />
-      </div>
-      {trace.turns.length > 0 && (
-        <>
-          <div className="av-trace-summary">
-            <span>
-              <strong>{trace.turns.length}</strong> turns
-            </span>
-            <span>
-              <strong>{trace.tools.length}</strong> tool calls
-            </span>
-            {trace.tools.some((tool) => tool.status === "failed") && (
-              <span className="av-failure-count">
-                <strong>
-                  {
-                    trace.tools.filter((tool) => tool.status === "failed")
-                      .length
-                  }
-                </strong>{" "}
-                failed
-              </span>
-            )}
-            <span>
-              {numeric(sample?.reward) ? `Reward ${fmt(sample.reward)}` : ""}
-            </span>
-            {sample?.reason && (
-              <span title="Finish reason">{sample.reason}</span>
-            )}
-          </div>
-          <div className="av-trace-toolbar">
-            <label className="av-trace-search">
-              <Search size={14} />
-              <input
-                aria-label="Search trajectory"
-                placeholder="Search reasoning, tools, output…"
-                value={query}
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  setWindowEnd(null);
-                  setActiveTurn(null);
-                }}
-              />
-            </label>
-            <select
-              aria-label="Filter trajectory turns"
-              value={kind}
-              onChange={(e) => {
-                setKind(e.target.value);
-                setWindowEnd(null);
-                setActiveTurn(null);
-              }}
-            >
-              <option value="all">All turns</option>
-              <option value="tools">Tool calls</option>
-              <option value="failed">Failed tools</option>
-            </select>
-            <button
-              className={`av-chip ${raw ? "active" : ""}`}
-              aria-pressed={raw}
-              onClick={() => setRaw(!raw)}
-            >
-              Raw text
-            </button>
-            {trace.tools.length > 0 && (
-              <>
-                <button className="av-chip" onClick={() => setToolsOpen(true)}>
-                  Expand tools
-                </button>
-                <button className="av-chip" onClick={() => setToolsOpen(false)}>
-                  Collapse tools
-                </button>
-              </>
-            )}
-          </div>
-          <div className="av-trace-position">
-            <span aria-live="polite">
-              {matches.length
-                ? `${Math.max(0, end - 30) + 1}–${end} of ${matches.length}`
-                : "0 matching turns"}
-              {query || kind !== "all" ? " matches" : " turns"}
-            </span>
-            <label>
-              Jump to{" "}
-              <select
-                aria-label="Jump to turn"
-                value={activeTurn ?? ""}
-                onChange={(e) => navigate(Number(e.target.value), null, true)}
-              >
-                <option value="" disabled>
-                  Select turn
-                </option>
-                {trace.turns.map((t) => (
-                  <option key={t.turn} value={t.turn}>
-                    Turn {t.turn + 1}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button onClick={latest}>
-              <ArrowDown size={12} />
-              Latest
-            </button>
-          </div>
-        </>
-      )}
-      {signal && (
-        <section className="av-signal">
-          <strong>Exact training mask</strong>
-          {trace.masks.length > 1 && (
-            <label>
-              Model turn{" "}
-              <select
-                aria-label="Training mask turn"
-                value={maskTurn || String(trace.mask?.turn ?? 0)}
-                onChange={(e) => setMaskTurn(e.target.value)}
-              >
-                {trace.masks.map((m) => (
-                  <option key={m.turn} value={m.turn}>
-                    Turn {(m.turn ?? 0) + 1}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {selectedMask ? (
-            <>
-              <p>
-                {fmt(selectedMask.trained_tokens)} /{" "}
-                {fmt(selectedMask.input_tokens)} tokens participate in loss
-              </p>
-              <div className="av-mask">
-                {selectedMask.spans?.map(([a, b, enabled]) => (
-                  <i
-                    key={a}
-                    style={{
-                      flex: b - a,
-                      background: enabled
-                        ? "var(--deck-cyan)"
-                        : "var(--deck-line)",
-                    }}
-                    title={`Tokens ${a}–${b}: ${enabled ? "trained" : "masked"}`}
-                  />
-                ))}
-              </div>
-            </>
-          ) : (
-            <Empty />
-          )}
-        </section>
-      )}
-      <div
-        className={`av-trace-reader ${agentic && trace.turns.length ? "has-outline" : ""}`}
-      >
-        {agentic && trace.turns.length > 0 && (
-          <nav className="av-turn-outline" aria-label="Trajectory turns">
-            <strong>Trajectory</strong>
-            {matches.map((t) => (
-              <button
-                key={t.turn}
-                className={activeTurn === t.turn ? "selected" : ""}
-                aria-current={activeTurn === t.turn ? "step" : undefined}
-                onClick={() => navigate(t.turn)}
-                title={turnLabel(t)}
-              >
-                <span>
-                  <b>{String(t.turn + 1).padStart(2, "0")}</b>
-                  {t.tools.some((tool) => tool.status === "failed") ? (
-                    <i className="failed">Failed</i>
-                  ) : t.tools.length ? (
-                    <Wrench size={12} />
-                  ) : (
-                    <MessageSquare size={12} />
-                  )}
-                </span>
-                <small>{turnLabel(t)}</small>
-              </button>
-            ))}
-            {!matches.length && <small>No matching turns</small>}
-          </nav>
-        )}
-        <div
-          ref={ref}
-          className="av-messages"
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            follow.current =
-              windowEnd === null &&
-              !query &&
-              kind === "all" &&
-              el.scrollHeight - el.scrollTop - el.clientHeight < 64;
-            if (sample) positions.current.set(sample.id, el.scrollTop);
-            if (follow.current) setUnread(false);
-          }}
-        >
-          {end > 30 && (
-            <button
-              className="secondaryButton"
-              onClick={() => setWindowEnd(Math.max(30, end - 30))}
-            >
-              Earlier turns ({end - 30})
-            </button>
-          )}
-          {windowEnd !== null && (
-            <button className="secondaryButton" onClick={latest}>
-              Latest turns
-            </button>
-          )}
-          {sample?.prompt && (
-            <article className="av-message av-user">
-              <label>{agentic ? "User task" : "Prompt"}</label>
-              {renderMedia?.(
-                sample.capture || {
-                  source_record: sample.source,
-                  prompt_messages: trace.turns[0]?.messages,
-                },
-              )}
-              <TraceText text={sample.prompt} raw={raw} />
-            </article>
-          )}
-          {visible.map((t) => (
-            <article
-              className={`av-turn ${activeTurn === t.turn ? "av-turn-selected" : ""}`}
-              key={t.turn}
-              data-turn={t.turn}
-              id={`${instance}-turn-${t.turn}`}
-            >
-              <div className="av-turnline">
-                <span>{agentic ? `TURN ${t.turn + 1}` : "OUTPUT"}</span>
-                <span>
-                  {fmt(t.input_tokens)} in · {fmt(t.output_tokens)} out ·{" "}
-                  {seconds(t.seconds)}
-                </span>
-              </div>
-              {(t.toolResults || [])
-                .filter(
-                  (m) =>
-                    !trace.tools.some(
-                      (tool) => tool.tool_id === m.tool_call_id,
-                    ),
-                )
-                .map((m, i) => (
-                  <details className="av-tool" key={i}>
-                    <summary>
-                      <Terminal size={14} />
-                      Tool result · {m.tool_call_id}
-                    </summary>
-                    <div className="av-toolbody">
-                      <pre>{messageText(m)}</pre>
-                    </div>
-                  </details>
-                ))}
-              <div className="av-message av-assistant">
-                <div className="av-block-head">
-                  <label>Assistant</label>
-                  <CopyButton text={outputText(t)} />
-                </div>
-                {t.response?.reasoning_content && (
-                  <details className="av-thinking">
-                    <summary>
-                      Thinking <ChevronDown size={12} />
-                    </summary>
-                    <TraceText text={t.response.reasoning_content} raw={raw} />
-                  </details>
-                )}
-                <TraceText text={outputText(t)} raw={raw} />
-                {(t.response?.tool_calls || [])
-                  .filter((c) => !t.tools.some((tool) => tool.tool_id === c.id))
-                  .map((c) => (
-                    <details className="av-tool" key={c.id}>
-                      <summary>
-                        <Code size={14} />
-                        {c.function?.name}
-                      </summary>
-                      <pre>{valueText(c.function?.arguments)}</pre>
-                    </details>
-                  ))}
-              </div>
-              {t.tools.map((tool) => (
-                <Tool
-                  key={tool.tool_id}
-                  tool={tool}
-                  prefix={prefix}
-                  query={query}
-                />
-              ))}
-            </article>
-          ))}
-          {trace.unassignedTools.map((t) => (
-            <Tool key={t.tool_id} tool={t} prefix={prefix} query={query} />
-          ))}
-          {trace.turns.length > 0 && !matches.length && (
-            <Empty>No matching turns. Try another search or filter.</Empty>
-          )}
-          {!events.length && (
-            <Empty>
-              {sample
-                ? "Waiting for captured output…"
-                : "Choose a sample in the matrix"}
-            </Empty>
-          )}
-        </div>
-      </div>
-      {unread && (
-        <button className="av-new" onClick={latest}>
-          <ArrowDown size={14} />
-          New events
-        </button>
-      )}
-    </div>
-  );
+function Conversation(props) {
+  return <TrajectoryViewer {...props} />;
 }
 function useTrace(jobId, sampleId, api, base) {
   const [events, setEvents] = useState([]);
@@ -1363,6 +804,8 @@ export function AgenticJobDetail({ job, api, base, renderMedia }) {
   });
   const [selected, setSelected] = useState(null);
   const [toolFocus, setToolFocus] = useState(null);
+  const [snapshotWidth, setSnapshotWidth] = useState(260);
+  const [snapshotsCollapsed, setSnapshotsCollapsed] = useState(false);
   const [compare, setCompare] = useState(null);
   const [step, setStep] = useState("");
   const [offset, setOffset] = useState(0);
@@ -1450,7 +893,6 @@ export function AgenticJobDetail({ job, api, base, renderMedia }) {
       .toLowerCase()
       .includes(query.toLowerCase()),
   );
-  const tasks = [...new Set(filtered.map((s) => `${s.step}:${s.prompt_idx}`))];
   const hist = overview.stats?.histogram
     ? overview.stats.histogram.map((value, i) => ({
         label: `${(i / 10).toFixed(1)}–${((i + 1) / 10).toFixed(1)}`,
@@ -1613,68 +1055,26 @@ export function AgenticJobDetail({ job, api, base, renderMedia }) {
           →
         </button>
       </div>
-      <div className="av-workspace">
-        <aside className="av-samplelist">
-          <div className="av-listheader">
-            <strong>Sample matrix</strong>
-            <small>Click to inspect · compare via +</small>
-          </div>
-          {tasks.length ? (
-            tasks.map((key) => {
-              const group = filtered.filter(
-                (s) => `${s.step}:${s.prompt_idx}` === key,
-              );
-              return (
-                <div className="av-task" key={key}>
-                  <div title={group[0].prompt}>
-                    <strong>
-                      {group[0].source?.task_id ||
-                        `${agentic ? "Task" : "Prompt"} ${group[0].prompt_idx + 1}`}
-                    </strong>
-                    <small>Step {group[0].step}</small>
-                  </div>
-                  <div className="av-samplecells">
-                    {group.map((s) => (
-                      <div
-                        key={s.id}
-                        className={`av-cell av-${s.status} ${selected === s.id ? "selected" : ""}`}
-                      >
-                        <button
-                          onClick={() => setSelected(s.id)}
-                          title={s.reason || s.status}
-                        >
-                          S{s.sample_idx + 1}
-                          <strong>
-                            {numeric(s.reward)
-                              ? s.reward.toFixed(2)
-                              : s.status === "completed"
-                                ? "done"
-                                : s.status || "queued"}
-                          </strong>
-                        </button>
-                        <button
-                          aria-label={`Compare sample ${s.sample_idx + 1}`}
-                          title="Compare this sample"
-                          onClick={() =>
-                            setCompare(compare === s.id ? null : s.id)
-                          }
-                        >
-                          +
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })
-          ) : (
-            <Empty>
-              {agentic
-                ? "No attempts recorded yet."
-                : "No samples recorded for this job. Training metrics and progress remain available."}
-            </Empty>
-          )}
-        </aside>
+      <div
+        className="av-workspace tv-workspace"
+        style={{
+          "--snapshot-width": snapshotsCollapsed
+            ? "52px"
+            : `${snapshotWidth}px`,
+        }}
+      >
+        <SnapshotTree
+          width={snapshotWidth}
+          onWidthChange={setSnapshotWidth}
+          collapsed={snapshotsCollapsed}
+          onToggle={() => setSnapshotsCollapsed(!snapshotsCollapsed)}
+          samples={filtered}
+          total={overview.total}
+          selected={selected}
+          compare={compare}
+          onSelect={setSelected}
+          onCompare={setCompare}
+        />
         <div className={`av-chatcolumns ${compare ? "av-comparing" : ""}`}>
           <Conversation
             events={trace.events}

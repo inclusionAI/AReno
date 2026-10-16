@@ -368,6 +368,7 @@ def test_live_turns_emit_before_harness_finishes_and_context_resets():
                 for value in range(2):
                     turn = AgentTrajectoryTurn(
                         item=item,
+                        tools=[{"type": "function", "function": {"name": "inspect", "parameters": {"type": "object"}}}],
                         messages=[{"role": "user", "content": "task"}],
                         response={
                             "choices": [{"message": {"role": "assistant", "content": str(value)}}],
@@ -379,6 +380,12 @@ def test_live_turns_emit_before_harness_finishes_and_context_resets():
                     assert any(
                         kind == "turn" and data["turn"] == value and data["sample_idx"] == item.sample_index
                         for kind, data in recorded
+                    )
+                    assert (
+                        next(data for kind, data in reversed(recorded) if kind == "turn")["tool_definitions"][0][
+                            "function"
+                        ]["name"]
+                        == "inspect"
                     )
                     await asyncio.sleep(0)
 

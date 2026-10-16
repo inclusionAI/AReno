@@ -147,6 +147,7 @@ def capture_agent_turns(recorder):
             sample_idx=key[1],
             turn=index,
             messages=turn.messages,
+            tool_definitions=turn.tools,
             response={
                 "role": "assistant",
                 "content": get(message, "content"),
