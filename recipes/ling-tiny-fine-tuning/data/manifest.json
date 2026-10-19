@@ -1,0 +1,77 @@
+{
+  "dataset_version": "payment-json-v1",
+  "evaluation_overlap_reference": {
+    "file": "eval_testset_500.jsonl",
+    "rows": 500,
+    "sha256": "4589dc162afda094483fc392c773169c3248154a48b2f2b628470308ba3f3414",
+    "used_for_training": false
+  },
+  "files": {
+    "train.jsonl": {
+      "buckets": {
+        "CHANNEL_NOT_FOUND": 30,
+        "EXCLUSIVE_VS_STACK": 213,
+        "INSUFFICIENT_FUNDS": 45,
+        "RECOMMEND_SWITCH": 264,
+        "ROUND_HALF_UP_BOUNDARY": 203,
+        "SINGLE_CHANNEL_NORMAL": 148,
+        "SPLIT_PAYMENT": 357,
+        "TIE_BREAKER": 140
+      },
+      "bytes": 9068518,
+      "rows": 1400,
+      "sha256": "23fae1b374f5862953718f2e86dc7c162257e1ba9535a3849fc39524d7885b05",
+      "statuses": {
+        "CHANNEL_NOT_FOUND": 30,
+        "INSUFFICIENT_FUNDS": 45,
+        "SUCCESS": 1325
+      }
+    },
+    "valid.jsonl": {
+      "buckets": {
+        "CHANNEL_NOT_FOUND": 2,
+        "EXCLUSIVE_VS_STACK": 15,
+        "INSUFFICIENT_FUNDS": 3,
+        "RECOMMEND_SWITCH": 19,
+        "ROUND_HALF_UP_BOUNDARY": 15,
+        "SINGLE_CHANNEL_NORMAL": 11,
+        "SPLIT_PAYMENT": 25,
+        "TIE_BREAKER": 10
+      },
+      "bytes": 646570,
+      "rows": 100,
+      "sha256": "710a6a22eb5008f670703b1a8e2caf7db21b733c7c5eb44a76889dda41f42192",
+      "statuses": {
+        "CHANNEL_NOT_FOUND": 2,
+        "INSUFFICIENT_FUNDS": 3,
+        "SUCCESS": 95
+      }
+    }
+  },
+  "preparation": {
+    "code_sha256": {
+      "payment_service/models.py": "2f1ff85230fc523ee8a007b6645f22bb7017f81078cfaafae3b498158d4c9d05",
+      "payment_service/promotion_engine.py": "fd840a8d94cfd14619b97b65166b02907a7a9c9453f821266872bd30776f6fde",
+      "payment_service/service.py": "b231f4bda121bdd401bdd4208b9c283f461a55e7bcc75bc5ed5c2f9cdfd87684",
+      "prepare_data.py": "a898edad1406c0587928769fdce7f4f8c54f728a8bb48ba6f5d23d4786d268dd",
+      "system_prompt.txt": "60fb41691d267134a732cf8ad7efe2edd53f48333aca7d1165dd75fdfebfd2f8"
+    },
+    "excluded": [],
+    "fingerprint": "SHA256 of canonical input JSON excluding order.order_id; all arrays and other IDs preserved",
+    "oracle_checked_rows": 1500,
+    "oracle_mismatches": 0,
+    "seed": 42,
+    "split_method": "bucket-proportional largest remainder; SHA256(seed:fingerprint) selection and order",
+    "target": "canonical ground_truth JSON; no solution or reasoning text",
+    "token_length_checked": false,
+    "token_length_filtered_rows": 0,
+    "validation_count": 100
+  },
+  "source": {
+    "file": "sft_payment_train.jsonl",
+    "repository": "mlx-finetune-microsystem",
+    "revision": "280a5d921b8679dffd1b1941ce6d6632bfe9d84c",
+    "rows": 1500,
+    "sha256": "b1ccae8ef8dc989e05f18e163c5283bf8fabf17057ff4a7fda89e8d11cd4526a"
+  }
+}
