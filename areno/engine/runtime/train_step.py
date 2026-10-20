@@ -133,7 +133,11 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     features = data_pack.get("features")
     if not all(isinstance(x, torch.Tensor) for x in (prompt_mask, advantages, rollout_logprobs)):
         return data_pack
-    has_ppo_fields = all(isinstance(x, torch.Tensor) for x in (ref_logprobs, values, returns))
+    # Optional role scores and critic targets are independent. OPD carries
+    # frozen-teacher logprobs without values or returns, while PPO carries all.
+    has_ref_logprobs = isinstance(ref_logprobs, torch.Tensor)
+    has_values = isinstance(values, torch.Tensor)
+    has_returns = isinstance(returns, torch.Tensor)
     packed_features = _pack_multimodal_features(features, input_ids, lengths, packed_ids.device)
 
     token_offset = 0
@@ -158,9 +162,11 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
             packed_response_mask[action_slice] = response_mask
             packed_advantages[action_slice] = advantages[row, 1:length].to(dtype=torch.float32)
             packed_logprobs[action_slice] = rollout_logprobs[row, 1:length].to(dtype=torch.float32)
-            if has_ppo_fields:
+            if has_ref_logprobs:
                 packed_ref_logprobs[action_slice] = ref_logprobs[row, 1:length].to(dtype=torch.float32)
+            if has_values:
                 packed_values[action_slice] = values[row, 1:length].to(dtype=torch.float32)
+            if has_returns:
                 packed_returns[action_slice] = returns[row, 1:length].to(dtype=torch.float32)
             packed_seq_ids[action_slice] = row
             action_offset += action_len
@@ -185,14 +191,12 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     )
     if packed_features is not None:
         packed["features"] = packed_features
-    if has_ppo_fields:
-        packed.update(
-            {
-                "packed_ref_logprobs": packed_ref_logprobs,
-                "packed_values": packed_values,
-                "packed_returns": packed_returns,
-            }
-        )
+    if has_ref_logprobs:
+        packed["packed_ref_logprobs"] = packed_ref_logprobs
+    if has_values:
+        packed["packed_values"] = packed_values
+    if has_returns:
+        packed["packed_returns"] = packed_returns
     return packed
 
 
