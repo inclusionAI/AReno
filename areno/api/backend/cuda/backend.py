@@ -29,6 +29,7 @@ from areno.api.backend.common import (
     expand_prompts,
     group_rollout_sequences,
     reduce_microbatch_metrics,
+    train_microbatches,
 )
 from areno.api.backend.cuda.checkpoint import save_checkpoint
 from areno.api.backend.cuda.generation import rollout_options
@@ -508,14 +509,13 @@ class CudaBackend(Backend):
             self._step_e2e_start = train_start
             self._step_rollout_time_s = 0.0
         losses = []
-        # Slice the batch into `mini_bs` chunks; each chunk becomes one tensor
+        # Group complete trajectories into `mini_bs` chunks; each becomes a
         # pack and the loss function is stamped onto each pack so the engine's
         # forward worker can call it without having to know about the loss API.
         packs = []
         is_sft = is_sft_loss_fn(loss_fn)
         sft_target_counts = [] if is_sft else None
-        for start in range(0, len(batch_data), mini_bs):
-            seqs = batch_data[start : start + mini_bs]
+        for seqs in train_microbatches(batch_data, mini_bs):
             pack = make_train_pack(seqs)
             pack["_loss_fn"] = loss_fn
             packs.append(pack)

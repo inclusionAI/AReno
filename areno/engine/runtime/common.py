@@ -112,6 +112,20 @@ def split_data_pack_by_dp(data_pack: dict[str, Any], dp_size: int) -> list[dict[
     if not isinstance(input_ids, torch.Tensor):
         raise TypeError("data_pack['input_ids'] must be a torch.Tensor")
     batch = int(input_ids.shape[0])
+    loss_ids = data_pack.get("loss_sequence_ids")
+    if loss_ids is not None:
+        if not isinstance(loss_ids, torch.Tensor) or loss_ids.ndim != 1 or len(loss_ids) != batch:
+            raise ValueError("loss_sequence_ids must contain one logical sequence id per training row")
+        row_ids = loss_ids.tolist()
+        groups = list(dict.fromkeys(row_ids))
+        if len(groups) < dp_size:
+            return [data_pack for _ in range(dp_size)]
+        shards = []
+        for rank in range(dp_size):
+            assigned = set(groups[rank::dp_size])
+            indices = [index for index, group in enumerate(row_ids) if group in assigned]
+            shards.append(_select_data_pack_rows(data_pack, indices, batch))
+        return shards
     # Tiny batches (smaller than dp_size) cannot be sliced cleanly, so just
     # replicate the whole pack to every rank; the loss will be averaged later.
     if batch < dp_size:
@@ -121,22 +135,26 @@ def split_data_pack_by_dp(data_pack: dict[str, Any], dp_size: int) -> list[dict[
 
 def slice_data_pack(obj: Any, rank: int, dp_size: int, batch: int) -> Any:
     """Recursively slice values whose leading dimension is the batch size."""
+    return _select_data_pack_rows(obj, list(range(rank, batch, dp_size)), batch)
+
+
+def _select_data_pack_rows(obj: Any, indices: list[int], batch: int) -> Any:
+    """Select aligned model-call rows, including feature and routing sidecars."""
+
     if isinstance(obj, torch.Tensor):
-        # Strided slice keeps DP shards balanced and aligns with the
-        # round-robin layout used by `split_list_by_dp`.
         if obj.ndim > 0 and int(obj.shape[0]) == batch:
-            return obj[rank::dp_size].contiguous()
+            return obj[indices].contiguous()
         return obj
     if isinstance(obj, dict):
-        return {key: slice_data_pack(value, rank, dp_size, batch) for key, value in obj.items()}
+        return {key: _select_data_pack_rows(value, indices, batch) for key, value in obj.items()}
     if isinstance(obj, list):
         if len(obj) == batch:
-            return obj[rank::dp_size]
-        return [slice_data_pack(value, rank, dp_size, batch) for value in obj]
+            return [obj[index] for index in indices]
+        return [_select_data_pack_rows(value, indices, batch) for value in obj]
     if isinstance(obj, tuple):
         if len(obj) == batch:
-            return tuple(obj[rank::dp_size])
-        return tuple(slice_data_pack(value, rank, dp_size, batch) for value in obj)
+            return tuple(obj[index] for index in indices)
+        return tuple(_select_data_pack_rows(value, indices, batch) for value in obj)
     return obj
 
 

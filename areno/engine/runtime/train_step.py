@@ -90,6 +90,15 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     batch = int(input_ids.shape[0])
     if int(lengths.numel()) != batch:
         raise ValueError("training lengths must contain one entry per input row")
+    loss_ids = data_pack.get("loss_sequence_ids")
+    if loss_ids is None:
+        loss_sequence_ids = list(range(batch))
+    else:
+        if not isinstance(loss_ids, torch.Tensor) or loss_ids.ndim != 1 or len(loss_ids) != batch:
+            raise ValueError("loss_sequence_ids must contain one logical sequence id per training row")
+        ids = {}
+        loss_sequence_ids = [ids.setdefault(value, len(ids)) for value in loss_ids.tolist()]
+    num_loss_sequences = len(set(loss_sequence_ids))
 
     prompt_mask = data_pack["prompt_mask"]
     loss_mask = data_pack.get("loss_mask")
@@ -185,7 +194,7 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
                 packed_values[action_slice] = values[row, 1:length].to(dtype=torch.float32)
             if has_returns:
                 packed_returns[action_slice] = returns[row, 1:length].to(dtype=torch.float32)
-            packed_seq_ids[action_slice] = row
+            packed_seq_ids[action_slice] = loss_sequence_ids[row]
             action_offset += action_len
         token_offset += length
 
@@ -207,7 +216,7 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
             "packed_advantages": packed_advantages,
             "packed_logprobs": packed_logprobs,
             "packed_seq_ids": packed_seq_ids,
-            "packed_num_sequences": batch,
+            "packed_num_sequences": num_loss_sequences,
             "packed_singleton_padding": singleton_padding,
         }
     )

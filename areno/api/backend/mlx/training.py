@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from areno.api.backend.common import train_sequence_ids
 from areno.api.models import TrainSequence
 
 
@@ -72,7 +73,43 @@ def make_train_batch(rows: list[TrainSequence]) -> dict[str, Any]:
         batch["returns"] = mx.array(returns[:, 1:])
     if has_values:
         batch["values"] = mx.array(values[:, 1:])
+    if any(row.trajectory_id is not None for row in rows):
+        groups = {}
+        for index, sequence_id in enumerate(train_sequence_ids(rows)):
+            groups.setdefault(sequence_id, []).append(index)
+        action_width = max(width - 1, 0)
+        loss_width = max(len(group) for group in groups.values()) * action_width
+        indices = np.zeros((len(groups), loss_width), dtype=np.int32)
+        valid = np.zeros_like(indices, dtype=np.bool_)
+        for sequence_id, group in groups.items():
+            row_indices = np.concatenate(
+                [np.arange(index * action_width, (index + 1) * action_width) for index in group]
+            )
+            indices[sequence_id, : len(row_indices)] = row_indices
+            valid[sequence_id, : len(row_indices)] = True
+        batch["trajectory_loss_indices"] = mx.array(indices)
+        batch["trajectory_loss_valid"] = mx.array(valid)
     return batch
+
+
+def trajectory_loss_inputs(batch: dict[str, Any], logprobs: Any) -> tuple[dict[str, Any], Any]:
+    """Join loss signals by trajectory after scoring each original context."""
+
+    import mlx.core as mx
+
+    indices = batch.get("trajectory_loss_indices")
+    if indices is None:
+        return batch, logprobs
+    valid = batch["trajectory_loss_valid"]
+
+    def gather(values):
+        return mx.where(valid, mx.take(values.reshape(-1), indices), 0)
+
+    view = dict(batch)
+    for name in ("response_mask", "old_logprobs", "advantages", "ref_logprobs", "returns", "values"):
+        if name in batch:
+            view[name] = gather(batch[name])
+    return view, gather(logprobs)
 
 
 def sft_target_token_count(rows: list[TrainSequence]) -> int:
@@ -145,4 +182,10 @@ def _copy_vector(destination: np.ndarray, values: list[float]) -> None:
         destination[:count] = values[:count]
 
 
-__all__ = ["clip_grad_norm", "learning_rate_for_step", "make_train_batch", "sft_target_token_count"]
+__all__ = [
+    "clip_grad_norm",
+    "learning_rate_for_step",
+    "make_train_batch",
+    "sft_target_token_count",
+    "trajectory_loss_inputs",
+]

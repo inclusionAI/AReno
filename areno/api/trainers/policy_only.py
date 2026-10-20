@@ -632,6 +632,7 @@ class PolicyOnlyTrainer:
                     advantages=[],
                     prompt_len=prompt_len,
                     scalar_advantage=advantage,
+                    trajectory_id=reward_index,
                     features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,

@@ -13,6 +13,7 @@ from areno.api.backend.common import (
     accumulation_group_size,
     accumulation_steps,
     reduce_microbatch_metrics,
+    train_microbatches,
 )
 from areno.api.backend.mlx.checkpoint import save_checkpoint
 from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig
@@ -22,7 +23,12 @@ from areno.api.backend.mlx.numerics import selected_token_logprobs
 from areno.api.backend.mlx.optimizer import apply_optimizer_update, build_optimizer, set_group_learning_rates
 from areno.api.backend.mlx.provider import MlxModelProvider, load_provider
 from areno.api.backend.mlx.roles import MlxRole, load_language_role, load_value_role, role_output
-from areno.api.backend.mlx.training import clip_grad_norm, make_train_batch, sft_target_token_count
+from areno.api.backend.mlx.training import (
+    clip_grad_norm,
+    make_train_batch,
+    sft_target_token_count,
+    trajectory_loss_inputs,
+)
 from areno.api.config import MlxConfig
 from areno.api.context import Context
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
@@ -234,7 +240,7 @@ class MlxBackend(Backend):
         from mlx.utils import tree_map
 
         spec = describe_loss_fn(loss_fn)
-        microbatches = [batch_data[start : start + mini_bs] for start in range(0, len(batch_data), mini_bs)]
+        microbatches = train_microbatches(batch_data, mini_bs)
         accumulation = accumulation_steps(len(microbatches), gradient_accumulation_steps)
 
         self.model.train()
@@ -532,7 +538,8 @@ class MlxBackend(Backend):
                 targets,
                 chunk_size=self.config.logits_chunk_size,
             )
-            return mlx_loss(name, batch, selected, **kwargs)
+            loss_batch, selected = trajectory_loss_inputs(batch, selected)
+            return mlx_loss(name, loss_batch, selected, **kwargs)
 
         value_and_grad = nn.value_and_grad(self.model, loss)
         if self.config.compile_train_step and not self.provider.is_multimodal:
