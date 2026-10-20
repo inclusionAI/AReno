@@ -159,13 +159,20 @@ def get_algorithm(name: str) -> AlgorithmSpec:
     return _ALGORITHMS[key]
 
 
-def list_algorithms(*, include_experimental: bool = True) -> dict[str, AlgorithmSpec]:
-    """Return the registered algorithm specs keyed by algorithm name."""
+def list_algorithms(
+    *, include_experimental: bool = True
+) -> dict[str, AlgorithmSpec]:
+    """Return registered algorithms, optionally excluding experimental ones."""
 
     if include_experimental:
         load_experimental_algorithms()
-    return dict(_ALGORITHMS)
+        return dict(_ALGORITHMS)
 
+    return {
+        name: spec
+        for name, spec in _ALGORITHMS.items()
+        if not spec.experimental
+    }
 
 def describe_loss_fn(loss_fn: Callable) -> BackendLossSpec:
     """Resolve a possibly nested partial to its registered algorithm loss."""
@@ -321,15 +328,15 @@ def _register_builtin_algorithms() -> None:
         )
     )
     register_algorithm(
-    AlgorithmSpec(
-        name="opd",
-        trainer_cls=_load_opd_trainer,
-        default_loss_fn=opd_loss_fn,
-        requires_rollout=True,
-        requires_reward=False,
-        loss_fn_factory=_bind_opd_loss,
-        experimental=True,
-    )
+        AlgorithmSpec(
+            name="opd",
+            trainer_cls=_load_opd_trainer,
+            default_loss_fn=opd_loss_fn,
+            requires_rollout=True,
+            requires_reward=False,
+            loss_fn_factory=_bind_opd_loss,
+            experimental=True,
+        )
 )
 
 def _load_opd_trainer() -> type:

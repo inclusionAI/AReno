@@ -75,6 +75,20 @@ class AlgorithmRegistryTest(unittest.TestCase):
         self.assertEqual(trainer.dataset, ["row"])
         self.assertIs(trainer.loss_fn, dummy_loss)
 
+def test_opd_is_experimental():
+    spec = get_algorithm("opd")
+
+    assert spec.experimental is True
+    assert spec.requires_rollout is True
+    assert spec.requires_reward is False
+
+    assert "opd" not in list_algorithms(
+        include_experimental=False
+    )
+
+    assert "opd" in list_algorithms(
+        include_experimental=True
+    )
 
 if __name__ == "__main__":
     unittest.main()
