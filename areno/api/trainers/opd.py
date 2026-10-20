@@ -1,14 +1,14 @@
-"""On-policy distillation trainer: Stage 2 student/teacher role support.
+"""On-policy distillation trainer: student rollout and frozen teacher scoring.
 
-Stage 2 deliberately does not perform rollout, build train batches, or optimize.
-Those operations are added in Stage 3 and Stage 4. The backend owns model
-loading, trainability, devices, and scoring; never load the teacher here with
-Hugging Face directly.
+Stage 3 materializes student-generated responses as teacher-scored training
+sequences; Stage 4 supplies the differentiable OPD loss. The backend owns
+model loading, trainability, devices, and scoring.
 """
 
 from __future__ import annotations
 
 import math
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Sequence
 
@@ -60,7 +60,7 @@ class OPDTrainer(PolicyOnlyTrainer):
         if not getattr(config, "teacher_ckpt", None):
             raise ValueError("OPD requires a teacher checkpoint")
         if getattr(config, "agent_fn", None) is not None:
-            raise ValueError("Stage 2 OPD supports prompt-based training only")
+            raise ValueError("Basic OPD supports prompt-based training only")
 
         super().__init__(
             config, instance=instance, dataset=dataset,
@@ -74,6 +74,7 @@ class OPDTrainer(PolicyOnlyTrainer):
             )
         }
         self._roles_ready = False
+        self._last_opd_stats: dict[str, float] = {}
 
     def _policy_role_name(self) -> str:
         return "student"
@@ -82,7 +83,7 @@ class OPDTrainer(PolicyOnlyTrainer):
     def student_teacher_session(self) -> Iterator[None]:
         """Start student/teacher roles and always close the backend.
 
-        Stage 3 will call this around the existing rollout/train loop.
+        This wraps the existing prompt-rollout/training loop.
         """
         if self._roles_ready:
             raise RuntimeError("OPD model roles are already initialized")
@@ -123,8 +124,118 @@ class OPDTrainer(PolicyOnlyTrainer):
         )
         return align_teacher_scores(token_rows, score_rows)
 
-    def fit(self) -> None:
-        raise NotImplementedError(
-            "OPD Stage 2 supports student/teacher initialization and scoring, "
-            "but does not run training until Stage 3 (rollout) and Stage 4 (loss)."
+    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
+        """Turn on-policy student completions into teacher-scored training rows.
+
+        Reuses PolicyOnlyTrainer's prompt rollout; unlike GRPO/GSPO this path
+        NEVER calls a reward function or computes group-relative advantages.
+
+        Returns (train_sequences, [], response_rollout_logprobs), matching the
+        parent trainer loop's hook contract. `ref_logprobs` carries *teacher*
+        scores, not the usual PPO reference-model KL baseline.
+        """
+        from areno.api.models import TrainSequence
+
+        self._last_opd_stats = {}
+        if len(prompt_batch.items) != len(rollout_results):
+            raise ValueError(
+                "OPD rollout prompt count mismatch: "
+                f"{len(rollout_results)} results for {len(prompt_batch.items)} prompts"
+            )
+
+        token_rows: list[list[int]] = []
+        features: list[dict | None] = []
+        metadata: list[tuple[int, list[float]]] = []
+        response_rollout_logprobs: list[float] = []
+        skipped_empty = 0
+
+        # Flatten prompt/sample pairs in the same order as rollout results.
+        for item, result in zip(prompt_batch.items, rollout_results, strict=True):
+            prompt = list(item.input_tokens)
+            if not prompt:
+                raise ValueError("OPD requires a nonempty prompt token prefix")
+            for sequence in result.sequences:
+                response = list(sequence.resp_tokens)
+                old_scores = [float(lp) for lp in sequence.resp_logprobs]
+                if len(response) != len(old_scores):
+                    raise ValueError(
+                        "OPD response tokens and rollout logprobs have different lengths"
+                    )
+                if not all(math.isfinite(lp) for lp in old_scores):
+                    raise ValueError("OPD rollout contains non-finite logprobs")
+                if not response:
+                    skipped_empty += 1
+                    continue
+
+                token_rows.append(prompt + response)
+                metadata.append((len(prompt), old_scores))
+                features.append(item.record.get("features"))
+                response_rollout_logprobs.extend(old_scores)
+
+        n_tokens = len(response_rollout_logprobs)
+        if not token_rows:
+            # No response-only tokens: no teacher call and no optimizer step.
+            self._last_opd_stats = {
+                "opd_response_token_count": 0.0,
+                "opd_empty_responses_skipped": float(skipped_empty),
+                "opd_teacher_score_time_s": 0.0,
+            }
+            return [], [], []
+
+        self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
+        start = time.perf_counter()
+        teacher_scores = self._score_teacher_tokens(token_rows, features=features)
+        elapsed = time.perf_counter() - start
+        self.logger.info(
+            "role=ref stage=logprob_score_end rows=%d time_s=%.6f",
+            len(token_rows), elapsed,
         )
+
+        train_batch = []
+        teacher_minus_rollout_sum = 0.0
+        for tokens, scores, (prompt_len, old_scores), feature in zip(
+            token_rows, teacher_scores, metadata, features, strict=True
+        ):
+            response_len = len(old_scores)
+            # Only response scores enter the teacher-student gap metric.
+            for teacher_lp, rollout_lp in zip(
+                scores[prompt_len:], old_scores, strict=True
+            ):
+                teacher_minus_rollout_sum += teacher_lp - rollout_lp
+            train_batch.append(
+                TrainSequence(
+                    tokens=tokens,
+                    prompt_mask=[True] * prompt_len + [False] * response_len,
+                    # Prompt positions are placeholders masked from the loss.
+                    logprobs=[0.0] * prompt_len + old_scores,
+                    # Reuse the backend's reference-score slot for teacher LPs.
+                    ref_logprobs=scores,
+                    features=feature,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+            )
+
+        self._last_opd_stats = {
+            "opd_response_token_count": float(n_tokens),
+            "opd_empty_responses_skipped": float(skipped_empty),
+            "opd_teacher_score_time_s": elapsed,
+            "opd_teacher_minus_rollout_logprob_mean": (
+                teacher_minus_rollout_sum / n_tokens
+            ),
+        }
+        return train_batch, [], response_rollout_logprobs
+
+    def _augment_train_stats(self, result):
+        """Attach teacher-scoring diagnostics to the parent loop's metrics."""
+        if isinstance(result, dict):
+            result.update(self._last_opd_stats)
+        return result
+
+    def fit(self) -> None:
+        """Reuse the existing prompt rollout/training loop with teacher roles.
+
+        Full optimization requires the Stage 4 OPD loss; the Stage 1 loss stub
+        raises NotImplementedError rather than silently running a wrong loss.
+        """
+        with self.student_teacher_session():
+            self._fit_initialized()
