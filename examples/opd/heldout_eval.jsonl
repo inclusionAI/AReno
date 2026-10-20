@@ -1,0 +1,12 @@
+{"id":"eval-01","prompt":"Answer with only the number: What is 13 + 8?","answer":"21"}
+{"id":"eval-02","prompt":"Answer with only the number: What is 9 times 6?","answer":"54"}
+{"id":"eval-03","prompt":"Answer with only the number: What is 30 minus 17?","answer":"13"}
+{"id":"eval-04","prompt":"Answer with only the number: What is 48 divided by 6?","answer":"8"}
+{"id":"eval-05","prompt":"Answer with only one word: What is the capital of Japan?","answer":"Tokyo"}
+{"id":"eval-06","prompt":"Answer with only one word: Which planet is called the Red Planet?","answer":"Mars"}
+{"id":"eval-07","prompt":"Answer with only one word: Is 29 even or odd?","answer":"odd"}
+{"id":"eval-08","prompt":"Answer with only one word: What is the chemical symbol for gold?","answer":"Au"}
+{"id":"eval-09","prompt":"Answer with only the number: What is 5 cubed?","answer":"125"}
+{"id":"eval-10","prompt":"Answer with only one word: What language is primarily spoken in Brazil?","answer":"Portuguese"}
+{"id":"eval-11","prompt":"Answer with only the number: What is 7 plus 15?","answer":"22"}
+{"id":"eval-12","prompt":"Answer with only one word: Is 51 divisible by 3?","answer":"yes"}
