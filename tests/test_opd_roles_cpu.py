@@ -157,7 +157,17 @@ def test_reward_fn_not_allowed():
                    reward_fn=lambda _: 1, loss_fn=lambda *a: None)
 
 
-def test_training_still_fails_explicitly():
-    trainer = make_trainer(FakeBackend())
-    with pytest.raises(NotImplementedError, match="Stage 3"):
-        trainer.fit()
+def test_fit_manages_roles_and_cleanup(monkeypatch):
+    backend = FakeBackend()
+    trainer = make_trainer(backend)
+    called = []
+
+    def fake_fit_initialized():
+        assert trainer._roles_ready
+        called.append(True)
+
+    monkeypatch.setattr(trainer, "_fit_initialized", fake_fit_initialized)
+    trainer.fit()
+    assert called == [True]
+    assert backend.events == ["student_init", "teacher_init", "close"]
+    assert not trainer._roles_ready
