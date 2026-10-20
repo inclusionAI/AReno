@@ -88,7 +88,23 @@ def opd_loss_fn(
     raw_log_ratio = current - old
     safe_log_ratio = raw_log_ratio.clamp(-max_log_ratio, max_log_ratio)
     ratio = safe_log_ratio.exp()
-    policy_loss = -opd_coef * masked_mean(ratio * advantage, layout)
+    # Optional backend annotations correct microbatch weighting when batches
+    # contain different numbers of response tokens. By default this remains
+    # the original local token-mean loss (standalone use is unchanged).
+    weighted_sum = (ratio * advantage * response_mask.to(logprobs.dtype)).sum()
+    total_group_tokens = data_pack.get("_opd_total_response_tokens")
+    if total_group_tokens is None:
+        policy_loss = -opd_coef * weighted_sum / num_tokens.to(logprobs.dtype)
+    else:
+        total_group_tokens = int(total_group_tokens)
+        group_size = int(data_pack.get("_opd_grad_scale", 1))
+        if total_group_tokens <= 0 or group_size <= 0:
+            raise ValueError("OPD accumulation normalization must be positive")
+        if total_group_tokens < int(num_tokens.item()):
+            raise ValueError("OPD global response token count smaller than local count")
+        policy_loss = (
+            -opd_coef * weighted_sum * group_size / total_group_tokens
+        )
 
     valid_ratio = ratio[response_mask]
     stats = {

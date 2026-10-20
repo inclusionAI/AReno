@@ -29,6 +29,7 @@ from areno.api.backend.base import Backend, register_backend
 from areno.api.config import ArenoConfig
 from areno.api.context import Context
 from areno.api.loss_fns.sft import sft_loss_fn
+from areno.api.loss_fns.opd import opd_loss_fn
 from areno.api.models import BackendType, RolloutResult, RolloutSequence, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
 
@@ -534,7 +535,9 @@ class ArenoBackend(Backend):
         # forward worker can call it without having to know about the loss API.
         packs = []
         is_sft = _is_sft_loss_fn(loss_fn)
+        is_opd = _is_opd_loss_fn(loss_fn)
         sft_target_counts = [] if is_sft else None
+        opd_response_counts = [] if is_opd else None
         for start in range(0, len(batch_data), mini_bs):
             seqs = batch_data[start : start + mini_bs]
             pack = _make_train_pack(seqs)
@@ -542,10 +545,18 @@ class ArenoBackend(Backend):
             packs.append(pack)
             if is_sft:
                 sft_target_counts.append(_sft_target_token_count(seqs))
+            if is_opd:
+                opd_response_counts.append(_opd_response_token_count(pack))
         if is_sft:
             _annotate_sft_token_mean_packs(
                 packs,
                 sft_target_counts,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+            )
+        if is_opd:
+            _annotate_opd_token_mean_packs(
+                packs,
+                opd_response_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
@@ -796,6 +807,60 @@ def _is_sft_loss_fn(loss_fn: Callable) -> bool:
     """Return true for the built-in SFT loss, including simple partial wrappers."""
 
     return loss_fn is sft_loss_fn or getattr(loss_fn, "func", None) is sft_loss_fn
+
+
+
+def _is_opd_loss_fn(loss_fn: Callable) -> bool:
+    """Recognize the built-in OPD loss (including registry-bound partials).
+
+    Custom user losses keep the existing generic microbatch normalization.
+    """
+    from functools import partial
+
+    while isinstance(loss_fn, partial):
+        loss_fn = loss_fn.func
+    return loss_fn is opd_loss_fn
+
+
+def _opd_response_token_count(pack: dict) -> int:
+    """Count only next-token response sites, respecting explicit loss masks."""
+    active = ~pack["prompt_mask"][:, 1:]
+    if "loss_mask" in pack:
+        active = active & pack["loss_mask"][:, 1:]
+    return int(active.sum().item())
+
+
+def _annotate_opd_token_mean_packs(
+    packs: list[dict],
+    response_counts: list[int],
+    *,
+    gradient_accumulation_steps: int | None,
+) -> None:
+    """Normalize OPD over response tokens per optimizer accumulation group.
+
+    TrainingManager always divides every microbatch loss by group_size before
+    backward. The OPD loss multiplies by group_size and divides by the total
+    number of active response tokens in the group, so splitting examples into
+    uneven mini-batches cannot silently change the update direction/scale.
+    """
+    if len(packs) != len(response_counts):
+        raise ValueError("OPD packs and response token counts must align")
+    if not packs:
+        return
+    accumulation_steps = (
+        len(packs)
+        if gradient_accumulation_steps is None
+        else max(int(gradient_accumulation_steps), 1)
+    )
+    for start in range(0, len(packs), accumulation_steps):
+        end = min(start + accumulation_steps, len(packs))
+        total_tokens = sum(response_counts[start:end])
+        if total_tokens <= 0:
+            raise ValueError("OPD optimizer group contains no response tokens")
+        group_size = end - start
+        for pack in packs[start:end]:
+            pack["_opd_total_response_tokens"] = total_tokens
+            pack["_opd_grad_scale"] = group_size
 
 
 def _annotate_sft_token_mean_packs(
