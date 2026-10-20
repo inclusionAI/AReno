@@ -17,6 +17,7 @@ from typing import Literal
 from areno.adapters.config import LoraConfig
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 
+import math
 
 @dataclass(slots=True)
 class TrainerConfig:
@@ -330,7 +331,31 @@ class RolloutTrainerConfig(TrainerConfig):
             reference_mode=self.reference_mode,
         )
 
+@dataclass(slots=True)
+class OPDTrainerConfig(RolloutTrainerConfig):
+    """Configuration for on-policy distillation."""
 
+    teacher_ckpt: str | None = None
+    opd_coef: float = 1.0
+
+    def __post_init__(self) -> None:
+        super(OPDTrainerConfig, self).__post_init__()
+
+        if (
+            not self.teacher_ckpt
+            or not self.teacher_ckpt.strip()
+        ):
+            raise ValueError(
+                "--teacher-ckpt is required for --algo opd"
+            )
+
+        if (
+            not math.isfinite(self.opd_coef)
+            or self.opd_coef <= 0
+        ):
+            raise ValueError(
+                "--opd-coef must be a finite positive number"
+            )
 @dataclass(slots=True)
 class PolicyTrainerConfig(RolloutTrainerConfig):
     """Reward-driven policy trainer configuration for GSPO/GRPO."""

@@ -52,6 +52,11 @@ def resolve_model_refs_for_config(config: ConfigT) -> ConfigT:
     algo = str(getattr(config, "algo", "")).lower()
     if algo == "dpo" and getattr(config, "ref_ckpt", None) is not None:
         config.ref_ckpt = resolve_model_ref(config.ref_ckpt, cache, model_hub=model_hub)
+    if algo == "opd":
+        config.teacher_ckpt = resolve_model_ref(
+            config.teacher_ckpt,
+            cache,
+            model_hub=model_hub,)
     if algo == "ppo":
         if getattr(config, "ref_ckpt", None) is not None:
             config.ref_ckpt = resolve_model_ref(config.ref_ckpt, cache, model_hub=model_hub)
