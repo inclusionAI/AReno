@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
+from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, opd_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
 from areno.api.trainer_config import TrainerConfig
 
 
@@ -30,6 +30,7 @@ class AlgorithmSpec:
     trainer_cls: type | TrainerFactory
     default_loss_fn: Callable
     requires_rollout: bool
+    requires_reward: bool = False
     loss_fn_factory: LossFnFactory | None = None
     experimental: bool = False
 
@@ -58,18 +59,22 @@ def register_algorithm(spec: AlgorithmSpec, *, replace: bool = False) -> None:
     Duplicate registration is rejected by default so plugin import-order bugs
     fail loudly instead of silently changing the trainer used by a run.
     """
-
     name = spec.name.strip().lower()
     if not name:
         raise ValueError("algorithm name must be non-empty")
     if name in _ALGORITHMS and not replace:
         raise ValueError(f"algorithm {name!r} is already registered")
+    if spec.requires_reward and not spec.requires_rollout:
+        raise ValueError(
+            "algorithms that require reward must also require rollout"
+        )
     if name != spec.name:
         spec = AlgorithmSpec(
             name=name,
             trainer_cls=spec.trainer_cls,
             default_loss_fn=spec.default_loss_fn,
             requires_rollout=spec.requires_rollout,
+            requires_reward=spec.requires_reward,
             loss_fn_factory=spec.loss_fn_factory,
             experimental=spec.experimental,
         )
@@ -150,7 +155,17 @@ def _bind_grpo_loss(config: TrainerConfig, loss_fn: Callable) -> Callable:
 
     return partial(loss_fn, clip_eps=getattr(config, "grpo_clip_eps"))
 
+def _bind_opd_loss(
+    config: TrainerConfig,
+    loss_fn: Callable,
+) -> Callable:
+    from functools import partial
 
+    return partial(
+        loss_fn,
+        opd_coef=config.opd_coef,
+    )
+    
 def _register_builtin_algorithms() -> None:
     register_algorithm(
         AlgorithmSpec(
@@ -174,6 +189,7 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_policy_trainer,
             default_loss_fn=gspo_loss_fn,
             requires_rollout=True,
+            requires_reward=True,
             loss_fn_factory=_bind_gspo_loss,
         )
     )
@@ -183,6 +199,7 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_policy_trainer,
             default_loss_fn=grpo_loss_fn,
             requires_rollout=True,
+            requires_reward=True,
             loss_fn_factory=_bind_grpo_loss,
         )
     )
@@ -192,9 +209,25 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_ppo_trainer,
             default_loss_fn=ppo_loss_fn,
             requires_rollout=True,
+            requires_reward=True,
         )
     )
+    register_algorithm(
+    AlgorithmSpec(
+        name="opd",
+        trainer_cls=_load_opd_trainer,
+        default_loss_fn=opd_loss_fn,
+        requires_rollout=True,
+        requires_reward=False,
+        loss_fn_factory=_bind_opd_loss,
+        experimental=True,
+    )
+)
 
+def _load_opd_trainer() -> type:
+    from areno.api.trainers.opd import OPDTrainer
+
+    return OPDTrainer
 
 _register_builtin_algorithms()
 

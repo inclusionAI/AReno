@@ -16,5 +16,6 @@ from areno.api.loss_fns.grpo import grpo_loss_fn
 from areno.api.loss_fns.gspo import gspo_loss_fn
 from areno.api.loss_fns.ppo import ppo_loss_fn
 from areno.api.loss_fns.sft import sft_loss_fn
+from areno.api.loss_fns.opd import opd_loss_fn
 
 __all__ = ["dpo_loss_fn", "grpo_loss_fn", "gspo_loss_fn", "ppo_loss_fn", "sft_loss_fn"]
