@@ -15,6 +15,17 @@ from areno.accel._extension import extension as _extension
 from areno.accel.utils import on_kernel_device
 
 
+def _grouped_forward(x, weight, counts):
+    if x.device.type == "cuda" and x.dtype in (torch.float16, torch.bfloat16):
+        from areno.accel.kernels.grouped_linear import grouped_linear
+
+        return grouped_linear(x, weight, counts)
+    native = _extension(x.device)
+    if isinstance(counts, torch.Tensor):
+        return native.areno_grouped_linear_forward_counts(x.contiguous(), weight.contiguous(), counts.contiguous())
+    return native.areno_grouped_linear_forward(x.contiguous(), weight.contiguous(), counts)
+
+
 class _Linear(torch.autograd.Function):
     """Autograd glue for the fused dense linear projection."""
 
@@ -75,7 +86,7 @@ class _GroupedLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, tokens_per_expert: list[int]) -> torch.Tensor:
         counts = [int(count) for count in tokens_per_expert]
-        out = _extension(x.device).areno_grouped_linear_forward(x.contiguous(), weight.contiguous(), counts)
+        out = _grouped_forward(x, weight, counts)
         ctx.save_for_backward(x, weight)
         ctx.tokens_per_expert = counts
         return out
@@ -100,9 +111,7 @@ class _GroupedLinearCounts(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
-        out = _extension(x.device).areno_grouped_linear_forward_counts(
-            x.contiguous(), weight.contiguous(), tokens_per_expert.contiguous()
-        )
+        out = _grouped_forward(x, weight, tokens_per_expert)
         ctx.save_for_backward(x, weight, tokens_per_expert)
         return out
 

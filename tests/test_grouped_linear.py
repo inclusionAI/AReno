@@ -32,6 +32,14 @@ SHAPES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def full_precision_reductions(monkeypatch):
+    # Match the worker runtime: a low-precision cuBLAS partial reduction is
+    # not an FP32 accumulation oracle, even for exactly representable inputs.
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction", False)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction", False)
+
+
 @pytest.fixture(scope="module")
 def cpu_native(tmp_path_factory):
     if shutil.which(get_cxx_compiler()) is None:
@@ -248,6 +256,84 @@ def test_grouped_cuda_graph_replays_list_counts(backend, dtype):
         results = native_calls(native, input, weight, counts, grad)
     for sign in (1, -1, 1):
         input.copy_(x * sign)
+        graph.replay()
+        for actual, expected in zip(results, reference(x * sign, w, counts, g), strict=True):
+            torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GEMM reduction precision requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_grouped_cuda_chunking_preserves_cancelling_partial_sums(dtype):
+    # Low-precision partial reductions can lose the middle contribution, even
+    # though every input and the final result are exactly representable.
+    row = torch.cat((torch.full((512,), 512.0), torch.ones(512), torch.full((512,), -512.0)))
+    states = row.repeat(513, 1).to(device="cuda", dtype=dtype)
+    weight = torch.ones(1, 257, 1536, device="cuda", dtype=dtype)
+    expected = torch.full((513, 257), 512.0, device="cuda", dtype=dtype)
+    for chunk_size in (513, 256, 16):
+        output = torch.cat(
+            [areno_grouped_linear(chunk, weight, [chunk.shape[0]]) for chunk in states.split(chunk_size)], dim=0
+        )
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA grouped projection requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("counts,k,n", SHAPES)
+@pytest.mark.parametrize("tensor_counts", [False, True])
+def test_grouped_cuda_public_forward_matches_fp64(dtype, counts, k, n, tensor_counts):
+    input = values((sum(counts), k), dtype).cuda()
+    weight = values((len(counts), n, k), dtype, seed=41).cuda()
+    groups = torch.tensor(counts, dtype=torch.int32, device="cuda") if tensor_counts else counts
+    output = areno_grouped_linear(input, weight, groups)
+    expected, _, _ = reference(input.cpu(), weight.cpu(), counts, torch.ones_like(output).cpu())
+    torch.testing.assert_close(output.cpu(), expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA grouped projection requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_grouped_cuda_random_rows_are_independent_of_chunk_boundaries(dtype):
+    torch.manual_seed(83)
+    counts = [0, 19, 0, 263, 1, 0, 129]
+    input = torch.randn(sum(counts), 137, device="cuda", dtype=dtype)
+    weight = torch.randn(len(counts), 65, 137, device="cuda", dtype=dtype)
+    expected = areno_grouped_linear(input, weight, counts)
+    for chunk_size in (1, 17, 256):
+        parts = []
+        for begin in range(0, input.shape[0], chunk_size):
+            end = min(begin + chunk_size, input.shape[0])
+            offset, groups = 0, []
+            for count in counts:
+                groups.append(max(0, min(end, offset + count) - max(begin, offset)))
+                offset += count
+            parts.append(areno_grouped_linear(input[begin:end], weight, groups))
+        torch.testing.assert_close(torch.cat(parts), expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_grouped_cuda_public_graph_replays_list_counts(dtype):
+    counts = [2, 0, 3]
+    x, w, g = values((5, 17), dtype), values((3, 65, 17), dtype, seed=41), values((5, 65), dtype, seed=43)
+    input, weight = x.cuda().requires_grad_(), w.cuda().requires_grad_()
+    grad = g.cuda()
+
+    def compute():
+        output = areno_grouped_linear(input, weight, counts)
+        return output, *torch.autograd.grad(output, (input, weight), grad)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            compute()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        results = compute()
+    for sign in (1, -1, 1):
+        with torch.no_grad():
+            input.copy_(x * sign)
         graph.replay()
         for actual, expected in zip(results, reference(x * sign, w, counts, g), strict=True):
             torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)

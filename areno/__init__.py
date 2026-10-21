@@ -24,9 +24,14 @@ def _configure_torch_runtime() -> None:
     """Apply CUDA runtime defaults only when a Torch-backed API is requested."""
 
     try:
+        import torch
         import torch._dynamo as dynamo
     except ModuleNotFoundError:
         return
+    # Keep reductions in FP32 when mini-sequence shapes select different
+    # low-precision GEMM algorithms, in both rollout and training workers.
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     # Train, prefill, decode, scoring and multiple shape buckets all produce
     # distinct compiled artifacts; raise the cache limits so recompilation does
     # not evict graphs that will be replayed across RL steps.

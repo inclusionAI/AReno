@@ -117,13 +117,11 @@ def nf4_linear(x, quantized, bias=None):
 class _NF4GroupedLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, quantized, counts):
-        from areno.accel._extension import extension
+        from areno.accel.linear import _grouped_forward
 
         ctx.quantized, ctx.input_shape = quantized, x.shape
         ctx.save_for_backward(counts)
-        return extension(x.device).areno_grouped_linear_forward_counts(
-            x.contiguous(), quantized.dequantize(), counts.contiguous()
-        )
+        return _grouped_forward(x, quantized.dequantize(), counts)
 
     @staticmethod
     def backward(ctx, grad):

@@ -1069,14 +1069,12 @@ def _options(**overrides):
 def test_train_cli_passes_mst_budget_and_restores_environment(monkeypatch, fraction):
     import os
 
-    from areno.engine.runtime.mst import _AdaptiveChunks
-
     seen = []
     monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.33")
     monkeypatch.setattr(train_cli, "_trainer_config_from_options", lambda **kwargs: object())
 
     def run(config, options):
-        seen.append(_AdaptiveChunks(None, 1024, 8192).memory_fraction)
+        seen.append(float(os.environ["ARENO_MST_MEM_FRAC"]))
         raise RuntimeError("test exit")
 
     monkeypatch.setattr(train_cli, "_run_train_command", run)

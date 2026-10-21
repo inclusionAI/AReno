@@ -5,6 +5,7 @@ Every comparison uses packed rows (including a one-token row), a ragged final
 chunk, a signed loss, and all participating parameter gradients.
 """
 
+import copy
 import json
 
 import pytest
@@ -14,6 +15,7 @@ from areno.engine.config import ModelConfig
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
 from areno.engine.runtime.logprobs import packed_next_token_logprobs, packed_next_token_logprobs_from_hidden
 from areno.engine.runtime.metadata import TrainMeta
+from areno.engine.runtime.mst import mini_sequence_forward
 from areno.models.registry import build_model
 
 FAMILIES = (
@@ -280,6 +282,29 @@ def test_mst_model_forward_and_gradients_cuda(family, dtype, record_property):
 )
 def test_native_lora_mst_forward_and_gradients_cuda(family, dtype, qlora, record_property):
     _check_model_forward_and_gradients(family, dtype, record_property, lora=True, qlora=qlora)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA dropout RNG replay requires CUDA")
+def test_mst_stochastic_forward_and_backward_cuda():
+    torch.manual_seed(29)
+    block = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Dropout(0.3), torch.nn.Linear(8, 8)).cuda()
+    other = copy.deepcopy(block)
+    states = torch.randn(1, 23, 8, device="cuda", requires_grad=True)
+    actual_states = states.detach().clone().requires_grad_()
+    upstream = torch.randn_like(states)
+    torch.manual_seed(31)
+    expected = torch.cat([block(chunk) for chunk in states.split(5, dim=1)], dim=1)
+    reference = torch.autograd.grad(expected, (states, *block.parameters()), upstream)
+    expected_rng = torch.cuda.get_rng_state()
+    torch.manual_seed(31)
+    actual = mini_sequence_forward(other, actual_states, chunk_size=5)
+    actual_rng = torch.cuda.get_rng_state()
+    gradients = torch.autograd.grad(actual, (actual_states, *other.parameters()), upstream)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert torch.equal(actual_rng, expected_rng)
+    assert torch.equal(actual_rng, torch.cuda.get_rng_state())
+    for observed, target in zip(gradients, reference, strict=True):
+        torch.testing.assert_close(observed, target)
 
 
 def _check_model_forward_and_gradients(family, dtype, record_property, *, lora=False, qlora=False):

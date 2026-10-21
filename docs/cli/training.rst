@@ -339,6 +339,11 @@ in its description; flags for other algorithms are ignored.
    Enable decoder-layer activation recompute during training. Default:
    enabled.
 
+   Mini-sequence training executes token-independent MLP and expert blocks
+   with fixed chunk sizes in both forward and backward. Attention retains
+   the complete sequence, routing is computed once, and stochastic blocks
+   replay each chunk's RNG state. Chunk sizes do not adapt to memory pressure.
+
 ``--optimizer-state-offload [none|cpu|disk]``
    Select CUDA optimizer-state residency. ``none`` keeps state on the training
    device. ``cpu`` moves state to host memory between train calls. ``disk``

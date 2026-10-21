@@ -8,6 +8,18 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_torch_runtime_disables_reduced_precision_gemm_reductions_cpu(monkeypatch):
+    import torch
+
+    from areno import _configure_torch_runtime
+
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction", True)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction", True)
+    _configure_torch_runtime()
+    assert not torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+    assert not torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+
+
 def test_public_api_imports_do_not_load_engine_heavy_modules():
     """Public API imports stay on the lazy side of the engine/backend boundary."""
 
