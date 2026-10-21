@@ -378,6 +378,7 @@ def create_app(
     chat_template_enable_thinking: bool | None = None,
     lora: LoraConfig | None = None,
     base_model_name_or_path: str | None = None,
+    decision_checkpoint: str | None = None,
     mlx_quantize_bits: int | None = None,
     mlx_quantize_group_size: int = 64,
 ) -> FastAPI:
@@ -396,6 +397,22 @@ def create_app(
         if backend_type != MLX:
             raise ValueError("--q4 requires --backend mlx")
         validate_quantization(mlx_quantize_bits, mlx_quantize_group_size)
+    if decision_checkpoint is not None:
+        if backend_type != MLX or tp_size != 1 or world_size != 1:
+            raise ValueError("JEV serving currently requires --backend mlx --tp-size 1 --world-size 1")
+        if lora is not None:
+            raise ValueError("--decision-checkpoint includes its LoRA; do not combine with separate LoRA options")
+        from areno.api.jev.serve import create_decision_app
+
+        return create_decision_app(
+            model_path,
+            decision_checkpoint,
+            **(
+                {"quantization_bits": mlx_quantize_bits, "quantization_group_size": mlx_quantize_group_size}
+                if mlx_quantize_bits is not None
+                else {}
+            ),
+        )
     tokenizer = load_tokenizer(model_path)
     processor = load_processor(model_path)
     configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
@@ -1013,7 +1030,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
 @click.command(
     name="serve",
     context_settings={"help_option_names": ["-h", "--help"]},
-    help="Serve an OpenAI-compatible /v1/chat/completions API with areno.",
+    help="Serve chat completions or typed JEV decisions with areno.",
 )
 @click.option("--model-path", required=True, help="Local checkpoint/tokenizer path or remote model repo ID.")
 @click.option(
@@ -1081,6 +1098,12 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter to serve.")
+@click.option(
+    "--decision-checkpoint",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="JEV checkpoint containing LoRA, decision head and calibration; serves typed decisions on MLX.",
+)
 @click.option("--backend", type=click.Choice(["cuda", "mlx", "npu"]), default=None)
 def serve_command(
     backend: str | None,
@@ -1103,6 +1126,7 @@ def serve_command(
     lora_dropout: float,
     lora_target_modules: str,
     lora_adapter_path: str | None,
+    decision_checkpoint: str | None,
     q4: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
@@ -1154,6 +1178,7 @@ def serve_command(
         chat_template_enable_thinking=False if disable_thinking else None,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
+        decision_checkpoint=decision_checkpoint,
         mlx_quantize_bits=4 if q4 else None,
         mlx_quantize_group_size=64,
     )

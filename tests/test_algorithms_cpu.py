@@ -22,7 +22,7 @@ class AlgorithmRegistryTest(unittest.TestCase):
         """Built-ins should expose rollout and role requirements in one place."""
         algorithms = list_algorithms(include_experimental=False)
 
-        self.assertEqual(set(algorithms), {"dpo", "grpo", "gspo", "ppo", "sft"})
+        self.assertEqual(set(algorithms), {"dpo", "grpo", "gspo", "ppo", "sft", "jev"})
         self.assertFalse(algorithms["sft"].requires_rollout)
         self.assertTrue(algorithms["gspo"].requires_rollout)
         self.assertIs(algorithms["ppo"].default_loss_fn, ppo_loss_fn)

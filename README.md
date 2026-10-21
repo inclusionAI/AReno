@@ -35,6 +35,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
 - 🗜️ **QLoRA**: train Qwen3 dense and Bailing-MoE V3 adapters on CUDA with NF4 weights, double quantization, and paged optimizers.
+- 🎯 **JEV**: jointly train a model-independent decision head and backbone LoRA, then serve typed `choice`, `noul`, and `score` decisions.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation

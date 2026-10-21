@@ -943,8 +943,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             lora=lora,
             reference_mode=args.reference_mode,
         )
-    if algorithm.name == "sft":
-        return TrainerConfig(
+    if algorithm.name in {"sft", "jev"}:
+        config = TrainerConfig(
             algo=algorithm.name,
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
@@ -1002,6 +1002,11 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             lora=lora,
             reference_mode=args.reference_mode,
         )
+        if algorithm.name == "jev":
+            from areno.api.jev import JevTrainerConfig
+
+            return JevTrainerConfig(**{field.name: getattr(config, field.name) for field in fields(config)})
+        return config
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
             algo=algorithm.name,
@@ -1541,7 +1546,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     cls=GroupedOptionsCommand,
     option_groups=TRAIN_OPTION_GROUPS,
     context_settings={"help_option_names": ["-h", "--help"]},
-    help="Run SFT, DPO, GSPO, GRPO, or PPO training with the areno backend.",
+    help="Run a registered training algorithm with the areno backend.",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")

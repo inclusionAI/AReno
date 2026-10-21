@@ -1104,3 +1104,31 @@ def test_q4_cli_selects_online_quantization_for_mlx(tmp_path):
     )
     assert config.backend_config().quantization_bits == 4
     assert config.backend_config().quantization_group_size == 64
+
+
+@pytest.mark.parametrize("q4", [False, True])
+def test_jev_cli_uses_offline_decision_config_and_joint_lora(tmp_path, q4):
+    from areno.api.jev import JevMlxConfig, JevTrainerConfig
+
+    loader = tmp_path / "custom_jev_loader.py"
+    loader.write_text("def load_training_dataset(path, **kwargs):\n    return []\n")
+    config = _trainer_config_from_options(
+        **_options(
+            algo="jev",
+            q4=q4,
+            backend="mlx",
+            world_size=1,
+            tp_size=1,
+            save_path="runs/jev",
+            dataset_loader_fn=str(loader),
+            lora_rank=32,
+            lora_alpha=64,
+            reward_fn_path=None,
+            reward_ckpt=None,
+        )
+    )
+    assert isinstance(config, JevTrainerConfig)
+    assert isinstance(config.backend_config(), JevMlxConfig)
+    assert config.lora.rank == 32
+
+    assert config.backend_config().quantization_bits == (4 if q4 else None)

@@ -59,7 +59,7 @@ class MlxBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
         )
@@ -94,6 +94,8 @@ class MlxBackend(Backend):
             quantization = requested
         if quantization is not None:
             provider_kwargs["quantization"] = quantization
+        if getattr(self.config, "decision_head", False):
+            provider_kwargs["text_only"] = True
         self.provider = load_provider(model_path, **provider_kwargs)
         if not self.config.inference_only:
             from areno.api.backend.mlx.gated_delta import install_parallel_gated_delta
@@ -141,6 +143,10 @@ class MlxBackend(Backend):
         )
         if self.config.gradient_checkpointing:
             self._enable_gradient_checkpointing()
+        if getattr(self.config, "decision_head", False):
+            from areno.api.backend.mlx.decision import initialize_head
+
+            initialize_head(self)
         self.model.train()
         mx.eval(self.model.parameters(), self.optimizer.state)
 
@@ -263,6 +269,12 @@ class MlxBackend(Backend):
         from mlx.utils import tree_map
 
         spec = describe_loss_fn(loss_fn)
+        if spec.name == "jev":
+            from areno.api.backend.mlx.decision import train_questions
+            from areno.api.backend.mlx.training import training_allocator_cache
+
+            with training_allocator_cache():
+                return train_questions(self, ctx, batch_data, mini_bs=mini_bs, **spec.kwargs)
         microbatches = train_microbatches(batch_data, mini_bs)
         accumulation = accumulation_steps(len(microbatches), gradient_accumulation_steps)
 
@@ -359,6 +371,10 @@ class MlxBackend(Backend):
             from areno.api.backend.mlx.quantization import METADATA_FILE
 
             (Path(path) / METADATA_FILE).write_text(json.dumps(quantization, indent=2) + "\n")
+        if getattr(self.config, "decision_head", False):
+            from areno.api.backend.mlx.decision import save_head
+
+            save_head(self, path)
         return result
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:

@@ -20,6 +20,9 @@ NPU = BackendType.NPU
 DefaultBackend = default_backend_type()
 
 _LAZY_EXPORTS = {
+    "JevMlxConfig": ("areno.api.jev", "JevMlxConfig"),
+    "JevTrainerConfig": ("areno.api.jev", "JevTrainerConfig"),
+    "DecisionScorer": ("areno.api.jev.scorer", "DecisionScorer"),
     "AgentBatch": ("areno.api.agentic", "AgentBatch"),
     "AgentItem": ("areno.api.agentic", "AgentItem"),
     "AgentTrainBatch": ("areno.api.agentic", "AgentTrainBatch"),
@@ -41,6 +44,7 @@ _LAZY_EXPORTS = {
     "get_algorithm": ("areno.api.algorithms", "get_algorithm"),
     "grpo_loss_fn": ("areno.api.algorithms", "grpo_loss_fn"),
     "gspo_loss_fn": ("areno.api.algorithms", "gspo_loss_fn"),
+    "jev_loss_fn": ("areno.api.algorithms", "jev_loss_fn"),
     "list_algorithms": ("areno.api.algorithms", "list_algorithms"),
     "ppo_loss_fn": ("areno.api.algorithms", "ppo_loss_fn"),
     "register_algorithm": ("areno.api.algorithms", "register_algorithm"),
@@ -60,6 +64,9 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "Trainer",
+    "JevMlxConfig",
+    "JevTrainerConfig",
+    "DecisionScorer",
     "AlgorithmSpec",
     "CudaConfig",
     "MlxConfig",
@@ -92,4 +99,5 @@ __all__ = [
     "grpo_loss_fn",
     "ppo_loss_fn",
     "sft_loss_fn",
+    "jev_loss_fn",
 ]

@@ -39,12 +39,12 @@ _PROJECTOR_PARTS = {
 
 
 def load_provider(
-    model_path: str, *, adapter_path: str | None = None, quantization: dict | None = None
+    model_path: str, *, adapter_path: str | None = None, text_only: bool = False, quantization: dict | None = None
 ) -> MlxModelProvider:
     """Load one text or multimodal MLX policy from a HuggingFace checkpoint."""
 
     config = _checkpoint_config(model_path)
-    if _is_multimodal_config(config):
+    if _is_multimodal_config(config) and not text_only:
         if quantization is not None:
             raise ValueError("online quantization currently requires a text-only MLX provider")
         return MlxVlmProvider.load(model_path, config=config, adapter_path=adapter_path)
@@ -143,8 +143,21 @@ class MlxModelProvider:
         body = getattr(self.model, "model", None)
         if body is None or not callable(body):
             raise RuntimeError(f"{type(self.model).__name__} does not expose a callable hidden-state model body")
-        output = body(batch["input_ids"])
+        kwargs = {"cache": batch["cache"]} if "cache" in batch else {}
+        output = body(batch["input_ids"], **kwargs)
         return output[0] if isinstance(output, tuple) else output
+
+    def pooled_candidate_hidden_states(self, token_rows: list[list[int]]):
+        """Gather each candidate's last valid hidden state without generating text."""
+        import mlx.core as mx
+
+        lengths = [len(row) for row in token_rows]
+        tokens = np.zeros((len(token_rows), max(lengths)), dtype=np.int32)
+        for index, row in enumerate(token_rows):
+            tokens[index, : len(row)] = row
+        batch = self.prepare_score_batch(mx.array(tokens), lengths, None)
+        hidden = self.forward_hidden_states(batch)
+        return hidden[mx.arange(len(token_rows)), mx.array(lengths) - 1]
 
     def save(self, destination: Path) -> None:
         from mlx_lm.utils import save_config, save_model
@@ -156,6 +169,35 @@ class MlxModelProvider:
 
 class MlxLmProvider(MlxModelProvider):
     """MLX-LM provider for text-only checkpoints."""
+
+    def pooled_candidate_hidden_states(self, token_rows: list[list[int]]):
+        # Inference can prefill the shared state/question once. Cache handling
+        # belongs to the provider, so the decision algorithm remains independent
+        # of backbone family and of attention/recurrent cache representations.
+        if self.model.training or not callable(getattr(self.model, "make_cache", None)):
+            return super().pooled_candidate_hidden_states(token_rows)
+        import mlx.core as mx
+
+        prefix_length = 0
+        for position in range(min(map(len, token_rows)) - 1):
+            if len({row[position] for row in token_rows}) != 1:
+                break
+            prefix_length += 1
+        if not prefix_length:
+            return super().pooled_candidate_hidden_states(token_rows)
+        cache = self.model.make_cache()
+        if not cache or any(not callable(getattr(layer, "merge", None)) for layer in cache):
+            return super().pooled_candidate_hidden_states(token_rows)
+        prefix = self.forward_hidden_states({"input_ids": mx.array([token_rows[0][:prefix_length]]), "cache": cache})
+        mx.eval(prefix, [layer.state for layer in cache])
+        branched = [layer.merge([layer] * len(token_rows)) for layer in cache]
+        suffixes = [row[prefix_length:] for row in token_rows]
+        lengths = [len(row) for row in suffixes]
+        tokens = np.zeros((len(token_rows), max(lengths)), dtype=np.int32)
+        for index, row in enumerate(suffixes):
+            tokens[index, : len(row)] = row
+        hidden = self.forward_hidden_states({"input_ids": mx.array(tokens), "cache": branched})
+        return hidden[mx.arange(len(token_rows)), mx.array(lengths) - 1]
 
     @classmethod
     def load(
