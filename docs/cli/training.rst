@@ -339,6 +339,9 @@ in its description; flags for other algorithms are ignored.
    Enable decoder-layer activation recompute during training. Default:
    enabled.
 
+   Supported CUDA training paths use fixed MST recomputation chunks of 256
+   tokens by default. Chunk sizes do not adapt to memory pressure.
+
 ``--optimizer-state-offload [none|cpu|disk]``
    Select CUDA optimizer-state residency. ``none`` keeps state on the training
    device. ``cpu`` moves state to host memory between train calls. ``disk``

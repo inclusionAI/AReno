@@ -1576,7 +1576,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     type=float,
     default=0.9,
     show_default=True,
-    help="Target memory fraction for adaptive MST and --tune-params probing.",
+    help="Target memory fraction for CUDA allocation and --tune-params probing.",
 )
 @click.option(
     "--tune-max-samples",
