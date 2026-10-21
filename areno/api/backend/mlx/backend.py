@@ -81,7 +81,24 @@ class MlxBackend(Backend):
 
         self.config = config
         model_path = self.config.model_path or ctx.model_path
-        self.provider = load_provider(model_path, adapter_path=self.config.adapter_path)
+        provider_kwargs = {"adapter_path": self.config.adapter_path}
+        from areno.api.backend.mlx.quantization import adapter_quantization
+
+        quantization = None
+        if self.config.lora is not None and self.config.lora.adapter_path:
+            quantization = adapter_quantization(self.config.lora.adapter_path)
+        if self.config.quantization_bits is not None:
+            requested = {"bits": self.config.quantization_bits, "group_size": self.config.quantization_group_size}
+            if quantization and any(requested[k] != quantization[k] for k in requested):
+                raise ValueError("online quantization conflicts with the adapter's saved quantization")
+            quantization = requested
+        if quantization is not None:
+            provider_kwargs["quantization"] = quantization
+        self.provider = load_provider(model_path, **provider_kwargs)
+        if not self.config.inference_only:
+            from areno.api.backend.mlx.gated_delta import install_parallel_gated_delta
+
+            install_parallel_gated_delta()
         self.model = self.provider.model
         self.tokenizer = self.provider.tokenizer
         self.processor = self.provider.processor
@@ -93,9 +110,13 @@ class MlxBackend(Backend):
             # A unified rollout/training process cannot let Metal retain all
             # temporary generation buffers for reuse across the phase change.
             mx.set_cache_limit(0)
-        if self.model_config.get("quantization") is not None:
+        if (
+            self.model_config.get("quantization") is not None
+            and self.config.lora is None
+            and not self.config.inference_only
+        ):
             raise ValueError(
-                "MLX training requires a non-quantized checkpoint so saved weights remain loadable by Transformers"
+                "MLX training on a quantized base requires LoRA; full quantized-weight training is unsupported"
             )
         self._validate_tokenizer(ctx.tokenizer)
         optimizer_config = self.config.optimizer
@@ -229,6 +250,8 @@ class MlxBackend(Backend):
         """Apply native MLX gradients to the same model used for rollout."""
 
         self._require_runtime()
+        if self.config.inference_only:
+            raise RuntimeError("this MLX runtime is inference-only")
         if self._rollout_active:
             raise RuntimeError("cannot update MLX policy during an active rollout session")
         if not batch_data:
@@ -323,11 +346,20 @@ class MlxBackend(Backend):
         self._require_runtime()
         if self._lora_state is None:
             raise RuntimeError("export_adapter requires MLX LoRA")
-        return export_peft_adapter(
+        result = export_peft_adapter(
             self._lora_state,
             path,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path or ctx.model_path),
         )
+        quantization = self.model_config.get("areno_online_quantization")
+        if quantization is not None:
+            import json
+            from pathlib import Path
+
+            from areno.api.backend.mlx.quantization import METADATA_FILE
+
+            (Path(path) / METADATA_FILE).write_text(json.dumps(quantization, indent=2) + "\n")
+        return result
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         """Load PPO/DPO auxiliary roles with MLX-native modules."""

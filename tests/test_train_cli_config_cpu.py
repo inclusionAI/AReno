@@ -1082,3 +1082,25 @@ def test_train_cli_passes_mst_budget_and_restores_environment(monkeypatch, fract
     assert isinstance(result.exception, RuntimeError)
     assert seen == [0.9 if fraction is None else float(fraction)]
     assert os.environ["ARENO_MST_MEM_FRAC"] == "0.33"
+
+
+def test_q4_cli_selects_online_quantization_for_mlx(tmp_path):
+    loader = tmp_path / "custom_loader.py"
+    loader.write_text("def load_training_dataset(path, **kwargs):\n    return []\n")
+    config = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            backend="mlx",
+            world_size=1,
+            tp_size=1,
+            save_path="runs/online-quant",
+            dataset_loader_fn=str(loader),
+            lora_rank=32,
+            lora_alpha=64,
+            q4=True,
+            reward_fn_path=None,
+            reward_ckpt=None,
+        )
+    )
+    assert config.backend_config().quantization_bits == 4
+    assert config.backend_config().quantization_group_size == 64

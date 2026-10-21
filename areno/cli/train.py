@@ -137,6 +137,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "activation_checkpointing",
             "mtp_loss_scale",
             "lora_rank",
+            "q4",
             "qlora",
             "lora_alpha",
             "lora_dropout",
@@ -406,7 +407,17 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     _preflight_task_hooks(args, algorithm)
-    return _trainer_config_from_args(args)
+    config = _trainer_config_from_args(args)
+    bits = 4 if getattr(args, "q4", False) else None
+    if bits is not None:
+        from areno.api.backend.mlx.quantization import validate_quantization
+
+        if args.backend != "mlx":
+            raise click.UsageError("--q4 requires --backend mlx")
+        validate_quantization(bits, 64)
+    config.mlx_quantize_bits = bits
+    config.mlx_quantize_group_size = 64
+    return config
 
 
 def _require_positive_float(value: float, option_name: str) -> None:
@@ -1684,6 +1695,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--lr", type=float, default=1.0e-6, show_default=True, help="Policy optimizer learning rate.")
 @click.option("--qlora", is_flag=True, help="Enable native NF4 + double quantization + paged optimizer (CUDA).")
 @click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
+@click.option("--q4", is_flag=True, help="Load with MLX 4-bit online quantization; source weights stay unchanged.")
 @click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
 @click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")
 @click.option(

@@ -125,6 +125,7 @@ def test_invalid_structure_never_partially_injects(mutation):
         model.modules[path] = SimpleNamespace(weight=np.zeros((8, 8)))
     elif mutation == "quantized":
         module = _FakeQuantizedLinear(8, 8)
+        module.bits = 4
         module.weight = np.zeros((8, 8))
         model.modules[path] = module
     elif mutation == "outside":
@@ -139,11 +140,10 @@ def test_invalid_structure_never_partially_injects(mutation):
     assert not _FakeLoraLinear.events
 
 
-def test_quantized_checkpoint_rejected_even_when_targets_are_dense():
+def test_quantized_checkpoint_allows_dense_excluded_targets():
     model = _LingModel()
-    with pytest.raises(ValueError, match="QLoRA"):
-        _initialize(model, config={**MODEL_CONFIG, "quantization": {"bits": 4}})
-    assert not model.frozen
+    assert _initialize(model, config={**MODEL_CONFIG, "quantization": {"bits": 4}}).slots
+    assert model.frozen
 
 
 def test_target_with_no_applicable_layer_is_rejected():

@@ -83,10 +83,17 @@ class MlxConfig:
     logits_chunk_size: int = 4096
     compile_train_step: bool = True
     gradient_checkpointing: bool = True
+    quantization_bits: int | None = field(default=None, kw_only=True)
+    quantization_group_size: int = field(default=64, kw_only=True)
+    inference_only: bool = field(default=False, kw_only=True)
     lora: LoraConfig | None = None
     reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def __post_init__(self) -> None:
+        if self.quantization_bits is not None:
+            from areno.api.backend.mlx.quantization import validate_quantization
+
+            validate_quantization(self.quantization_bits, self.quantization_group_size)
         if self.lora is not None and self.lora.qlora:
             raise ValueError("QLoRA requires CUDA")
         if self.adapter_path is not None and self.lora is not None:

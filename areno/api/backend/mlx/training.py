@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
 
 from areno.api.backend.common import train_sequence_ids
 from areno.api.models import TrainSequence
+
+
+@contextmanager
+def training_allocator_cache():
+    """Reuse a bounded amount of freed Metal memory only during training."""
+    import mlx.core as mx
+
+    if not mx.metal.is_available():
+        yield
+        return
+    working_set = mx.device_info().get("max_recommended_working_set_size") or 16 * 1024**3
+    budget = min(512 * 1024**2, int(working_set) // 32)
+    previous = mx.set_cache_limit(budget)
+    try:
+        yield
+    finally:
+        mx.clear_cache()
+        mx.set_cache_limit(previous)
 
 
 def make_train_batch(rows: list[TrainSequence]) -> dict[str, Any]:

@@ -267,8 +267,13 @@ class _MlxServeRuntime:
         decode_progress_interval_s: float,
         lora: LoraConfig | None,
         base_model_name_or_path: str | None,
+        quantization_bits: int | None = None,
+        quantization_group_size: int = 64,
     ) -> None:
         config = MlxConfig(
+            quantization_bits=quantization_bits,
+            quantization_group_size=quantization_group_size,
+            inference_only=True,
             model_path=model_path,
             base_model_name_or_path=base_model_name_or_path,
             max_running_prompts=max_running_prompts,
@@ -326,6 +331,8 @@ def _create_serve_runtime(
     speculative_draft_tokens: int = 0,
     lora: LoraConfig | None,
     base_model_name_or_path: str | None,
+    quantization_bits: int | None = None,
+    quantization_group_size: int = 64,
 ) -> _CudaServeRuntime | _MlxServeRuntime:
     if backend_type == MLX:
         if world_size != 1 or tp_size != 1:
@@ -336,6 +343,11 @@ def _create_serve_runtime(
             decode_progress_interval_s=decode_progress_interval_s,
             lora=lora,
             base_model_name_or_path=base_model_name_or_path,
+            **(
+                {"quantization_bits": quantization_bits, "quantization_group_size": quantization_group_size}
+                if quantization_bits is not None
+                else {}
+            ),
         )
     del max_running_prompts
     return _CudaServeRuntime(
@@ -366,6 +378,8 @@ def create_app(
     chat_template_enable_thinking: bool | None = None,
     lora: LoraConfig | None = None,
     base_model_name_or_path: str | None = None,
+    mlx_quantize_bits: int | None = None,
+    mlx_quantize_group_size: int = 64,
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -376,6 +390,12 @@ def create_app(
         raise ValueError("world_size must be divisible by tp_size")
 
     backend_type = backend_type or default_backend_type()
+    if mlx_quantize_bits is not None:
+        from areno.api.backend.mlx.quantization import validate_quantization
+
+        if backend_type != MLX:
+            raise ValueError("--q4 requires --backend mlx")
+        validate_quantization(mlx_quantize_bits, mlx_quantize_group_size)
     tokenizer = load_tokenizer(model_path)
     processor = load_processor(model_path)
     configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
@@ -404,6 +424,11 @@ def create_app(
         speculative_draft_tokens=speculative_draft_tokens,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
+        **(
+            {"quantization_bits": mlx_quantize_bits, "quantization_group_size": mlx_quantize_group_size}
+            if mlx_quantize_bits is not None
+            else {}
+        ),
     )
     if backend_type == MLX:
         tokenizer = engine.tokenizer
@@ -1043,6 +1068,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
 @click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
+@click.option("--q4", is_flag=True, help="Load with MLX 4-bit online quantization; source weights stay unchanged.")
 @click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
 @click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")
 @click.option(
@@ -1077,6 +1103,7 @@ def serve_command(
     lora_dropout: float,
     lora_target_modules: str,
     lora_adapter_path: str | None,
+    q4: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
@@ -1127,6 +1154,8 @@ def serve_command(
         chat_template_enable_thinking=False if disable_thinking else None,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
+        mlx_quantize_bits=4 if q4 else None,
+        mlx_quantize_group_size=64,
     )
     uvicorn.run(app, host=host, port=port)
 

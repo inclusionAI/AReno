@@ -32,6 +32,8 @@ class TrainerConfig:
     backend: str | None = None
     base_model_name_or_path: str | None = field(default=None, kw_only=True)
     model_hub: str = "modelscope"
+    mlx_quantize_bits: int | None = field(default=None, kw_only=True)
+    mlx_quantize_group_size: int = field(default=64, kw_only=True)
     dataset_loader_fn: str | None = None
     save_path: str | None = None
     save_interval: int = 100
@@ -94,6 +96,12 @@ class TrainerConfig:
             self.backend = self.backend.lower()
         if self.backend not in {"cuda", "mlx", "npu"}:
             raise ValueError("backend must be one of: cuda, mlx, npu")
+        if self.mlx_quantize_bits is not None:
+            from areno.api.backend.mlx.quantization import validate_quantization
+
+            if self.backend != "mlx":
+                raise ValueError("MLX online quantization requires backend=mlx")
+            validate_quantization(self.mlx_quantize_bits, self.mlx_quantize_group_size)
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("adam_4bit and adam_8bit are mutually exclusive")
         if self.adam_4bit and self.backend not in {"cuda", "npu"}:
@@ -196,6 +204,8 @@ class TrainerConfig:
         from areno.api.config import MlxConfig
 
         return MlxConfig(
+            quantization_bits=self.mlx_quantize_bits,
+            quantization_group_size=self.mlx_quantize_group_size,
             base_model_name_or_path=self.base_model_name_or_path,
             optimizer=self.optimizer_config(),
             keep_rollout_state=self.keep_rollout_state,

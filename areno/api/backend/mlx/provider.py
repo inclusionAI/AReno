@@ -38,12 +38,18 @@ _PROJECTOR_PARTS = {
 }
 
 
-def load_provider(model_path: str, *, adapter_path: str | None = None) -> MlxModelProvider:
+def load_provider(
+    model_path: str, *, adapter_path: str | None = None, quantization: dict | None = None
+) -> MlxModelProvider:
     """Load one text or multimodal MLX policy from a HuggingFace checkpoint."""
 
     config = _checkpoint_config(model_path)
     if _is_multimodal_config(config):
+        if quantization is not None:
+            raise ValueError("online quantization currently requires a text-only MLX provider")
         return MlxVlmProvider.load(model_path, config=config, adapter_path=adapter_path)
+    if quantization is not None:
+        return MlxLmProvider.load(model_path, config=config, adapter_path=adapter_path, quantization=quantization)
     return MlxLmProvider.load(model_path, config=config, adapter_path=adapter_path)
 
 
@@ -158,10 +164,30 @@ class MlxLmProvider(MlxModelProvider):
         *,
         config: dict[str, Any],
         adapter_path: str | None,
+        quantization: dict | None = None,
     ) -> MlxLmProvider:
         from mlx_lm import load
 
-        model, tokenizer, loaded_config = load(model_path, adapter_path=adapter_path, return_config=True)
+        if quantization is not None:
+            from mlx_lm.tokenizer_utils import TokenizerWrapper
+            from mlx_lm.utils import load_adapters, load_model
+
+            from areno.api.backend.mlx.quantization import quantize_online
+            from areno.api.tokenizer import eos_token_ids, load_tokenizer
+
+            # Loading a serialized tokenizer should not instantiate a model's
+            # Transformers config. Use AReno's tokenizer loader independently
+            # of the lazy MLX model load, for any supported architecture.
+            raw_tokenizer = load_tokenizer(model_path)
+            tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_token_ids(model_path, raw_tokenizer))
+            model, loaded_config = load_model(Path(model_path), lazy=True)
+            loaded_config = quantize_online(
+                model, loaded_config or config, bits=quantization["bits"], group_size=quantization["group_size"]
+            )
+            if adapter_path is not None:
+                model = load_adapters(model, adapter_path)
+        else:
+            model, tokenizer, loaded_config = load(model_path, adapter_path=adapter_path, return_config=True)
         return cls(model, tokenizer, None, loaded_config or config)
 
 

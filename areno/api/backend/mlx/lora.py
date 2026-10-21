@@ -57,8 +57,6 @@ def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str,
             f"unsupported MLX Ling LoRA targets: {', '.join(sorted(requested - allowed))}; "
             f"use --lora-target-modules {','.join(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS)}"
         )
-    if model_config.get("quantization") is not None:
-        raise ValueError("MLX Ling LoRA requires a non-quantized checkpoint; QLoRA is not supported yet")
     args = getattr(model, "args", None)
     layers = getattr(getattr(model, "model", None), "layers", None)
     if args is None or not layers or len(layers) != args.num_hidden_layers:
@@ -92,6 +90,8 @@ def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str,
             if module is None:
                 raise ValueError(f"MLX Ling LoRA target {path!r} is missing")
             shape = tuple(getattr(getattr(module, "weight", None), "shape", ()))
+            if hasattr(module, "bits") and len(shape) == 2:
+                shape = (shape[0], shape[1] * 32 // module.bits)
             if shape != shapes[name]:
                 raise ValueError(f"MLX Ling LoRA target {path!r} has shape {shape}, expected {shapes[name]}")
             targets.append((path, module))
@@ -99,6 +99,27 @@ def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str,
     unexpected = {path for path in modules if path.rsplit(".", 1)[-1] in requested and path not in expected_paths}
     if unexpected:
         raise ValueError(f"MLX Ling LoRA targets outside supported attention paths: {sorted(unexpected)}")
+    return targets
+
+
+def _decoder_targets(model: Any, requested: set[str], model_config: dict[str, Any]) -> list[tuple[str, Any]]:
+    del model_config
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(getattr(model, "model", None), "layers", None)
+    if not layers:
+        raise ValueError("MLX LoRA requires a decoder layers interface or a registered target resolver")
+    layer_ids = {id(layer) for layer in layers}
+    roots = tuple(path + "." for path, module in model.named_modules() if id(module) in layer_ids)
+    if not roots:
+        raise ValueError("MLX LoRA decoder layers are not present in named_modules")
+    targets = []
+    for path, module in model.named_modules():
+        if path.rsplit(".", 1)[-1] not in requested:
+            continue
+        if not path.startswith(roots):
+            raise ValueError(f"MLX LoRA target {path!r} is outside the decoder layers")
+        targets.append((path, module))
     return targets
 
 
@@ -114,10 +135,7 @@ def initialize_lora(
 ) -> MlxLoraState:
     """Validate a model family's projections, freeze the base and inject LoRA."""
 
-    resolver = _TARGET_RESOLVERS.get(model_type)
-    if resolver is None:
-        supported = ", ".join(sorted(_TARGET_RESOLVERS))
-        raise ValueError(f"MLX LoRA supports model types: {supported}")
+    resolver = _TARGET_RESOLVERS.get(model_type, _decoder_targets)
 
     requested = set(config.target_modules)
     resolved = resolver(model, requested, model_config or {})
@@ -127,14 +145,12 @@ def initialize_lora(
     for module_path, module in resolved:
         target_name = module_path.rsplit(".", 1)[-1]
         matched.add(target_name)
-        if isinstance(module, api.quantized_linear_type):
-            raise ValueError(f"MLX LoRA target {module_path!r} is quantized; QLoRA is not supported yet")
-        if not isinstance(module, api.linear_type):
+        if not isinstance(module, (api.linear_type, api.quantized_linear_type)):
             raise TypeError(
                 f"MLX LoRA target {module_path!r} has unsupported type {type(module).__name__}; "
-                "only dense Linear layers are supported"
+                "only Linear or QuantizedLinear layers are supported"
             )
-        logical_name = module_path.removeprefix("model.")
+        logical_name = module_path.replace(".model.", ".").removeprefix("model.")
         targets.append((module_path, logical_name, module))
 
     missing = requested - matched
