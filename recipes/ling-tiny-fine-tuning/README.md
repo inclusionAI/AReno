@@ -1,5 +1,6 @@
 # Ling Tiny payment SFT notebooks
 
+[Mac mini guide](MAC_MINI.md) ·
 [Mac notebook](Ling-Tiny-SFT-Mac.ipynb) ·
 [Google Colab notebook](Ling-Tiny-SFT-Colab.ipynb) ·
 [ModelScope dataset](https://modelscope.cn/datasets/AsystemAReno/Ling-Tiny-SFT) ·
@@ -7,41 +8,42 @@
 
 Two platform-specific notebooks cover installation, published data loading, baseline
 validation, attention LoRA SFT, adapter export, fresh-process reload, and validation
-comparison. The Mac notebook uses MLX; the Google Colab notebook uses CUDA and starts
+comparison. The Mac notebook runs locally in JupyterLab with MLX; the Google Colab notebook uses CUDA and starts
 with **To Run this** and **News**, following the tutorial organization of the
 [Unsloth example](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/gpt-oss-%2820B%29-Fine-tuning.ipynb).
 Both share the same dataset, experiment defaults, and AReno training/scoring helpers.
 
-**Status:** implementation ready for review. Notebook execution, CPU tests, and
-real training on Mac/Colab/Kaggle have not yet been run for this implementation.
-Ling MLX support is experimental. No platform capacity or score improvement is claimed.
+**Status:** the Mac notebook's structure and code-cell syntax have been checked,
+and all 14 strict-scoring tests in `tests/test_ling_recipe_cpu.py` passed during
+the Mac mini documentation update. End-to-end notebook execution and real training
+on Mac/Colab/Kaggle remain unverified. Ling MLX support is experimental.
+No platform capacity or score improvement is claimed.
 
-## Mac / SSH
+## Local Mac / JupyterLab
 
-From this branch's checkout, with Python 3.10+ and Git available:
-
-```bash
-bash recipes/ling-tiny-fine-tuning/run.sh
-```
-
-The command creates `recipes/ling-tiny-fine-tuning/.venv`, installs dependencies,
-registers a kernel inside that environment, and executes `Ling-Tiny-SFT-Mac.ipynb`
-without a browser. The first run downloads dependencies and model weights. To reuse a checkpoint:
+Use `Ling-Tiny-SFT-Mac.ipynb` in JupyterLab on your local Apple Silicon Mac.
+With Python 3.10+ and Git available, create a dedicated environment from your AReno checkout:
 
 ```bash
-bash recipes/ling-tiny-fine-tuning/run.sh --model-path /path/to/Ling-3.0-tiny
+python3 -m venv recipes/ling-tiny-fine-tuning/.venv
+recipes/ling-tiny-fine-tuning/.venv/bin/python -m pip install jupyterlab ipykernel
+recipes/ling-tiny-fine-tuning/.venv/bin/python -m ipykernel install --sys-prefix \
+  --name areno-mac --display-name "AReno Mac"
+recipes/ling-tiny-fine-tuning/.venv/bin/python -m jupyterlab
 ```
 
-Optional arguments: `--data-hub huggingface` (default: `modelscope`) and
-`--output-dir /path/to/new-run-directory`. Set `PYTHON=python3.12` to choose the
-interpreter when creating the environment. No credentials or machine endpoints
-are embedded in the recipe.
+Open `recipes/ling-tiny-fine-tuning/Ling-Tiny-SFT-Mac.ipynb` and select the Python
+kernel named **AReno Mac** from this environment. Review the experiment settings, then run the cells in order
+or choose **Run → Run All Cells**. The first code cell installs AReno and the recipe
+dependencies directly with the current kernel's Python; the Mac notebook does not call `install.py`.
 
-An executed notebook is saved under `runs/notebook-*/`, after every completed cell
-and on failure. Model artifacts and metrics are stored separately under
-`runs/ling-tiny-*/` or the requested output directory. Cell failure stops execution
-and returns a nonzero exit status. Re-running starts a new experiment; this launcher
-does not resume optimizer state from a failed run.
+Edit `MODEL_PATH` in the notebook to reuse an unquantized checkpoint, `DATA_HUB` to
+select the published dataset mirror, and `RUN_DIR` to choose a new local output directory.
+The notebook reads these settings directly from its configuration cell.
+
+Model artifacts, metrics, and logs are saved under `runs/ling-tiny-*/` by default.
+Save the notebook in JupyterLab to retain cell outputs. Re-running the configuration
+cell creates a new experiment directory; this recipe does not resume optimizer state.
 
 ## Colab / Kaggle
 
@@ -57,8 +59,8 @@ The notebook has standard Python 3 metadata and does not require Colab-specific 
 
 Use a fresh hosted runtime with CUDA PyTorch >= 2.6 and the CUDA toolkit (`nvcc`).
 The installer builds AReno's native extension and installs dependencies in the
-hosted Python environment. The local launcher selects the Mac notebook;
-use the Colab notebook for Linux CUDA environments.
+hosted Python environment. Use the Mac notebook for local Apple Silicon development
+and the Colab notebook for Linux CUDA environments.
 
 Opening the file and completing training are separate requirements: the unquantized
 base weights plus training state must fit on one accelerator. A free T4 or other
@@ -87,11 +89,10 @@ as a released reproducible recipe.
 
 | File | Purpose |
 | --- | --- |
-| `Ling-Tiny-SFT-Mac.ipynb` | Apple Silicon MLX tutorial and headless experiment |
+| `MAC_MINI.md` | English Mac mini setup, training, evaluation, and troubleshooting walkthrough |
+| `Ling-Tiny-SFT-Mac.ipynb` | Local Apple Silicon MLX experiment in JupyterLab |
 | `Ling-Tiny-SFT-Colab.ipynb` | Google Colab CUDA tutorial, also importable into Kaggle |
-| `run.sh` | Mac isolated environment and headless entry point |
-| `install.py` | Shared installation for local and hosted environments |
-| `execute.py` | Mac notebook kernel execution and partial-output preservation |
+| `install.py` | Installer used by the Colab notebook and existing shell utilities |
 | `recipe.py` | Token checks, strict scoring, isolated AReno train/eval workers |
 
 The notebook does not call `dataset_generator.py`, `prepare_mlx_data.py`, or
@@ -102,10 +103,16 @@ review; they are not runtime dependencies of this notebook.
 
 ## Review and validation
 
-After code review, the next validation step is notebook structure/syntax, the
-CPU scoring tests in `tests/test_ling_recipe_cpu.py`, and a small headless execution
-check. Real model loading, training, adapter reload, and hosted execution require
-separate validation. Existing migrated payment tests have not been run in this step.
+Mac notebook structure/syntax, local guide links, and the 14 strict-scoring CPU tests
+passed during this documentation update. The notebook stage wrapper was also checked
+with a small local subprocess for success/failure logging and timing persistence;
+hardware-report serialization was checked with mocked probe responses.
+These checks do not execute MLX training. Real model loading, training, adapter reload,
+and hosted execution require separate validation.
+
+The historical `tests/test_payment_recipe_cpu.py` was attempted but fails during
+collection because it still imports the removed `recipes.payment` package.
+That migration issue is separate from the notebook's strict-scoring test suite.
 
 ## Historical migration record
 
