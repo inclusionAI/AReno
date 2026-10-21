@@ -2,10 +2,9 @@
 
 import asyncio
 import json
-import os
-import signal
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from http.client import RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,12 +17,26 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dataset_loader import load_training_dataset
-from pi_proxy import PiProxy
-from reward import reward_fn
-from run_agent import configure_pi, run_agent, run_process, write_files
+from run_agent import create_runner
 
+from areno.agent.harness_base import write_workspace_files
+from areno.agent.harness_proxy import ModelProxy
 from areno.api.agentic import AgentBatch, RolloutSession
 from areno.api.models import SamplingParams
+
+
+def test_cli_preflight_accepts_example_file_hooks():
+    from areno.cli.train import _validate_python_callable
+
+    root = Path(__file__).resolve().parent
+    for filename, symbol, arity in [
+        ("dataset_loader.py", "load_training_dataset", 1),
+        ("reward.py", "reward_fn", 1),
+        ("run_agent.py", "run_agent", 2),
+    ]:
+        _validate_python_callable(
+            root / filename, symbol, option_name="--test-hook", expected=f"{symbol}(...)", positional_args=arity
+        )
 
 
 def response_for(body):
@@ -90,19 +103,19 @@ def upstream(transform=lambda response: response):
         thread.join()
 
 
-def post(proxy, body, *, key=None):
+def post(proxy, body, *, key=None, timeout=5):
     request = Request(
         proxy.base_url + "/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key or proxy.api_key}"},
     )
-    with build_opener(ProxyHandler({})).open(request, timeout=5) as response:
+    with build_opener(ProxyHandler({})).open(request, timeout=timeout) as response:
         return response.read().decode()
 
 
 def test_proxy_stream_tool_calls_and_exact_training_rows():
     async def check(ctx):
-        async with PiProxy(ctx) as proxy:
+        async with ModelProxy(ctx) as proxy:
             body = {
                 "model": "policy",
                 "messages": [{"role": "user", "content": "fix it"}],
@@ -142,10 +155,49 @@ def test_proxy_stream_tool_calls_and_exact_training_rows():
     assert all("max_completion_tokens" not in body and "stream_options" not in body for body in requests)
 
 
-def test_auth_limits_and_sample_isolation():
+def test_stream_keepalive_survives_long_generation_without_changing_metadata(monkeypatch):
+    def slow(response):
+        time.sleep(0.3)
+        return response
+
     async def check(ctx):
-        async with PiProxy(ctx, max_turns=1) as first, PiProxy(ctx) as second:
-            body = {"messages": [{"role": "user", "content": "first"}]}
+        async with ModelProxy(ctx) as proxy:
+            body = {"messages": [{"role": "user", "content": "write a long page"}], "stream": True}
+            wire = await asyncio.to_thread(post, proxy, body, timeout=0.1)
+        assert wire.count(": keep-alive\n\n") >= 3
+        chunks = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: {")]
+        assert chunks[0]["choices"][0]["delta"] == response_for(body)["choices"][0]["message"] | {
+            "tool_calls": [dict(response_for(body)["choices"][0]["message"]["tool_calls"][0], index=0)]
+        }
+        assert len(proxy.trace) == 1 and proxy.trace[0][1] == response_for(body)
+        assert not proxy.errors
+
+    monkeypatch.setattr(ModelProxy, "_keepalive_interval", 0.02)
+    with upstream(slow) as (ctx, _):
+        asyncio.run(check(ctx))
+
+
+def test_stream_errors_remain_sse_and_never_become_training_turns():
+    async def check(ctx):
+        async with ModelProxy(ctx) as proxy:
+            wire = await asyncio.to_thread(
+                post, proxy, {"messages": [{"role": "user", "content": "test"}], "stream": True}
+            )
+        assert wire.startswith(": keep-alive\n\n")
+        assert "HTTP/1." not in wire
+        error = next(json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: {"))
+        assert "tokens/logprobs" in error["error"]["message"]
+        assert proxy.errors and not proxy.trace
+
+    with upstream(lambda response: {k: v for k, v in response.items() if k != "areno"}) as (ctx, _):
+        asyncio.run(check(ctx))
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_auth_limits_and_sample_isolation(stream):
+    async def check(ctx):
+        async with ModelProxy(ctx, max_turns=1) as first, ModelProxy(ctx) as second:
+            body = {"messages": [{"role": "user", "content": "first"}], "stream": stream}
             with pytest.raises(HTTPError) as exc:
                 await asyncio.to_thread(post, first, body, key=second.api_key)
             assert exc.value.code == 401
@@ -177,7 +229,7 @@ def test_tool_reasoning_is_streamed_and_replayed_with_exact_metadata():
 
     async def check(ctx):
         ctx.get_tokenizer = lambda: Tokenizer()
-        async with PiProxy(ctx) as proxy:
+        async with ModelProxy(ctx) as proxy:
             body = {"messages": [{"role": "user", "content": "fix it"}], "stream": True}
             wire = await asyncio.to_thread(post, proxy, body)
             chunks = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: {")]
@@ -200,7 +252,7 @@ def test_tool_reasoning_is_streamed_and_replayed_with_exact_metadata():
 
 def test_missing_metadata_fails_instead_of_retokenizing():
     async def check(ctx):
-        async with PiProxy(ctx) as proxy:
+        async with ModelProxy(ctx) as proxy:
             with pytest.raises(HTTPError) as exc:
                 await asyncio.to_thread(post, proxy, {"messages": [{"role": "user", "content": "test"}]})
             assert exc.value.code == 400
@@ -218,12 +270,15 @@ def test_client_disconnect_preserves_completed_turn(error, stream, monkeypatch):
         raise error("pi stopped after its task budget")
 
     async def check(ctx):
-        async with PiProxy(ctx) as proxy:
+        async with ModelProxy(ctx) as proxy:
             monkeypatch.setattr(proxy, "_stream" if stream else "_json", disconnected)
-            with pytest.raises(RemoteDisconnected):
-                await asyncio.to_thread(
-                    post, proxy, {"messages": [{"role": "user", "content": "fix it"}], "stream": stream}
-                )
+            body = {"messages": [{"role": "user", "content": "fix it"}], "stream": stream}
+            if stream:
+                wire = await asyncio.to_thread(post, proxy, body)
+                assert wire.startswith(": keep-alive\n\n") and "data:" not in wire
+            else:
+                with pytest.raises(RemoteDisconnected):
+                    await asyncio.to_thread(post, proxy, body)
         assert not proxy.errors
         assert len(proxy.trace) == 1
         assert proxy.trace[0][1]["areno"]["response_logprobs"] == [-0.1, -0.2]
@@ -232,213 +287,56 @@ def test_client_disconnect_preserves_completed_turn(error, stream, monkeypatch):
         asyncio.run(check(ctx))
 
 
-@pytest.fixture
-def fake_pi(tmp_path, monkeypatch):
-    monkeypatch.delenv("ARENO_PI_RESULT_DIR", raising=False)
-    executable = tmp_path / "pi-fixture"
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        + r"""
-import json, os, pathlib, sys, urllib.request
-config = json.loads((pathlib.Path(os.environ["PI_CODING_AGENT_DIR"]) / "models.json").read_text())
-provider = config["providers"]["areno"]
-assert "--" not in sys.argv
-assert sys.argv[-1].startswith("Task:\n")
-messages = [{"role": "user", "content": sys.argv[-1]}]
-for turn in range(2):
-    request = urllib.request.Request(provider["baseUrl"] + "/chat/completions",
-        data=json.dumps({"model":"policy", "messages":messages, "stream":True, "tools":[{"type":"function", "function":{"name":"write", "parameters":{"type":"object", "properties":{"path":{"type":"string"}, "content":{"type":"string"}}}}}]}).encode(),
-        headers={"Content-Type":"application/json", "Authorization":"Bearer " + provider["apiKey"]})
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request) as response:
-        wire = response.read().decode()
-    chunks = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: {")]
-    delta = chunks[0]["choices"][0]["delta"]
-    if delta.get("tool_calls"):
-        call = delta["tool_calls"][0]
-        args = json.loads(call["function"]["arguments"])
-        pathlib.Path(args["path"]).write_text(args["content"])
-        messages += [{"role":"assistant", "content":None, "tool_calls":[call]},
-                     {"role":"tool", "tool_call_id":call["id"], "content":"written"}]
-"""
-    )
-    executable.chmod(0o755)
-    monkeypatch.setenv("ARENO_PI_EXECUTABLE", str(executable))
-    return executable
-
-
-def test_runner_verifier_reward_and_isolated_records(fake_pi):
-    records = [
-        {
-            "prompt": "fix",
-            "files": {"solution.py": "answer = 0"},
-            "verify": "from solution import answer; assert answer == 42",
-        },
-        {
-            "prompt": "fix",
-            "files": {"solution.py": "answer = 0"},
-            "verify": "from solution import answer; assert answer == 999",
-        },
-    ]
-    batch = AgentBatch(records, ["fix", "fix"], [[1], [1]], 2)
-    with upstream() as (ctx, requests):
-        trajectory = asyncio.run(run_agent(ctx, batch))
-    assert len(requests) == 8
-    assert len(trajectory.turns) == 8
-    assert trajectory.invalid_items == []
-    assert all("pi_result" not in record for record in records)
-    items = [trajectory.turns[i].item for i in range(0, 8, 2)]
-    assert len({id(item.record) for item in items}) == 4
-    assert [reward_fn(SimpleNamespace(source_record=item.record)) for item in items] == [1, 1, 0, 0]
-    assert [item.sample_index for item in items] == [0, 1, 0, 1]
-    assert all(trajectory.turns[i].item is trajectory.turns[i + 1].item for i in range(0, 8, 2))
-
-
-@pytest.mark.parametrize("cancel", [False, True])
-def test_process_timeout_and_cancellation_reap_process(tmp_path, cancel):
-    pid_path = tmp_path / "pid"
-
-    async def check():
-        task = asyncio.create_task(
-            run_process(
-                [
-                    sys.executable,
-                    "-c",
-                    "import os,time,pathlib; pathlib.Path('pid').write_text(str(os.getpid())); time.sleep(60)",
-                ],
-                cwd=tmp_path,
-                env=dict(os.environ),
-                timeout=10 if cancel else 0.3,
-                log_path=tmp_path / "log",
-            )
-        )
-        if cancel:
-            for _ in range(100):
-                if pid_path.exists():
-                    break
-                await asyncio.sleep(0.01)
-            assert pid_path.exists()
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            assert await task == (None, True)
-
-    asyncio.run(check())
-    with pytest.raises(ProcessLookupError):
-        os.kill(int(pid_path.read_text()), signal.SIGCONT)
-
-
 def test_loader_and_workspace_reject_invalid_inputs(tmp_path):
     rows = load_training_dataset(
         "unused", default_loader=lambda _: [{"problem_statement": "fix", "files": {}, "verify": "assert True"}]
     )
     assert rows[0]["prompt"] == "fix"
-    with pytest.raises(ValueError, match="verify"):
-        load_training_dataset("unused", default_loader=lambda _: [{"prompt": "fix", "files": {}}])
+    with pytest.raises(ValueError, match="prompt"):
+        load_training_dataset("unused", default_loader=lambda _: [{"files": {}}])
     for path in ("../outside", "/absolute", ".pi/settings.json"):
         with pytest.raises(ValueError):
-            write_files(tmp_path, {path: "bad"})
+            write_workspace_files(tmp_path, {path: "bad"}, reserved_roots=(".pi",))
 
 
-class FakePolicy:
-    """CPU policy double behind the unmodified AReno rollout HTTP server."""
-
-    def __init__(self):
-        self.events = []
-        self.tokenizer = SimpleNamespace(
-            chat_template="test-template",
-            apply_chat_template=lambda messages, **kwargs: list(json.dumps(messages).encode()),
-            decode=lambda tokens, **kwargs: (
-                '{"name":"write","arguments":{"path":"solution.py","content":"answer = 42"}}'
-                if tokens == [31]
-                else "done"
-            ),
-        )
-
-    def get_tokenizer(self):
-        return self.tokenizer
-
-    def dp_size(self):
-        return 1
-
-    async def begin_rollout_session_async(self):
-        self.events.append("begin")
-
-    async def end_rollout_session_async(self):
-        self.events.append("end")
-
-    async def rollout_token_batch_async(self, prompts, n_samples, params):
-        self.events.append("rollout")
-        results = []
-        for prompt in prompts:
-            messages = json.loads(bytes(prompt))
-            second = messages[-1]["role"] == "tool"
-            results.append(
-                SimpleNamespace(sequences=[SimpleNamespace(resp_tokens=[33 if second else 31], resp_logprobs=[-0.25])])
-            )
-        return results
+def test_example_uses_native_pi_and_explicit_docker_image(monkeypatch):
+    monkeypatch.setenv("ARENO_HARBOR_IMAGE", "my-preinstalled-pi")
+    monkeypatch.setenv("ARENO_HARBOR_ENVIRONMENT_OPTIONS", '{"task_env":{"CUSTOM":"yes"}}')
+    workflow = create_runner()
+    assert workflow.harness == "pi" and workflow.environment == "docker"
+    assert workflow.environment_options["image"] == "my-preinstalled-pi"
+    assert workflow.environment_options["task_env"]["CUSTOM"] == "yes"
+    assert workflow.preinstalled and not workflow.require_agent_success
+    assert workflow.harness_options["kwargs"]["model_api"] == "openai-completions"
 
 
-def test_existing_rollout_proxy_roundtrip(fake_pi):
-    policy = FakePolicy()
+def test_native_pi_exports_atif_and_usage_from_session(tmp_path):
+    from harbor.agents.installed.pi import Pi
+    from harbor.models.agent.context import AgentContext
+    from harbor.models.trajectories import Trajectory
 
-    async def check():
-        async with RolloutSession(policy, sampling_params=SamplingParams(), max_running_prompts=2) as ctx:
-            row = {"prompt": "fix", "files": {}, "verify": "from solution import answer; assert answer == 42"}
-            result = await run_agent(ctx, AgentBatch([row], ["fix"], [[1]], 2))
-            assert not result.invalid_items
-            assert len(result.turns) == 4
-            assert result.turns[0].parsed_tool_calls[0]["function"]["name"] == "write"
-            assert result.turns[0].item.record["pi_result"]["reward"] == 1
-            samples = [ctx._sample_from_trajectory_turn(turn) for turn in result.turns]
-            rows = ctx._train_rows_from_samples(samples)
-            assert [row[-1] for row in rows.token_rows] == [31, 33, 31, 33]
-            assert all(row[-1] == -0.25 for row in rows.rollout_logprobs)
-
-    asyncio.run(check())
-    assert policy.events == ["begin", "rollout", "rollout", "rollout", "rollout", "end"]
-
-
-def test_large_verifier_binary_fixture_and_attempt_artifacts(fake_pi, tmp_path, monkeypatch):
-    import base64
-
-    results = tmp_path / "results"
-    monkeypatch.setenv("ARENO_PI_RESULT_DIR", str(results))
-    monkeypatch.setenv("ARENO_PI_PYTHON", sys.executable)
-    record = {
-        "prompt": "fix",
-        "files": {"solution.py": "answer = 0"},
-        "binary_files": {"fixture.bin": base64.b64encode(b"\xff\x80").decode()},
-        # Larger than Linux MAX_ARG_STRLEN; the verifier must be a file, not -c.
-        "verify": "# " + "x" * 150000 + "\nfrom solution import answer\nassert answer == 42\n"
-        "from pathlib import Path\nassert Path('fixture.bin').read_bytes() == b'\\xff\\x80'\n",
-    }
-    with upstream() as (ctx, _):
-        result = asyncio.run(run_agent(ctx, AgentBatch([record], ["fix"], [[1]], 1)))
-    assert not result.invalid_items
-    assert result.turns[0].item.record["pi_result"]["reward"] == 1
-    (artifact,) = results.glob("*.json")
-    data = json.loads(artifact.read_text())
-    assert data["result"]["verify_returncode"] == 0
-    assert len(data["trace"]) == 2
-
-
-def test_pi_request_timeout_matches_task_budget(tmp_path):
-    configure_pi(tmp_path / "config", SimpleNamespace(base_url="http://localhost", api_key="test", timeout=1800))
-    settings = json.loads((tmp_path / "config/settings.json").read_text())
-    assert settings["httpIdleTimeoutMs"] == 1800000
-    assert settings["retry"]["provider"] == {"maxRetries": 0, "timeoutMs": 1800000}
-    assert settings["retry"]["enabled"] is False
-
-
-def test_invalid_harness_attempt_is_retained_without_task_reward(fake_pi, tmp_path, monkeypatch):
-    monkeypatch.setenv("ARENO_PI_RESULT_DIR", str(tmp_path / "results"))
-    record = {"prompt": "fix", "files": {}, "verify": "assert True"}
-    with upstream(lambda response: {k: v for k, v in response.items() if k != "areno"}) as (ctx, _):
-        result = asyncio.run(run_agent(ctx, AgentBatch([record], ["fix"], [[1]], 1)))
-    assert len(result.invalid_items) == 1
-    (artifact,) = (tmp_path / "results").glob("*.json")
-    data = json.loads(artifact.read_text())
-    assert data["result"]["valid"] is False
-    assert data["result"]["proxy_errors"]
-    assert "reward" not in data["result"]
+    agent = Pi(logs_dir=tmp_path, model_name="openai/policy", thinking="off")
+    sessions = tmp_path / "pi/sessions"
+    sessions.mkdir(parents=True)
+    events = [
+        {"type": "session", "id": "test-session"},
+        {"type": "message", "id": "user", "message": {"role": "user", "content": "fix"}},
+        {
+            "type": "message",
+            "id": "assistant",
+            "parentId": "user",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+                "model": "policy",
+                "provider": "openai",
+                "usage": {"input": 3, "output": 2, "totalTokens": 5},
+            },
+        },
+    ]
+    (sessions / "session.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+    context = AgentContext()
+    agent.populate_context_post_run(context)
+    trajectory = Trajectory.model_validate_json((tmp_path / "trajectory.json").read_text())
+    assert trajectory.session_id == "test-session" and trajectory.steps[-1].message == "done"
+    assert context.n_input_tokens == 3 and context.n_output_tokens == 2

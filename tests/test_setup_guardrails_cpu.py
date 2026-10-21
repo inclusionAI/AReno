@@ -63,6 +63,14 @@ class SetupGuardrailsTest(unittest.TestCase):
         npu = {Requirement(value).name for value in setup_mod["_runtime_dependencies"](True)}
         default = {Requirement(value).name for value in setup_mod["_runtime_dependencies"](False)}
         self.assertTrue({"transformers", "safetensors", "datasets", "fastapi"} <= npu)
+        for use_npu in (False, True):
+            dependency = next(
+                Requirement(value)
+                for value in setup_mod["_runtime_dependencies"](use_npu)
+                if Requirement(value).name == "harbor"
+            )
+            self.assertEqual(str(dependency.specifier), "==0.24.0")
+            self.assertIsNone(dependency.marker)
         self.assertTrue({"flash-linear-attention", "flash-attn-npu"} <= npu)
         self.assertFalse({"torch", "torchvision", "triton", "mlx", "mlx-lm", "mlx-vlm"} & npu)
         fla = next(
@@ -105,6 +113,7 @@ class SetupGuardrailsTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 metadata = next((project / "metadata").glob("*.dist-info/METADATA")).read_text()
+                self.assertEqual(Parser().parsestr(metadata)["Requires-Python"], ">=3.12")
                 actual = [Requirement(value) for value in Parser().parsestr(metadata).get_all("Requires-Dist", [])]
                 actual = [value for value in actual if not value.marker or "extra" not in str(value.marker)]
                 expected = [Requirement(value) for value in _load_setup_module()["_runtime_dependencies"](npu)]

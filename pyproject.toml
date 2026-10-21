@@ -7,7 +7,7 @@ name = "areno"
 version = "0.9.0"
 description = "An easy-to-use, fast toolkit to scale up RL post-training on a single node."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [
   { name = "Zibo He" },
@@ -31,8 +31,6 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -63,7 +61,7 @@ ignore = ["E501"]
 known-first-party = ["areno"]
 
 [tool.pyright]
-pythonVersion = "3.10"
+pythonVersion = "3.12"
 typeCheckingMode = "basic"
 include = ["areno"]
 exclude = ["areno/accel/csrc"]

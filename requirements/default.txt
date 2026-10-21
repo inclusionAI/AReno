@@ -18,6 +18,7 @@ rich>=13
 tensorboard
 tensorboardX>=2.6; platform_system == 'Darwin' and platform_machine == 'arm64'
 pydantic>=2
+harbor==0.24.0
 fastapi>=0.110
 click>=8.1
 tqdm>=4.66

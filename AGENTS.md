@@ -4,7 +4,7 @@
 
 ## Quick reference
 
-**Tech stack**: Python 3.10+ | CUDA | PyTorch ≥ 2.6 | optional FlashAttention | flash-linear-attention | Transformers | safetensors
+**Tech stack**: Python 3.12+ | Harbor 0.24 | CUDA | PyTorch ≥ 2.6 | optional FlashAttention | flash-linear-attention | Transformers | safetensors
 
 ```bash
 # Install (requires an existing Linux + NVIDIA GPU + CUDA + PyTorch >= 2.6 env)
