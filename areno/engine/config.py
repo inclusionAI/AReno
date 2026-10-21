@@ -324,8 +324,10 @@ class EngineConfig:
                 raise ValueError("QLoRA requires CUDA")
             if self.runtime.optimizer_state_offload != "none":
                 raise ValueError("QLoRA paged optimizer cannot combine with explicit optimizer state offload")
-            if self.model.model_type not in {"qwen3", "bailing_moe_v3"}:
-                raise ValueError("QLoRA currently supports Qwen3 dense and Bailing-MoE V3")
+            from areno.models.registry import _adapter
+
+            if not _adapter(self.model.model_type).supports_qlora:
+                raise ValueError(f"QLoRA is not supported for {self.model.model_type}")
             self.optimizer.paged = True
         if self.sequence_parallel is not None:
             self.model.sequence_parallel = bool(self.sequence_parallel)

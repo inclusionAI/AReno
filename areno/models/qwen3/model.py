@@ -535,6 +535,13 @@ class Qwen3Adapter(ModelAdapter):
     """Adapter glue: HF config detection, build, and checkpoint I/O."""
 
     name = "qwen3"
+    supports_qlora = True
+
+    @property
+    def lora_initializer(self):
+        from areno.adapters.lora import _initialize_qwen3_lora
+
+        return _initialize_qwen3_lora
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         return str(hf_config.get("model_type", "")).lower() == "qwen3"
@@ -587,6 +594,12 @@ class Qwen3MoeAdapter(ModelAdapter):
     """Adapter for Qwen3 MoE checkpoints (for example Qwen3-30B-A3B)."""
 
     name = "qwen3_moe"
+
+    @property
+    def lora_initializer(self):
+        from areno.adapters.lora import _initialize_qwen3_lora
+
+        return _initialize_qwen3_lora
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         return str(hf_config.get("model_type", "")).lower() == "qwen3_moe"

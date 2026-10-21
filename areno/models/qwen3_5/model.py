@@ -37,7 +37,6 @@ from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
 from areno.engine.parallel.collectives import (
     all_reduce,
-    copy_to_tensor_parallel_region,
     gather_from_sequence_parallel_region,
     is_sequence_parallel_active,
     scatter_to_sequence_parallel_region,
@@ -202,7 +201,7 @@ class Qwen35FullAttention(nn.Module):
         return None
 
 
-class Qwen35ReplicatedKVQKVLinear(nn.Module):
+class Qwen35ReplicatedKVQKVLinear(MergedColumnParallelLinear):
     """Q-sharded QKV projection with K/V heads replicated across TP ranks."""
 
     def __init__(
@@ -214,7 +213,9 @@ class Qwen35ReplicatedKVQKVLinear(nn.Module):
         *,
         attn_output_gate: bool,
     ):
-        super().__init__()
+        nn.Module.__init__(self)
+        self.lora_slots = nn.ModuleDict()
+        self._lora_component_indices: dict[str, int | tuple[int, ...]] = {}
         ctx = get_tp_context()
         q_size = num_heads * head_dim * (2 if attn_output_gate else 1)
         kv_size = num_kv_heads * head_dim
@@ -226,18 +227,11 @@ class Qwen35ReplicatedKVQKVLinear(nn.Module):
         self.out_features = (q_size, kv_size, kv_size)
         self.local_out_features = [q_range[1] - q_range[0], head_dim, head_dim]
         self.shard_ranges = (q_range, kv_range, kv_range)
+        self.bias = None
         self.weight = nn.Parameter(torch.empty(sum(self.local_out_features), hidden_size))
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         self._kv_grad_group, self._kv_grad_replication = _replicated_kv_grad_group(num_kv_heads)
         self.weight.register_hook(self._sync_replicated_kv_grad)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = (
-            gather_from_sequence_parallel_region(x)
-            if is_sequence_parallel_active()
-            else copy_to_tensor_parallel_region(x)
-        )
-        return _areno_linear_no_compile(x, self.weight)
 
     def _sync_replicated_kv_grad(self, grad: torch.Tensor) -> torch.Tensor:
         if self._kv_grad_group is None or self._kv_grad_replication <= 1:
@@ -1575,6 +1569,13 @@ def _mrope_section(rope: dict[str, Any]) -> tuple[int, int, int] | None:
 
 class Qwen35Adapter(ModelAdapter):
     name = "qwen3_5"
+    supports_qlora = True
+
+    @property
+    def lora_initializer(self):
+        from areno.models.qwen3_5.lora import initialize_qwen35_lora
+
+        return initialize_qwen35_lora
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         architectures = set(hf_config.get("architectures") or [])

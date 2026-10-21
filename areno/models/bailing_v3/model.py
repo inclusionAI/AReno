@@ -2113,6 +2113,13 @@ class BailingMoeV3Adapter(ModelAdapter):
     """Model adapter binding HF Bailing-MoE V3 checkpoints to the areno runtime."""
 
     name = "bailing_moe_v3"
+    supports_qlora = True
+
+    @property
+    def lora_initializer(self):
+        from areno.adapters.lora import _initialize_bailing_v3_lora
+
+        return _initialize_bailing_v3_lora
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         architectures = hf_config.get("architectures") or []

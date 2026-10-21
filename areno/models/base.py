@@ -77,6 +77,8 @@ class ModelAdapter(ABC):
     """Glue between HuggingFace checkpoints and areno's nn.Modules."""
 
     name: str
+    lora_initializer = None
+    supports_qlora = False
 
     @abstractmethod
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:

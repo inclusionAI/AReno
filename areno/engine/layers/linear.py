@@ -144,7 +144,7 @@ class MergedColumnParallelLinear(nn.Module):
     def __init__(self, in_features: int, out_features: list[int] | tuple[int, ...], bias: bool = False):
         super().__init__()
         self.lora_slots = nn.ModuleDict()
-        self._lora_component_indices: dict[str, int] = {}
+        self._lora_component_indices: dict[str, int | tuple[int, ...]] = {}
         ctx = get_tp_context()
         if not out_features:
             raise ValueError("out_features must not be empty")
@@ -162,7 +162,7 @@ class MergedColumnParallelLinear(nn.Module):
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
         self.reset_parameters()
 
-    def install_lora_component(self, component: str, component_index: int, slot: nn.Module) -> None:
+    def install_lora_component(self, component: str, component_index: int | tuple[int, ...], slot: nn.Module) -> None:
         """Attach one canonical adapter to a fused output component."""
 
         self.lora_slots[component] = slot
@@ -189,7 +189,12 @@ class MergedColumnParallelLinear(nn.Module):
             if not slot.enabled:
                 continue
             index = self._lora_component_indices[component]
-            parts[index] = parts[index] + slot(x)
+            if isinstance(index, int):
+                parts[index] = parts[index] + slot(x)
+            else:
+                updates = slot(x).split([self.local_out_features[i] for i in index], dim=-1)
+                for i, update in zip(index, updates, strict=True):
+                    parts[i] = parts[i] + update
         return torch.cat(parts, dim=-1)
 
 
@@ -212,7 +217,7 @@ class QKVParallelLinear(MergedColumnParallelLinear):
     ):
         nn.Module.__init__(self)
         self.lora_slots = nn.ModuleDict()
-        self._lora_component_indices: dict[str, int] = {}
+        self._lora_component_indices: dict[str, int | tuple[int, ...]] = {}
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads

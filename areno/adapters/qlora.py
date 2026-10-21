@@ -11,9 +11,10 @@ from areno.engine.layers.linear import ColumnParallelLinear, MergedColumnParalle
 @torch.no_grad()
 def initialize_qlora(model):
     from areno.models.bailing_v3.model import ArenoGroupedLinear
+    from areno.models.registry import _adapter
 
-    if model.config.model_type not in {"qwen3", "bailing_moe_v3"}:
-        raise ValueError("QLoRA currently supports native Qwen3 dense and Bailing-MoE V3")
+    if not _adapter(model.config.model_type).supports_qlora:
+        raise ValueError(f"QLoRA is not supported for {model.config.model_type}")
     total_original = total_quantized = count = 0
     for module in list(model.modules()):
         if not isinstance(

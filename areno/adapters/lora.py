@@ -13,7 +13,12 @@ from torch import nn
 
 from areno.accel import areno_grouped_linear
 from areno.adapters.config import LoraConfig
-from areno.engine.layers.linear import ColumnParallelLinear, RowParallelLinear, mark_tensor_parallel_parameter
+from areno.engine.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+    mark_tensor_parallel_parameter,
+)
 from areno.engine.parallel.context import get_tp_context
 
 
@@ -45,6 +50,7 @@ class LoraSlot(nn.Module):
         seed: int,
         runtime_state: _AdapterRuntimeState,
         output_range: tuple[int, int] | None = None,
+        output_splits: tuple[int, ...] | None = None,
     ) -> None:
         super().__init__()
         ctx = get_tp_context()
@@ -62,6 +68,17 @@ class LoraSlot(nn.Module):
                 else (ctx.rank * self.local_out_features, (ctx.rank + 1) * self.local_out_features)
             )
         self.output_start, self.output_end = (int(value) for value in output_range)
+        self.output_ranges = ((self.output_start, self.output_end),)
+        if output_splits is not None:
+            if sum(output_splits) != self.global_out_features or any(size % ctx.world_size for size in output_splits):
+                raise ValueError("fused LoRA output components must cover the output and divide TP")
+            offset = 0
+            ranges = []
+            for size in output_splits:
+                width = size // ctx.world_size
+                ranges.append((offset + ctx.rank * width, offset + (ctx.rank + 1) * width))
+                offset += size
+            self.output_ranges = tuple(ranges)
         self.output_replicated = (
             not self.row_parallel and self.local_out_features * ctx.world_size > self.global_out_features
         )
@@ -218,10 +235,13 @@ class AdapterRegistry:
 def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> AdapterRegistry:
     """Freeze one supported native base and attach its canonical targets."""
 
+    from areno.models.registry import _adapter
+
     model_config = getattr(model, "config", None)
     model_type = getattr(model_config, "model_type", None)
-    if model_type not in {"qwen3", "qwen3_moe", "bailing_moe_v3"}:
-        raise ValueError("native LoRA currently supports Qwen3 and Bailing-MoE V3 models only")
+    initializer = _adapter(model_type).lora_initializer
+    if initializer is None:
+        raise ValueError(f"native LoRA is not supported for {model_type}")
     if model_type == "bailing_moe_v3" and not bool(getattr(model_config, "no_kda_lora", False)):
         raise ValueError("Bailing-MoE V3 native LoRA currently requires no_kda_lora=true")
     for parameter in model.parameters():
@@ -230,10 +250,7 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
     requested = set(config.target_modules)
     runtime_state = _AdapterRuntimeState()
     slots: dict[str, LoraSlot | RoutedExpertLoraSlot] = {}
-    if model_type == "bailing_moe_v3":
-        matched = _initialize_bailing_v3_lora(model, requested, config, seed, runtime_state, slots)
-    else:
-        matched = _initialize_qwen3_lora(model, requested, config, seed, runtime_state, slots)
+    matched = initializer(model, requested, config, seed, runtime_state, slots)
     missing = requested - matched
     if missing:
         raise ValueError(f"target_modules are not present in {model_type}: {', '.join(sorted(missing))}")
@@ -406,6 +423,37 @@ def _initialize_bailing_v3_lora(
                 _install_dense_mlp_slots(layer.mlp, mlp_prefix, requested, config, seed, runtime_state, slots)
             )
     return matched
+
+
+def _install_merged_slot(
+    logical_name: str,
+    owner: MergedColumnParallelLinear,
+    indices: int | tuple[int, ...],
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
+) -> None:
+    """Bind one checkpoint projection spanning one or more fused components."""
+
+    components = (indices,) if isinstance(indices, int) else indices
+    ranges = getattr(owner, "shard_ranges", None)
+    slot = LoraSlot(
+        logical_name=logical_name,
+        base_weight=owner.weight,
+        global_in_features=owner.in_features,
+        global_out_features=sum(owner.out_features[i] for i in components),
+        local_in_features=owner.in_features,
+        local_out_features=sum(owner.local_out_features[i] for i in components),
+        row_parallel=False,
+        output_range=ranges[components[0]] if ranges is not None and len(components) == 1 else None,
+        output_splits=tuple(owner.out_features[i] for i in components) if len(components) > 1 else None,
+        config=config,
+        seed=seed,
+        runtime_state=runtime_state,
+    )
+    owner.install_lora_component(logical_name.rsplit(".", 1)[-1], indices, slot)
+    slots[logical_name] = slot
 
 
 def _install_column_slot(

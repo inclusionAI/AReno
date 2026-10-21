@@ -14,6 +14,7 @@ Native LoRA currently supports these CUDA model adapters:
 
 * Qwen3
 * Qwen3-MoE
+* Qwen3.5 dense text and multimodal language backbones
 * Bailing-MoE V3 checkpoints with ``no_kda_lora=true``
 
 On Apple Silicon, the MLX backend supports dense Qwen3 LoRA and includes an
@@ -27,6 +28,18 @@ The default target modules are ``q_proj``, ``k_proj``, ``v_proj``,
 with ``--lora-target-modules``. Bailing-MoE V3 additionally supports its
 native attention projection names, including ``q_a_proj``, ``q_b_proj``,
 ``kv_a_proj_with_mqa``, and ``kv_b_proj``.
+
+Qwen3.5 additionally supports the linear-attention projections
+``in_proj_qkv``, ``in_proj_z``, ``in_proj_b``, ``in_proj_a``, and ``out_proj``.
+Include these in ``--lora-target-modules`` to adapt the recurrent attention
+layers as well as full attention and MLPs. Adapter tensors use the canonical
+checkpoint names, including ``linear_attn`` and the ``language_model`` prefix
+for multimodal checkpoints. Combining these adapters with an unfrozen vision
+tower or projector is rejected.
+
+Use ``--qlora --lora-rank 8`` for a frozen NF4 base with double quantization.
+QLoRA supports Qwen3 dense, Qwen3.5 dense language backbones, and Bailing-MoE V3.
+Qwen3.5-MoE LoRA and QLoRA are not supported by this adapter path.
 
 LoRA dropout must currently be zero. Standard PEFT LoRA adapters are accepted,
 but options that change the adapter structure, such as DoRA, RS-LoRA, bias

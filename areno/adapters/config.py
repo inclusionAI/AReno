@@ -33,7 +33,9 @@ BAILING_V3_TARGETS = (
     "down_proj",
 )
 
-NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS)))
+QWEN35_TARGETS = (*QWEN3_DENSE_TARGETS, "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
+
+NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS, *QWEN35_TARGETS)))
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,15 +90,25 @@ def build_adapter_policy_plan(registry: AdapterRegistry) -> PolicyTensorStore:
             plan.add_layout(key_b, _replicated_layout(slot.lora_B))
         else:
             plan.add_layout(key_a, _replicated_layout(slot.lora_A))
+            shape = (slot.global_out_features, slot.rank)
+            pieces = []
+            local_start = 0
+            for start, end in slot.output_ranges:
+                local_end = local_start + end - start
+                pieces.append(
+                    PolicyTensorPiece(
+                        slot.lora_B.detach()[local_start:local_end],
+                        shape,
+                        0,
+                        start,
+                        end,
+                        publish=_column_range_publisher(slot, ctx.rank, ctx.world_size),
+                    )
+                )
+                local_start = local_end
             plan.add_layout(
                 key_b,
-                _sharded_layout(
-                    slot.lora_B,
-                    (slot.global_out_features, slot.rank),
-                    dim=0,
-                    start=slot.output_start,
-                    publish=_column_range_publisher(slot, ctx.rank, ctx.world_size),
-                ),
+                PolicyTensorLayout(shape=shape, dtype=slot.lora_B.dtype, pieces=tuple(pieces)),
             )
     return plan
 
