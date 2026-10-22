@@ -25,7 +25,9 @@ PREVIEW = (
 )
 DIMENSIONS = {
     "semantic_match": RubricDimension(
-        "Requested subject, parts and relationships are recognizable and accurate.", 0.30
+        "Compare the candidate against the original task prompt: requested subject, parts and relationships must "
+        "be recognizable and accurate. A polished icon of the wrong subject earns little accuracy credit.",
+        0.30,
     ),
     "composition": RubricDimension("Balance, proportions, visual hierarchy, centering and negative space.", 0.20),
     "geometry": RubricDimension("Clean contours, consistent strokes, smooth curves and deliberate joins.", 0.20),

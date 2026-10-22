@@ -18,7 +18,7 @@ REVISION = "0224c19f60f16ac3f3e7828eb418060fccfd634a"
 def task_record(raw: dict, *, reference: Path, source: dict, max_turns: int) -> dict:
     brief = raw["description"].strip()
     detail = (raw.get("detail") or "").strip()
-    if detail and len(detail.split()) <= 120:
+    if detail:
         brief += "\n" + detail
     return {
         "prompt": (
@@ -36,7 +36,9 @@ def task_record(raw: dict, *, reference: Path, source: dict, max_turns: int) -> 
             "Visible icons receive continuous scores for semantic match, composition, geometry, style and aesthetics. "
             "Missing, blank or unrenderable submissions receive zero."
         ),
-        "grading_instruction": brief
+        "source_prompt": brief,
+        "grading_instruction": "Original task prompt:\n"
+        + brief
         + "\nEvaluate a single vector icon; no website, text labels or interactions are required. "
         "The reference illustrates the subject and style; do not require pixel identity.",
         "files": {"icon.svg": ""},
@@ -116,7 +118,10 @@ def generate(
                     if ImageChops.difference(rgb, Image.new("RGB", rgb.size, "white")).getbbox() is None:
                         raise ValueError("blank reference")
                     reference = references / f"{fingerprint}.png"
-                    rgb.save(reference)
+                    if image.startswith(b"\x89PNG\r\n\x1a\n"):
+                        reference.write_bytes(image)
+                    else:
+                        rgb.save(reference)
             except (ElementTree.ParseError, ValueError, OSError, KeyError, TypeError):
                 rejected["invalid_svg_or_reference"] += 1
                 continue

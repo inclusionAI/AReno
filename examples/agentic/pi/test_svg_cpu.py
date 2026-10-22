@@ -17,6 +17,7 @@ from areno.api.harness import HarnessAttempt, HarnessEnvironment
 from examples.agentic.pi.browser_capture import BrowserCapture
 from examples.agentic.pi.generate_svg_dataset import generate, task_record
 from examples.agentic.pi.svg_dataset import SVGIconCapture, SVGIconDataset, parse_svg
+from examples.agentic.pi.visual_reward import VLMJudge
 
 SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect x="20" y="20" width="160" height="160"/></svg>'
@@ -30,7 +31,12 @@ def png(color):
 
 
 def test_task_keeps_reference_and_solution_out_of_agent_workspace(tmp_path):
-    raw = {"id": "square", "svg": SVG, "description": "A simple black square icon."}
+    raw = {
+        "id": "square",
+        "svg": SVG,
+        "description": "A simple black square icon.",
+        "detail": "Keep its corners sharp. " * 35,
+    }
     record = task_record(raw, reference=tmp_path / "private.png", source={}, max_turns=8)
     dataset = SVGIconDataset()
     normalized = dataset.normalize(record)
@@ -41,6 +47,11 @@ def test_task_keeps_reference_and_solution_out_of_agent_workspace(tmp_path):
     assert str(tmp_path) not in "".join(files.values()) + record["prompt"]
     assert set(files) == {"icon.svg", "preview.html", "preview.mjs", "preview.json"}
     assert record["reference_images"] == {"icon": str((tmp_path / "private.png").resolve())}
+    source_prompt = raw["description"] + "\n" + raw["detail"].strip()
+    assert record["source_prompt"] == source_prompt
+    assert source_prompt in record["prompt"]
+    item = next(AgentBatch([normalized], ["p"], [[0]], 1).iter_samples())
+    assert source_prompt in dataset.visual_task(HarnessAttempt(item, tmp_path, 900, 120)).instruction
 
 
 @pytest.mark.parametrize(
@@ -49,6 +60,44 @@ def test_task_keeps_reference_and_solution_out_of_agent_workspace(tmp_path):
 def test_rejects_non_svg_or_unsafe_xml(text):
     with pytest.raises((ValueError, ElementTree.ParseError)):
         parse_svg(text)
+
+
+def test_vlm_request_contains_the_original_prompt(monkeypatch, tmp_path):
+    requests = []
+
+    def request(self, payload):
+        requests.append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "dimensions": {
+                                    name: {"score": 50, "reason": "visible evidence"}
+                                    for name in SVGIconDataset().dimensions
+                                },
+                                "checks": {},
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(VLMJudge, "_request", request)
+    raw = {"id": "square", "svg": SVG, "description": "A centered black square icon.", "detail": "Four sharp corners."}
+    record = task_record(raw, reference=tmp_path / "reference.png", source={}, max_turns=8)
+    item = next(AgentBatch([record], ["p"], [[0]], 1).iter_samples())
+    task = SVGIconDataset().visual_task(HarnessAttempt(item, tmp_path, 900, 120))
+    asyncio.run(
+        VLMJudge("https://judge.invalid/v1", "fixture", "fixture").score(
+            instruction=task.instruction, images={"Candidate icon": png("black")}, dimensions=task.dimensions
+        )
+    )
+    data = json.loads(requests[0]["messages"][1]["content"][0]["text"])
+    assert record["source_prompt"] in data["requirements"]
+    assert "original task prompt" in data["rubric"]["semantic_match"]["description"]
 
 
 @pytest.mark.parametrize("submission", [None, "malformed", SVG])
