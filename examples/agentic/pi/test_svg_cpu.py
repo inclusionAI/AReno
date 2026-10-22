@@ -1,0 +1,136 @@
+"""SVG task boundaries: private references, isolated rendering and data selection."""
+
+import asyncio
+import io
+import json
+import shlex
+import shutil
+from pathlib import Path
+from types import SimpleNamespace
+from xml.etree import ElementTree
+
+import pytest
+from PIL import Image
+
+from areno.api.agentic import AgentBatch
+from areno.api.harness import HarnessAttempt, HarnessEnvironment
+from examples.agentic.pi.browser_capture import BrowserCapture
+from examples.agentic.pi.generate_svg_dataset import generate, task_record
+from examples.agentic.pi.svg_dataset import SVGIconCapture, SVGIconDataset, parse_svg
+
+SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect x="20" y="20" width="160" height="160"/></svg>'
+)
+
+
+def png(color):
+    output = io.BytesIO()
+    Image.new("RGB", (64, 64), color).save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_task_keeps_reference_and_solution_out_of_agent_workspace(tmp_path):
+    raw = {"id": "square", "svg": SVG, "description": "A simple black square icon."}
+    record = task_record(raw, reference=tmp_path / "private.png", source={}, max_turns=8)
+    dataset = SVGIconDataset()
+    normalized = dataset.normalize(record)
+    files = dataset.workspace_files(normalized)
+    assert normalized["max_turns"] == 8
+    assert files["icon.svg"] == ""
+    assert SVG not in record["prompt"]
+    assert str(tmp_path) not in "".join(files.values()) + record["prompt"]
+    assert set(files) == {"icon.svg", "preview.html", "preview.mjs", "preview.json"}
+    assert record["reference_images"] == {"icon": str((tmp_path / "private.png").resolve())}
+
+
+@pytest.mark.parametrize(
+    "text", ["", "<html/>", '<svg xmlns="http://www.w3.org/2000/svg">', '<!DOCTYPE svg [<!ENTITY x "x">]><svg/>']
+)
+def test_rejects_non_svg_or_unsafe_xml(text):
+    with pytest.raises((ValueError, ElementTree.ParseError)):
+        parse_svg(text)
+
+
+@pytest.mark.parametrize("submission", [None, "malformed", SVG])
+@pytest.mark.parametrize("visible", [False, True])
+def test_grader_uses_only_svg_and_rejects_blank_pixels(tmp_path, monkeypatch, submission, visible):
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    (workspace / "index.html").write_text("forged beautiful page")
+    if submission is not None:
+        (workspace / "icon.svg").write_text(submission)
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=0 if Path(shlex.split(command)[-1]).is_file() else 1)
+
+        async def download_file(self, source, target):
+            shutil.copyfile(source, target)
+
+        async def upload_dir(self, source, target):
+            shutil.copytree(source, target, dirs_exist_ok=True)
+
+    called = []
+
+    async def capture(self, attempt, **kwargs):
+        root = Path(attempt.environment.workspace)
+        called.append(root)
+        assert root != workspace
+        assert "forged" not in (root / "index.html").read_text()
+        assert (root / "icon.svg").read_text() == SVG
+        return {"views": {"icon": {"broken_images": 0}}, "interactions": []}, {
+            "Candidate icon": png("black" if visible else "white")
+        }
+
+    monkeypatch.setattr(BrowserCapture, "capture", capture)
+    item = next(AgentBatch([{}], ["p"], [[0]], 1).iter_samples())
+    attempt = HarnessAttempt(
+        item, tmp_path, 900, 120, HarnessEnvironment(Environment(), str(workspace), str(tmp_path / "control"))
+    )
+    report, _ = asyncio.run(
+        SVGIconCapture().capture(attempt, entrypoint="icon.svg", viewports={"icon": {"width": 64, "height": 64}})
+    )
+    if submission != SVG:
+        assert report["capture_error"] and not called
+    else:
+        assert report["views"]["icon"]["visible_content"] == visible
+
+
+def test_generation_deduplicates_and_fails_if_insufficient_rows(tmp_path):
+    pq = pytest.importorskip("pyarrow.parquet")
+    import pyarrow as pa
+
+    rows = [
+        {
+            "id": "one",
+            "svg": SVG,
+            "description": "A simple black square icon.",
+            "detail": "",
+            "image": {"bytes": png("black")},
+        },
+        {
+            "id": "copy",
+            "svg": SVG,
+            "description": "Another black square icon.",
+            "detail": "",
+            "image": {"bytes": png("black")},
+        },
+        {
+            "id": "blank",
+            "svg": SVG.replace('x="20"', 'x="21"'),
+            "description": "A blank square icon.",
+            "detail": "",
+            "image": {"bytes": png("white")},
+        },
+    ]
+    parquet = tmp_path / "train.parquet"
+    pq.write_table(pa.Table.from_pylist(rows), parquet)
+    output = tmp_path / "tasks.jsonl"
+    report = generate(output, limit=1, parquet_files=[parquet])
+    assert report["rows"] == 1
+    row = json.loads(output.read_text())
+    assert row["source"]["hub"] == "modelscope"
+    assert Path(row["reference_images"]["icon"]).is_file()
+    assert row["files"] == {"icon.svg": ""}
+    with pytest.raises(ValueError, match="requested 2"):
+        generate(tmp_path / "insufficient.jsonl", limit=2, parquet_files=[parquet])
