@@ -70,6 +70,9 @@ class SVGIconCapture(BrowserCapture):
             return {"capture_error": "invalid SVG document"}, {}
         write_workspace_files(files, {"index.html": PREVIEW})
         workspace = str(PurePosixPath(handle.control_dir) / "svg-submission")
+        created = await handle.environment.exec(shlex.join(["mkdir", "-p", workspace]), cwd="/", timeout_sec=10)
+        if created.return_code != 0:
+            raise RuntimeError("could not create the SVG grading workspace")
         await handle.environment.upload_dir(files, workspace)
         isolated = replace(attempt, environment=replace(handle, workspace=workspace))
         report, images = await super().capture(isolated, entrypoint="index.html", viewports=viewports, serve_dir=".")

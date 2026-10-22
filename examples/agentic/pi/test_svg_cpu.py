@@ -111,12 +111,16 @@ def test_grader_uses_only_svg_and_rejects_blank_pixels(tmp_path, monkeypatch, su
 
     class Environment:
         async def exec(self, command, **kwargs):
+            if shlex.split(command)[:2] == ["mkdir", "-p"]:
+                Path(shlex.split(command)[-1]).mkdir(parents=True, exist_ok=True)
+                return SimpleNamespace(return_code=0)
             return SimpleNamespace(return_code=0 if Path(shlex.split(command)[-1]).is_file() else 1)
 
         async def download_file(self, source, target):
             shutil.copyfile(source, target)
 
         async def upload_dir(self, source, target):
+            assert Path(target).is_dir(), "create the remote grading directory before uploading"
             shutil.copytree(source, target, dirs_exist_ok=True)
 
     called = []
