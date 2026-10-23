@@ -35,6 +35,7 @@ from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weigh
 from areno.engine.protocol import (
     Command,
     ExportAdapterPayload,
+    ExportGGUFPayload,
     Op,
     PolicySyncPayload,
     RolloutCacheProbePayload,
@@ -197,6 +198,8 @@ class ArenoWorker:
             return self.save_checkpoint(cmd.payload)
         if cmd.op is Op.EXPORT_ADAPTER:
             return self.export_adapter(cmd.payload)
+        if cmd.op is Op.EXPORT_GGUF:
+            return self.export_gguf(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PLAN:
             return self.policy_sync_plan(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PUBLISH:
@@ -706,6 +709,13 @@ class ArenoWorker:
             payload.path,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
         )
+        return {"path": path} if path is not None else None
+
+    def export_gguf(self, payload: ExportGGUFPayload) -> dict | None:
+        from areno.export.cuda import export_worker
+
+        self._prepare_actor_onloaded()
+        path = export_worker(self, payload.output_dir, payload.file_type)
         return {"path": path} if path is not None else None
 
 

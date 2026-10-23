@@ -485,6 +485,30 @@ Checkpoint
 ``--save-interval INTEGER``
    Save checkpoint every N train steps. Default: ``100``.
 
+``--export-gguf DIRECTORY``
+   Export the final live policy directly to a new GGUF/Ollama package after
+   successful training, including a normal stop at ``--max-steps``. Currently
+   supports dense Qwen3 on CUDA; packed QLoRA is unsupported. Produces
+   ``model.gguf``, ``Modelfile``, and ``export.json`` without an intermediate
+   checkpoint or an external converter. Independent of ``--save-path``.
+
+``--gguf-file-type [f16|q8_0]``
+   Weight encoding for ``--export-gguf``. Default: ``f16``. Vectors remain F32.
+
+For example, append the following options to an existing training command to
+perform one trainer step and export the updated policy:
+
+.. code-block:: bash
+
+   --max-steps 1 --export-gguf ./exports/qwen3 --gguf-file-type f16
+
+Then import and run the package with Ollama:
+
+.. code-block:: bash
+
+   ollama create areno-qwen3 -f ./exports/qwen3/Modelfile
+   ollama run areno-qwen3
+
 Observability
 ~~~~~~~~~~~~~~
 

@@ -32,6 +32,7 @@ from areno.api.multimodal import (
     record_has_image,
 )
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.trainers.export import export_gguf_if_configured
 
 
 class SFTTrainer:
@@ -55,6 +56,7 @@ class SFTTrainer:
         self.areno.init()
         try:
             self._fit_initialized()
+            export_gguf_if_configured(self)
         finally:
             self.areno.close()
 

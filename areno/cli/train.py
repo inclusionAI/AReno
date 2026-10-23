@@ -185,7 +185,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lam",
         ),
     ),
-    ("Checkpoint", ("save_path", "save_interval")),
+    ("Checkpoint", ("save_path", "save_interval", "export_gguf_path", "gguf_file_type")),
     ("Observability", ("metrics_log_dir",)),
 )
 
@@ -237,6 +237,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         backend = default_backend_type().value
     args.backend = backend.lower()
     args.max_steps = getattr(args, "max_steps", None)
+    args.export_gguf_path = getattr(args, "export_gguf_path", None)
+    args.gguf_file_type = getattr(args, "gguf_file_type", "f16")
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
     args.base_model_name_or_path = getattr(args, "base_model_name_or_path", None)
@@ -320,6 +322,19 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--reward-fn-path or --reward-ckpt is required")
     if args.save_interval <= 0:
         raise click.UsageError("--save-interval must be positive")
+    if args.gguf_file_type not in {"f16", "q8_0"}:
+        raise click.UsageError("--gguf-file-type must be one of: f16, q8_0")
+    if args.export_gguf_path is not None:
+        if args.backend != "cuda":
+            raise click.UsageError("--export-gguf requires --backend cuda")
+        if args.lora is not None and args.lora.qlora:
+            raise click.UsageError("--export-gguf does not support packed QLoRA bases")
+        if smoke_infer or smoke_train:
+            raise click.UsageError("--export-gguf cannot be combined with --smoke-infer or --smoke-train")
+        if Path(args.export_gguf_path).exists():
+            raise click.UsageError("--export-gguf must point to a new output directory")
+        if args.save_path is not None and Path(args.export_gguf_path).resolve() == Path(args.save_path).resolve():
+            raise click.UsageError("--export-gguf must use a different directory from --save-path")
     if args.epochs <= 0:
         raise click.UsageError("--epochs must be positive")
     if args.max_steps is not None and args.max_steps <= 0:
@@ -578,6 +593,8 @@ def _format_training_config_summary(
             [
                 ("save_path", _format_optional(config.save_path)),
                 ("save_interval", str(config.save_interval)),
+                ("export_gguf", _format_optional(config.export_gguf_path)),
+                ("gguf_file_type", config.gguf_file_type if config.export_gguf_path is not None else "disabled"),
                 ("metrics_log_dir", _format_optional(config.metrics_log_dir)),
             ],
         ),
@@ -893,6 +910,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_loader_fn=args.dataset_loader_fn,
             save_path=args.save_path,
             save_interval=args.save_interval,
+            export_gguf_path=getattr(args, "export_gguf_path", None),
+            gguf_file_type=getattr(args, "gguf_file_type", "f16"),
             epochs=args.epochs,
             max_steps=args.max_steps,
             tp_size=args.tp_size,
@@ -954,6 +973,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_loader_fn=args.dataset_loader_fn,
             save_path=args.save_path,
             save_interval=args.save_interval,
+            export_gguf_path=getattr(args, "export_gguf_path", None),
+            gguf_file_type=getattr(args, "gguf_file_type", "f16"),
             epochs=args.epochs,
             max_steps=args.max_steps,
             tp_size=args.tp_size,
@@ -1019,6 +1040,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             reward_fn_path=args.reward_fn_path,
             save_path=args.save_path,
             save_interval=args.save_interval,
+            export_gguf_path=getattr(args, "export_gguf_path", None),
+            gguf_file_type=getattr(args, "gguf_file_type", "f16"),
             epochs=args.epochs,
             max_steps=args.max_steps,
             tp_size=args.tp_size,
@@ -1090,6 +1113,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         reward_fn_path=args.reward_fn_path,
         save_path=args.save_path,
         save_interval=args.save_interval,
+        export_gguf_path=getattr(args, "export_gguf_path", None),
+        gguf_file_type=getattr(args, "gguf_file_type", "f16"),
         epochs=args.epochs,
         max_steps=args.max_steps,
         tp_size=args.tp_size,
@@ -1336,7 +1361,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "lam",
             ],
         ),
-        section("Checkpoint", ["save_path", "save_interval"]),
+        section("Checkpoint", ["save_path", "save_interval", "export_gguf_path", "gguf_file_type"]),
         section("Observability", ["metrics_log_dir"]),
     ]
     extras = []
@@ -1576,6 +1601,20 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
 @click.option("--save-path", default=None, help="Optional checkpoint output directory.")
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
+@click.option(
+    "--export-gguf",
+    "export_gguf_path",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Export live dense Qwen3 weights to a new GGUF/Ollama directory after successful training (CUDA).",
+)
+@click.option(
+    "--gguf-file-type",
+    type=click.Choice(["f16", "q8_0"]),
+    default="f16",
+    show_default=True,
+    help="GGUF weight encoding used with --export-gguf.",
+)
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
 )

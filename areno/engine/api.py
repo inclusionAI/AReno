@@ -34,6 +34,7 @@ from areno.engine.modeling import canonical_model_path
 from areno.engine.protocol import (
     EnsureRolesPayload,
     ExportAdapterPayload,
+    ExportGGUFPayload,
     Op,
     RoleSpecPayload,
     RolloutCacheProbePayload,
@@ -718,6 +719,14 @@ class ArenoEngine:
         result = next((result for result in results if result is not None), None)
         if result is None:
             raise RuntimeError("native LoRA export did not produce an artifact")
+        return result["path"]
+
+    def export_gguf(self, output_dir: str, *, file_type: str = "f16") -> str:
+        """Write trained policy tensors directly to a portable GGUF package."""
+        results = self.cluster.call(Op.EXPORT_GGUF, ExportGGUFPayload(output_dir, file_type))
+        result = next((result for result in results if result is not None), None)
+        if result is None:
+            raise RuntimeError("GGUF export did not produce an artifact")
         return result["path"]
 
     def _transport_payload(self, payload: Any) -> Any:

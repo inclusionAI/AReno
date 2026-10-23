@@ -37,6 +37,8 @@ class TrainerConfig:
     dataset_loader_fn: str | None = None
     save_path: str | None = None
     save_interval: int = 100
+    export_gguf_path: str | None = field(default=None, kw_only=True)
+    gguf_file_type: Literal["f16", "q8_0"] = field(default="f16", kw_only=True)
     epochs: int = 10
     max_steps: int | None = None
     tp_size: int = 4
@@ -96,6 +98,13 @@ class TrainerConfig:
             self.backend = self.backend.lower()
         if self.backend not in {"cuda", "mlx", "npu"}:
             raise ValueError("backend must be one of: cuda, mlx, npu")
+        if self.gguf_file_type not in {"f16", "q8_0"}:
+            raise ValueError("gguf_file_type must be one of: f16, q8_0")
+        if self.export_gguf_path is not None:
+            if self.backend != "cuda":
+                raise ValueError("GGUF export is only supported by the CUDA backend")
+            if self.lora is not None and self.lora.qlora:
+                raise ValueError("GGUF export of packed QLoRA bases is not supported")
         if self.mlx_quantize_bits is not None:
             from areno.api.backend.mlx.quantization import validate_quantization
 

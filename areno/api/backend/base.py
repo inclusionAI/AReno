@@ -139,6 +139,10 @@ class Backend(ABC):
 
         raise NotImplementedError(f"{type(self).__name__} does not support adapter export")
 
+    def export_gguf(self, ctx: Context, output_dir: str, *, file_type: str = "f16") -> str:
+        """Export live policy weights to GGUF when implemented by the backend."""
+        raise NotImplementedError(f"{type(self).__name__} does not support GGUF export")
+
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         """Prepare backend-owned auxiliary model roles, or raise if unsupported."""
 

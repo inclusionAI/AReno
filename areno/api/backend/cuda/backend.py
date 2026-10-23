@@ -568,6 +568,10 @@ class CudaBackend(Backend):
         del ctx
         return self._require_train_engine().export_adapter(path)
 
+    def export_gguf(self, ctx: Context, output_dir: str, *, file_type: str = "f16") -> str:
+        del ctx
+        return self._require_train_engine().export_gguf(output_dir, file_type=file_type)
+
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         engine = self._require_train_engine()
         engine.ensure_roles(roles)

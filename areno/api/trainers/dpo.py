@@ -23,6 +23,7 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.trainers.export import export_gguf_if_configured
 
 
 class DPOTrainer:
@@ -52,6 +53,7 @@ class DPOTrainer:
         self._ensure_roles()
         try:
             self._fit_initialized()
+            export_gguf_if_configured(self)
         finally:
             self.areno.close()
 

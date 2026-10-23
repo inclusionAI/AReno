@@ -544,6 +544,20 @@ class Trainer:
 
         return self._backend.export_adapter(self._ctx, path)
 
+    def export_gguf(self, output_dir: str, *, file_type: str = "f16") -> str:
+        """Export live trained weights as a complete GGUF and Ollama Modelfile.
+
+        Call after training and before close(). Dense Qwen3 CUDA policies,
+        including native LoRA, support F16 and Q8_0 without a converter.
+        """
+        if not self._initialized or self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        if self._rollout_session_depth:
+            raise RuntimeError("end the rollout session before GGUF export")
+        if file_type not in {"f16", "q8_0"}:
+            raise ValueError("GGUF file_type must be 'f16' or 'q8_0'")
+        return self._backend.export_gguf(self._ctx, output_dir, file_type=file_type)
+
     def close(self) -> None:
         """Release backend workers and local resources such as metric writers."""
 

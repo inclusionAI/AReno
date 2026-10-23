@@ -66,6 +66,7 @@ jobs:
             pytest \
             psutil \
             numpy \
+            "gguf>=0.17.1,<0.20" \
             pydantic \
             click \
             fastapi \
