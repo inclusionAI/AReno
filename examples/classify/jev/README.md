@@ -29,6 +29,16 @@ The decisions API (`serve_decisions.py`) and evaluation run on AReno's own model
 through `areno/api/backend/cuda/decision.py` (`SequenceScorer`), not on the
 checkpoint's `trust_remote_code` modeling file.
 
+## Where the JEV hyperparameters live
+
+`--head-lr`, `--head-warmup-steps` and `--brier-weight` are exposed only by this
+example script, which builds a `JevTrainerConfig` directly. There is no
+`areno train` flag for them and none is planned: this script is the JEV entry
+point, and these are research-time knobs (the head's optimizer settings and the
+loss shape) that you revisit by editing the command rather than from a generic
+training CLI. `JevTrainerConfig` defaults (`head_lr=2e-4`, `brier_weight=0.5`,
+`score_head_warmup_steps=0`) are what `areno train` would use.
+
 ## Run
 
 ```bash
@@ -53,7 +63,10 @@ python examples/classify/jev/export_jevforge.py \
   AdamW still accumulates backbone moments during those steps.
 - **Supported families:** the score head works only with model families whose
   forward accepts `defer_lm_head` (qwen3, qwen3_5, gemma4, bailing_moe_v3 /
-  Ling-3.0). It does not work with native LoRA. `export_jevforge.py` and
+  Ling-3.0). It also trains with native LoRA (`--lora`): the backbone stays
+  frozen, the adapters and the head train together, and the checkpoint is a
+  PEFT adapter directory carrying `score_head.safetensors` next to
+  `adapter_model.safetensors`. `export_jevforge.py` and
   jev-forge load the backbone with `trust_remote_code=False`, so Ling
   (`bailing_hybrid`) checkpoints can be trained here but not exported to
   jev-forge unless your transformers build ships that architecture.
