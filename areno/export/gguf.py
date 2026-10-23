@@ -1,8 +1,4 @@
-"""Write live canonical model tensors directly to an Ollama GGUF package.
-
-No converter subprocess or intermediate checkpoint is used. Architecture
-handlers register their exact tensor contract before any output is written.
-"""
+"""Write live model tensors directly to an atomic GGUF/Ollama package."""
 
 from __future__ import annotations
 
@@ -11,159 +7,96 @@ import json
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
 
 import numpy as np
 
-_ARCHITECTURES: dict[str, type] = {}
+from areno.export.architectures import TensorRule, build_architecture, collection_blocks
+from areno.export.tokenizer import modelfile, write_tokenizer
 
 
-def register_architecture(name: str):
-    def register(cls):
-        if name in _ARCHITECTURES:
-            raise ValueError(f"duplicate GGUF architecture: {name}")
-        _ARCHITECTURES[name] = cls
-        return cls
+class _TensorFile:
+    """GGUF headers plus bounded writes to reserved final tensor regions.
 
-    return register
+    The Python GGUF writer normally accepts a complete tensor. Reserving its
+    documented, aligned payload layout lets us stream experts to their final
+    positions without keeping all experts in memory or writing a checkpoint.
+    """
 
+    def __init__(self, path: Path, arch: str, specs: dict, metadata, file_type: str):
+        import gguf
 
-@register_architecture("qwen3")
-class Qwen3Export:
-    """Dense, standard-RoPE Qwen3 text models in canonical weight layout."""
-
-    def __init__(self, config: dict[str, Any]):
-        self.config = config
-        if config.get("rope_scaling") or config.get("use_sliding_window"):
-            raise ValueError("GGUF Qwen3 export does not support scaled RoPE or sliding-window attention")
-        if config.get("hidden_act", "silu") != "silu":
-            raise ValueError("GGUF Qwen3 export requires hidden_act='silu'")
-        if not config.get("qk_layernorm", config.get("qk_norm", True)):
-            raise ValueError("GGUF Qwen3 export requires Q/K RMSNorm")
-
-    def tensor_shapes(self) -> dict[str, tuple[int, ...]]:
-        c = self.config
-        hidden, intermediate = int(c["hidden_size"]), int(c["intermediate_size"])
-        head_dim = int(c.get("head_dim", hidden // int(c["num_attention_heads"])))
-        q_size = head_dim * int(c["num_attention_heads"])
-        kv_size = head_dim * int(c["num_key_value_heads"])
-        shapes = {"model.embed_tokens.weight": (int(c["vocab_size"]), hidden), "model.norm.weight": (hidden,)}
-        if not c.get("tie_word_embeddings", False):
-            shapes["lm_head.weight"] = shapes["model.embed_tokens.weight"]
-        for index in range(int(c["num_hidden_layers"])):
-            prefix = f"model.layers.{index}"
-            entries = {
-                "input_layernorm.weight": (hidden,),
-                "post_attention_layernorm.weight": (hidden,),
-                "self_attn.q_proj.weight": (q_size, hidden),
-                "self_attn.k_proj.weight": (kv_size, hidden),
-                "self_attn.v_proj.weight": (kv_size, hidden),
-                "self_attn.o_proj.weight": (hidden, q_size),
-                "self_attn.q_norm.weight": (head_dim,),
-                "self_attn.k_norm.weight": (head_dim,),
-                "mlp.gate_proj.weight": (intermediate, hidden),
-                "mlp.up_proj.weight": (intermediate, hidden),
-                "mlp.down_proj.weight": (hidden, intermediate),
-            }
-            if c.get("attention_bias", c.get("qkv_bias", False)):
-                entries.update(
-                    {
-                        f"self_attn.{name}_proj.bias": (size,)
-                        for name, size in (("q", q_size), ("k", kv_size), ("v", kv_size))
-                    }
+        self.specs = specs
+        self.types = {}
+        self.offsets = {}
+        self.bytes_written = dict.fromkeys(specs, 0)
+        writer = gguf.GGUFWriter(path, arch, endianess=gguf.GGUFEndian.LITTLE)
+        try:
+            metadata(writer)
+            writer.add_file_type(
+                int(gguf.LlamaFileType.MOSTLY_F16 if file_type == "f16" else gguf.LlamaFileType.MOSTLY_Q8_0)
+            )
+            writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
+            offset = 0
+            for name, spec in specs.items():
+                shape = spec.shape
+                qtype = (
+                    gguf.GGMLQuantizationType.F32
+                    if len(shape) <= 1 or spec.force_f32
+                    else gguf.GGMLQuantizationType.F16
                 )
-            shapes.update({f"{prefix}.{name}": shape for name, shape in entries.items()})
-        return shapes
+                if file_type == "q8_0" and not spec.force_f32 and len(shape) in {2, 3} and shape[-1] % 32 == 0:
+                    qtype = gguf.GGMLQuantizationType.Q8_0
+                self.types[name] = qtype
+                if qtype == gguf.GGMLQuantizationType.Q8_0:
+                    encoded_shape = (*shape[:-1], shape[-1] // 32 * 34)
+                    nbytes, dtype = math.prod(encoded_shape), np.dtype(np.uint8)
+                else:
+                    encoded_shape = shape
+                    dtype = np.dtype(np.float32 if qtype == gguf.GGMLQuantizationType.F32 else np.float16)
+                    nbytes = math.prod(shape) * dtype.itemsize
+                writer.add_tensor_info(name, encoded_shape, dtype, nbytes, raw_dtype=qtype)
+                self.offsets[name] = (offset, nbytes)
+                offset += gguf.GGUFWriter.ggml_pad(nbytes, writer.data_alignment)
+            writer.write_header_to_file()
+            writer.write_kv_data_to_file()
+            writer.write_ti_data_to_file()
+        finally:
+            writer.close()
+        self.stream = path.open("r+b")
+        try:
+            self.data_start = gguf.GGUFWriter.ggml_pad(self.stream.seek(0, 2), writer.data_alignment)
+            self.stream.truncate(self.data_start + offset)
+        except BaseException:
+            self.stream.close()
+            raise
 
-    def metadata(self, writer) -> None:
-        c = self.config
-        hidden, heads = int(c["hidden_size"]), int(c["num_attention_heads"])
-        head_dim = int(c.get("head_dim", hidden // heads))
-        writer.add_name("AReno trained Qwen3")
-        writer.add_context_length(int(c["max_position_embeddings"]))
-        writer.add_embedding_length(hidden)
-        writer.add_block_count(int(c["num_hidden_layers"]))
-        writer.add_feed_forward_length(int(c["intermediate_size"]))
-        writer.add_head_count(heads)
-        writer.add_head_count_kv(int(c["num_key_value_heads"]))
-        writer.add_key_length(head_dim)
-        writer.add_value_length(head_dim)
-        writer.add_rope_dimension_count(head_dim)
-        writer.add_rope_freq_base(float(c.get("rope_theta", 1_000_000)))
-        writer.add_layer_norm_rms_eps(float(c["rms_norm_eps"]))
+    def write(self, name: str, value: np.ndarray, expert: int | None = None) -> None:
+        import gguf
+        from gguf.quants import quantize
 
+        spec = self.specs[name]
+        expected = spec.shape if expert is None else spec.shape[1:]
+        if tuple(value.shape) != expected or not np.isfinite(value).all():
+            raise ValueError(f"invalid shape or non-finite transformed GGUF tensor: {name}")
+        encoded = np.ascontiguousarray(quantize(value, self.types[name]))
+        if self.types[name] != gguf.GGMLQuantizationType.Q8_0 and not np.isfinite(encoded).all():
+            raise ValueError(f"GGUF precision conversion overflow: {name}")
+        if encoded.dtype.itemsize > 1:
+            encoded = encoded.astype(encoded.dtype.newbyteorder("<"), copy=False)
+        offset, nbytes = self.offsets[name]
+        relative = 0 if expert is None else expert * encoded.nbytes
+        if relative + encoded.nbytes > nbytes:
+            raise ValueError(f"GGUF tensor write exceeds reserved payload: {name}")
+        self.stream.seek(self.data_start + offset + relative)
+        encoded.tofile(self.stream)
+        self.bytes_written[name] += encoded.nbytes
 
-def _write_tokenizer(writer, model_path: Path, config: dict[str, Any]) -> None:
-    import gguf
-
-    tokenizer = json.loads((model_path / "tokenizer.json").read_text())
-    if tokenizer["model"]["type"] != "BPE":
-        raise ValueError("Qwen3 GGUF export requires its standard BPE tokenizer")
-    # The qwen2 pre-tokenizer is also used by standard Qwen3 text models.
-    expected_regex = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
-    pre = tokenizer.get("pre_tokenizer", {})
-    parts = pre.get("pretokenizers", [])
-    if not (
-        pre.get("type") == "Sequence"
-        and len(parts) == 2
-        and parts[0].get("type") == "Split"
-        and parts[0].get("pattern", {}).get("Regex") == expected_regex
-        and parts[0].get("behavior") == "Isolated"
-        and not parts[0].get("invert", False)
-        and parts[1].get("type") == "ByteLevel"
-        and not parts[1].get("add_prefix_space", False)
-        and not parts[1].get("use_regex", True)
-    ):
-        raise ValueError("unrecognized Qwen3 tokenizer pre-tokenizer; refusing to change tokenization")
-    count = int(config["vocab_size"])
-    tokens = [f"[PAD{index}]" for index in range(count)]
-    types = [int(gguf.TokenType.UNUSED)] * count
-    for token, index in tokenizer["model"]["vocab"].items():
-        if not 0 <= index < count:
-            raise ValueError(f"token id {index} is outside model vocabulary")
-        tokens[index], types[index] = token, int(gguf.TokenType.NORMAL)
-    for token in tokenizer.get("added_tokens", []):
-        index = int(token["id"])
-        if not 0 <= index < count:
-            raise ValueError(f"added token id {index} is outside model vocabulary")
-        tokens[index] = token["content"]
-        types[index] = int(gguf.TokenType.CONTROL if token.get("special") else gguf.TokenType.USER_DEFINED)
-    writer.add_tokenizer_model("gpt2")
-    writer.add_tokenizer_pre("qwen2")
-    writer.add_token_list(tokens)
-    writer.add_token_types(types)
-    special = gguf.SpecialVocab(model_path, load_merges=True, n_vocab=count)
-    if not special.merges:
-        raise ValueError("Qwen3 tokenizer has no BPE merges")
-    # Recent Ollama versions prefer GGUF's Jinja template over Modelfile's Go
-    # template. Both must describe the same text-only, thinking-off profile.
-    special.chat_template = (
-        "{% for message in messages %}"
-        "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}"
-        "{% endfor %}{% if add_generation_prompt %}"
-        "{{ '<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n' }}{% endif %}"
-    )
-    special.add_special_token.update(bos=False, eos=False)
-    special.add_to_gguf(writer)
-
-
-def qwen3_modelfile(context_length: int) -> str:
-    # This chat template implements ordinary text messages with thinking off,
-    # matching apply_chat_template(..., enable_thinking=False). Tool calling
-    # is deliberately not advertised by this export profile.
-    return (
-        "FROM ./model.gguf\n"
-        'TEMPLATE """{{ range .Messages }}<|im_start|>{{ .Role }}\n'
-        "{{ .Content }}<|im_end|>\n"
-        '{{ end }}<|im_start|>assistant\n<think>\n\n</think>\n\n"""\n'
-        f"PARAMETER num_ctx {min(context_length, 4096)}\n"
-        'PARAMETER stop "<|im_end|>"\n'
-        'PARAMETER stop "<|endoftext|>"\n'
-    )
+    def close(self) -> None:
+        self.stream.close()
 
 
 class GGUFPackage:
-    """Plan tensor headers first; then consume one canonical tensor at a time."""
+    """Validate a registered architecture, then consume live canonical tensors."""
 
     def __init__(
         self,
@@ -173,9 +106,8 @@ class GGUFPackage:
         *,
         file_type: str = "f16",
         lora_merged: bool = False,
+        model_type: str | None = None,
     ):
-        import gguf
-
         if file_type not in {"f16", "q8_0"}:
             raise ValueError("GGUF file_type must be 'f16' or 'q8_0'")
         self.source = Path(model_path)
@@ -183,13 +115,9 @@ class GGUFPackage:
         if self.destination.exists():
             raise FileExistsError(f"GGUF output directory already exists: {self.destination}")
         self.config = json.loads((self.source / "config.json").read_text())
-        model_type = self.config.get("model_type")
-        if model_type not in _ARCHITECTURES:
-            raise ValueError(
-                f"unsupported GGUF model architecture: {model_type!r}; supported: {sorted(_ARCHITECTURES)}"
-            )
-        architecture = _ARCHITECTURES[model_type](self.config)
-        expected = architecture.tensor_shapes()
+        self.architecture = build_architecture(self.config, tensor_shapes, model_type=model_type)
+        architecture = self.architecture
+        expected = architecture.shapes
         if tensor_shapes != expected:
             missing, unexpected = (
                 sorted(expected.keys() - tensor_shapes.keys()),
@@ -199,78 +127,77 @@ class GGUFPackage:
             raise ValueError(
                 f"GGUF tensor contract mismatch: missing={missing[:5]}, unexpected={unexpected[:5]}, shapes={mismatched[:5]}"
             )
-        self.file_type = file_type
-        self.lora_merged = lora_merged
-        self.shapes = tensor_shapes
-        self.pending = list(tensor_shapes)
-        self.names: dict[str, str] = {}
-        self.types: dict[str, Any] = {}
-        name_map = gguf.get_tensor_name_map(gguf.MODEL_ARCH.QWEN3, int(self.config["num_hidden_layers"]))
+        self.file_type, self.lora_merged, self.shapes = file_type, lora_merged, tensor_shapes
+        self.pending = [
+            (name, index, block_shape)
+            for name, shape in tensor_shapes.items()
+            for index, _, block_shape in collection_blocks(name, shape)
+        ]
+        self.file: _TensorFile | None = None
         self.destination.parent.mkdir(parents=True, exist_ok=True)
         self.temporary = TemporaryDirectory(prefix=".areno-gguf-", dir=self.destination.parent)
+        self.stage = Path(self.temporary.name)
         try:
-            self.stage = Path(self.temporary.name)
-            self.writer = gguf.GGUFWriter(self.stage / "model.gguf", "qwen3")
-            architecture.metadata(self.writer)
-            _write_tokenizer(self.writer, self.source, self.config)
-            ft = gguf.LlamaFileType.MOSTLY_F16 if file_type == "f16" else gguf.LlamaFileType.MOSTLY_Q8_0
-            self.writer.add_file_type(int(ft))
-            self.writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
-            for name, shape in tensor_shapes.items():
-                target = name_map.get_name(name, try_suffixes=(".weight", ".bias"))
-                if target is None or target in self.names.values():
-                    raise ValueError(f"missing or duplicate GGUF tensor mapping for {name}")
-                self.names[name] = target
-                qtype = gguf.GGMLQuantizationType.F32 if len(shape) == 1 else gguf.GGMLQuantizationType.F16
-                if file_type == "q8_0" and len(shape) >= 2 and shape[-1] % 32 == 0:
-                    qtype = gguf.GGMLQuantizationType.Q8_0
-                self.types[name] = qtype
-                if qtype == gguf.GGMLQuantizationType.Q8_0:
-                    packed = (*shape[:-1], shape[-1] // 32 * 34)
-                    self.writer.add_tensor_info(target, packed, np.dtype(np.uint8), math.prod(packed), raw_dtype=qtype)
-                else:
-                    dtype = np.dtype(np.float32 if qtype == gguf.GGMLQuantizationType.F32 else np.float16)
-                    self.writer.add_tensor_info(target, shape, dtype, math.prod(shape) * dtype.itemsize)
-            self.writer.write_header_to_file()
-            self.writer.write_kv_data_to_file()
-            self.writer.write_ti_data_to_file()
+            specs = {}
+            for rules in architecture.rules.values():
+                for rule in rules:
+                    if rule.name in specs and specs[rule.name].shape != rule.shape:
+                        raise ValueError(f"inconsistent GGUF output tensor: {rule.name}")
+                    specs[rule.name] = rule
+            for name, value in architecture.extra.items():
+                if name in specs:
+                    raise ValueError(f"duplicate generated GGUF tensor: {name}")
+                specs[name] = TensorRule(name, value.shape, force_f32=True)
+
+            def metadata(writer):
+                architecture.metadata(writer)
+                self.chat_profile = write_tokenizer(writer, self.source, architecture)
+
+            self.file = _TensorFile(
+                self.stage / "model.gguf",
+                architecture.arch,
+                specs,
+                metadata,
+                file_type,
+            )
+            for name, value in architecture.extra.items():
+                self.file.write(name, value)
         except BaseException:
             self.abort()
             raise
 
-    def write(self, name: str, tensor: np.ndarray) -> None:
-        import gguf
-
-        if not self.pending or name != self.pending[0]:
-            raise ValueError(f"out-of-order GGUF tensor: {name}")
-        if tuple(tensor.shape) != self.shapes[name] or not np.isfinite(tensor).all():
+    def write(self, name: str, tensor: np.ndarray, *, expert: int | None = None) -> None:
+        if not self.pending or (name, expert) != self.pending[0][:2]:
+            raise ValueError(f"out-of-order GGUF tensor: {name}, expert={expert}")
+        if tuple(tensor.shape) != self.pending[0][2] or not np.isfinite(tensor).all():
             raise ValueError(f"invalid shape or non-finite GGUF tensor: {name}")
-        from gguf.quants import quantize
-
-        encoded = np.ascontiguousarray(quantize(tensor, self.types[name]))
-        if self.types[name] != gguf.GGMLQuantizationType.Q8_0 and not np.isfinite(encoded).all():
-            raise ValueError(f"GGUF precision conversion overflow: {name}")
-        self.writer.write_tensor_data(encoded)
+        for rule in self.architecture.rules[name]:
+            value = rule.transform(tensor) if rule.transform else tensor
+            self.file.write(rule.name, value, expert if rule.packed_experts else rule.expert)
         self.pending.pop(0)
 
     def finish(self) -> str:
         if self.pending:
             raise ValueError(f"GGUF tensors were not written: {self.pending[:5]}")
-        self.writer.close()
-        (self.stage / "Modelfile").write_text(qwen3_modelfile(int(self.config["max_position_embeddings"])))
+        for name, (_, nbytes) in self.file.offsets.items():
+            if self.file.bytes_written[name] != nbytes:
+                raise ValueError(f"incomplete GGUF output tensor: {name}")
+        self.file.close()
+        (self.stage / "Modelfile").write_text(modelfile(self.architecture))
         digest = hashlib.sha256()
         with (self.stage / "model.gguf").open("rb") as stream:
             for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
                 digest.update(block)
         manifest = {
             "format": "gguf",
-            "architecture": self.config["model_type"],
+            "architecture": self.architecture.arch,
             "file_type": self.file_type,
             "source": str(self.source.resolve()),
             "lora_merged": self.lora_merged,
-            "tensor_count": len(self.shapes),
+            "tensor_count": len(self.file.specs),
             "sha256": digest.hexdigest(),
-            "chat_profile": "text, thinking disabled",
+            "chat_profile": self.chat_profile,
+            "modalities": ["text"],
             "intermediate_checkpoint": False,
         }
         (self.stage / "export.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -279,9 +206,8 @@ class GGUFPackage:
         return str(self.destination / "model.gguf")
 
     def abort(self) -> None:
-        writer = getattr(self, "writer", None)
-        if writer is not None:
-            writer.close()
+        if self.file is not None:
+            self.file.close()
         temporary = getattr(self, "temporary", None)
         if temporary is not None:
             temporary.cleanup()

@@ -488,7 +488,10 @@ Checkpoint
 ``--export-gguf DIRECTORY``
    Export the final live policy directly to a new GGUF/Ollama package after
    successful training, including a normal stop at ``--max-steps``. Currently
-   supports dense Qwen3 on CUDA; packed QLoRA is unsupported. Produces
+   supports registered text architectures on CUDA: Llama, OLMo2, Qwen3
+   (dense/MoE), Qwen3.5 (dense/MoE), Gemma4 (dense/MoE), and Bailing V3
+   (Ling 3). Export is disabled by default. Packed QLoRA, multimodal models,
+   and unsupported architecture variants fail explicitly. Produces
    ``model.gguf``, ``Modelfile``, and ``export.json`` without an intermediate
    checkpoint or an external converter. Independent of ``--save-path``.
 

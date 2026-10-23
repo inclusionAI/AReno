@@ -1606,7 +1606,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "export_gguf_path",
     type=click.Path(file_okay=False),
     default=None,
-    help="Export live dense Qwen3 weights to a new GGUF/Ollama directory after successful training (CUDA).",
+    help="Export supported live text-model weights to a new GGUF/Ollama directory after successful training (CUDA).",
 )
 @click.option(
     "--gguf-file-type",
