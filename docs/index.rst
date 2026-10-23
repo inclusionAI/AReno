@@ -47,6 +47,15 @@ AReno documentation
 
 .. toctree::
    :hidden:
+   :maxdepth: 2
+   :titlesonly:
+   :caption: Integration
+
+   Overview <integrations/index>
+   Harbor <integrations/harbor>
+
+.. toctree::
+   :hidden:
    :maxdepth: 1
    :caption: Reference
 
