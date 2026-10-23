@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gc
 import queue
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -78,16 +79,6 @@ class ArenoWorker:
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
-        if config.runtime.score_head:
-            if config.lora is not None:
-                raise ValueError("runtime.score_head does not support native LoRA")
-            attach_score_head(
-                self.model,
-                hidden_size=config.model.hidden_size,
-                dtype=config.model.dtype,
-                device=self.device,
-                model_path=None if config.dummy_load else config.model_path,
-            )
         self.adapter_registry = (
             initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None
         )
@@ -97,14 +88,31 @@ class ArenoWorker:
             if self.device.type != "cuda":
                 raise ValueError("QLoRA requires CUDA")
             initialize_qlora(self.model)
+        # JEV-style scoring head. Attach it after LoRA so `initialize_lora`'s
+        # blanket `requires_grad_(False)` cannot freeze the head; it trains
+        # alongside the adapters as its own optimizer LR group.
+        self.score_head = None
+        if config.runtime.score_head:
+            self.score_head = attach_score_head(
+                self.model,
+                hidden_size=config.model.hidden_size,
+                dtype=config.model.dtype,
+                device=self.device,
+                model_path=None if config.dummy_load else _score_head_source(config),
+            )
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
             load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
         opt = config.optimizer
-        optimizer_parameters = (
-            self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
-        )
+        if self.adapter_registry is not None:
+            # Native LoRA trains the adapters; a scoring head, when present,
+            # trains with them as its own LR group.
+            optimizer_parameters = tuple(self.adapter_registry.parameters())
+            if self.score_head is not None:
+                optimizer_parameters = optimizer_parameters + tuple(self.score_head.parameters())
+        else:
+            optimizer_parameters = self.model.parameters()
         self.optimizer = build_optimizer(optimizer_parameters, opt, ctx) if config.role == "train" else None
         self.grad_clip_norm = opt.grad_clip_norm
         self.base_lr = opt.lr
@@ -736,7 +744,35 @@ class ArenoWorker:
             payload.path,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
         )
+        # Native LoRA keeps the base frozen, so the checkpoint is the adapter
+        # directory. A scoring head trains alongside the adapters and must be
+        # written there too; it is replicated, so one writer is enough.
+        head = getattr(unwrap_model(self.model), "score_head", None)
+        ctx = get_tp_context()
+        if head is not None and path is not None and ctx.dp_rank == 0 and ctx.rank == 0:
+            save_score_head(head, path)
         return {"path": path} if path is not None else None
+
+
+def _score_head_source(config: EngineConfig) -> str | None:
+    """Directory to resume the scoring head from, or None for a fresh head.
+
+    Native LoRA checkpoints are adapter directories that also carry
+    `score_head.safetensors`; prefer one when it is present, otherwise fall back
+    to the backbone path (a full-weight JEV checkpoint).
+    """
+
+    from areno.engine.score_head import SCORE_HEAD_FILENAME
+
+    candidates = []
+    if config.lora is not None and config.lora.adapter_path is not None:
+        candidates.append(config.lora.adapter_path)
+    if config.model_path is not None:
+        candidates.append(config.model_path)
+    for directory in candidates:
+        if (Path(directory) / SCORE_HEAD_FILENAME).is_file():
+            return str(directory)
+    return config.model_path
 
 
 def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -> bool:

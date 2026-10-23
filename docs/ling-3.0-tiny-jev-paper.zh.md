@@ -98,7 +98,7 @@ Brier 分数源自概率预测领域 [8]，将其与交叉熵这类严格恰当�
 
 ### 3.8 实现
 
-全部改动在 `feat/classify-jev` 分支上的十个提交中。引擎层，我们新增 `areno/engine/score_head.py`，含 `build_score_head`、`attach_score_head`、`packed_sequence_scores` 和 `save_score_head`；为 `RuntimeConfig` 增加 `score_head` 开关；扩展 `TrainSequence` 与 `make_train_pack` 以携带 `sequence_labels`；并为四个模型族增加 `defer_lm_head`。算法层，我们以 `register_algorithm` 注册 `classify` 算法，而非修改工厂，遵循仓库的扩展规则，并新增 `grouped_softmax_loss` 与 `ClassifyTrainer`，后者负责编码、整题装箱、数据并行交错和权重归一化。示例层新增记录加载器、数据集转换器、vendored `typed-decisions`、训练与评测脚本、温度拟合脚本、decisions API 服务以及 JevForge 导出脚本。
+全部改动以 CUDA 后端的形式并入 `main` 的 `jev` 算法。引擎层，我们新增 `areno/engine/score_head.py`，含 `build_score_head`、`attach_score_head`、`packed_sequence_scores` 和 `save_score_head`；为 `RuntimeConfig` 增加 `score_head` 开关，并新增 `packed_num_scoring_rows` 行数记录，使候选行分组不再改变特征头输出的分数个数；扩展 `TrainSequence` 与 `make_train_pack` 以携带 `sequence_labels`；并为四个模型族增加 `defer_lm_head`。算法层，`jev` 通过 `register_algorithm` 注册，而非修改工厂；`areno/api/backend/cuda/decision.py` 承载分组 softmax 的 `jev_loss` 与 `SequenceScorer` 服务适配器；`JevTrainer` 负责编码、按题写入 `trajectory_id`（使引擎的分组 DP 切分不拆散候选）以及使单步梯度等于问题均值的每题损失权重。示例层新增记录加载器、数据集转换器、vendored `typed-decisions`、训练与评测脚本、温度拟合脚本、decisions API 服务以及 JevForge 导出脚本。
 
 期间发现并处理了三个问题。Ling 官方模型定义基于 transformers 4.45，在 transformers 5.15 及以上导入失败，原因是 `is_torch_fx_available` 在导入期不可用，故评测与服务改用我们自己的适配器。FastAPI 服务刻意不写 `from __future__ import annotations`，因为该 future import 会破坏 FastAPI 的运行时注解解析。一个引擎测试硬编码四卡配置，在单卡机上失败；这与本工作无关，CPU 测试套件在 `CUDA_VISIBLE_DEVICES=` 置空下运行。复现命令与产物路径见附录 A。
 

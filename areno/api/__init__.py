@@ -20,6 +20,7 @@ NPU = BackendType.NPU
 DefaultBackend = default_backend_type()
 
 _LAZY_EXPORTS = {
+    "JevCudaConfig": ("areno.api.jev", "JevCudaConfig"),
     "JevMlxConfig": ("areno.api.jev", "JevMlxConfig"),
     "JevTrainerConfig": ("areno.api.jev", "JevTrainerConfig"),
     "DecisionScorer": ("areno.api.jev.scorer", "DecisionScorer"),
@@ -64,6 +65,7 @@ def __getattr__(name: str) -> Any:
 
 __all__ = [
     "Trainer",
+    "JevCudaConfig",
     "JevMlxConfig",
     "JevTrainerConfig",
     "DecisionScorer",

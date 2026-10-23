@@ -153,12 +153,14 @@ class TrainingManager:
         with routing_replay_context(train_meta):
             out = train_model(**model_kwargs)
         if score_head is not None:
-            # Scoring runs hand the loss one scalar per sequence, not logprobs.
+            # Scoring runs hand the loss one scalar per packed row (candidate);
+            # that count is the row count, not the logical-sequence count when a
+            # sequence id spans several candidate rows (JEV questions).
             logprobs = packed_sequence_scores(
                 score_head,
                 out.hidden_states,
                 data_pack["train_cu_seqlens"],
-                int(data_pack["packed_num_sequences"]),
+                int(data_pack.get("packed_num_scoring_rows", data_pack["packed_num_sequences"])),
                 sequence_parallel=train_meta.sequence_parallel,
             )
         elif defer_lm_head:

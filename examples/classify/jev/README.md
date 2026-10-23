@@ -12,8 +12,8 @@ cross-entropy plus `brier_weight` × Brier.
 | --- | --- |
 | `JevForgeModel.head` | `score_head` submodule on the actor (`RuntimeConfig.score_head`, `areno/engine/score_head.py`) |
 | no LM-head projection | Qwen3 / Qwen3.5 forward with `defer_lm_head=True` |
-| `question_loss` | `classify_loss_fn` (`areno/experimental/classify/loss.py`) |
-| `batches_by_tokens` | `build_step_rows`: whole questions per DP rank and microbatch, capped at `--microbatch-tokens` real tokens (packed, no padding) |
+| `question_loss` | `jev_loss` (`areno/api/backend/cuda/decision.py`) |
+| `batches_by_tokens` | candidates of whole questions share a `trajectory_id`, so the engine's grouped DP split and one-question microbatch keep each softmax complete |
 | head-only warmup, `head_lr` | `score_head_warmup_steps` keeps the backbone LR at 0; `score_head_lr` is a separate LR group |
 | `best.safetensors` | `step_XXXXXX/` HF backbone + `score_head.safetensors`; convert with `export_jevforge.py` |
 
@@ -26,8 +26,8 @@ cross-entropy plus `brier_weight` × Brier.
 
 `evaluate.py` reports accuracy / CE / KL / Brier per question type and group.
 The decisions API (`serve_decisions.py`) and evaluation run on AReno's own model
-through `areno/experimental/classify/scorer.py`, not on the checkpoint's
-`trust_remote_code` modeling file.
+through `areno/api/backend/cuda/decision.py` (`SequenceScorer`), not on the
+checkpoint's `trust_remote_code` modeling file.
 
 ## Run
 

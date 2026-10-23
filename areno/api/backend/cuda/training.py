@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 
 import torch
 
@@ -99,6 +100,39 @@ def is_sft_loss_fn(loss_fn: Callable) -> bool:
     """Return whether a callable is the built-in SFT loss or its partial."""
 
     return loss_fn is sft_loss_fn or getattr(loss_fn, "func", None) is sft_loss_fn
+
+
+def is_jev_loss_fn(loss_fn: Callable) -> bool:
+    """Return whether a callable is the registered JEV decision loss."""
+
+    from areno.api.algorithms import describe_loss_fn
+
+    try:
+        return describe_loss_fn(loss_fn).name == "jev"
+    except ValueError:
+        return False
+
+
+def jev_pack_loss(loss_fn: Callable) -> Callable:
+    """Bind the registered JEV loss to the CUDA pack-level signature.
+
+    The pack is pickled across the worker process boundary, so the callable is
+    a `functools.partial` over a top-level function rather than a local closure.
+    """
+
+    from areno.api.algorithms import describe_loss_fn
+
+    brier_weight = float(describe_loss_fn(loss_fn).kwargs.get("brier_weight", 0.5))
+    return partial(jev_pack_loss_fn, brier_weight=brier_weight)
+
+
+def jev_pack_loss_fn(pack: dict, scores, *, brier_weight: float = 0.5):
+    """Top-level CUDA JEV loss entry, picklable for the worker boundary."""
+
+    from areno.api.backend.cuda.decision import jev_loss
+
+    pack["_loss_settings"] = {"brier_weight": brier_weight}
+    return jev_loss(pack, scores)
 
 
 def annotate_sft_token_mean_packs(
@@ -217,7 +251,10 @@ def _sequence_prompt_len(seq: TrainSequence) -> int:
 
 __all__ = [
     "annotate_sft_token_mean_packs",
+    "is_jev_loss_fn",
     "is_sft_loss_fn",
+    "jev_pack_loss",
+    "jev_pack_loss_fn",
     "make_routing_replay",
     "make_train_pack",
     "pad_token_id",

@@ -1,5 +1,5 @@
 """Model-independent Jev-style decision training and serving."""
 
-from areno.api.jev.config import JevMlxConfig, JevTrainerConfig
+from areno.api.jev.config import JevCudaConfig, JevMlxConfig, JevTrainerConfig
 
-__all__ = ["JevMlxConfig", "JevTrainerConfig"]
+__all__ = ["JevCudaConfig", "JevMlxConfig", "JevTrainerConfig"]

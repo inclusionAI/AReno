@@ -1,4 +1,4 @@
-"""Evaluate a classify checkpoint on JevForge records.
+"""Evaluate a JEV checkpoint on JevForge records.
 
 Scores every question with `SequenceScorer` (AReno's own model, packed
 forward, same encoding as training) and reports, per question type and per
@@ -119,7 +119,7 @@ def main() -> None:
 
     import torch
 
-    from areno.experimental.classify.scorer import SequenceScorer
+    from areno.api.backend.cuda.decision import SequenceScorer
 
     rows = load_questions(args.records, args.split)
     if args.limit and args.limit < len(rows):

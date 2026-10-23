@@ -8,7 +8,11 @@ Example (8 GPUs, TP=1 so DP=8):
 
 Checkpoints land in `<save-path>/step_XXXXXX/` as an HF backbone plus
 `score_head.safetensors`; convert one with `export_jevforge.py` to evaluate
-or serve it with JevForge.
+or serve it with JevForge. With `--lora` the checkpoint is a PEFT adapter
+directory that also carries `score_head.safetensors`.
+
+Every selected question's candidates are packed into a single engine
+microbatch, so `--questions-per-step` is the per-step batch.
 """
 
 from __future__ import annotations
@@ -36,9 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--questions-per-step", type=int, default=12)
-    parser.add_argument("--microbatch-tokens", type=int, default=24000)
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--backbone-lr", type=float, default=2e-5)
+    parser.add_argument("--lora", action="store_true", help="freeze the backbone and train PEFT adapters with the head")
+    parser.add_argument("--lora-r", type=int, default=8)
+    parser.add_argument("--lora-alpha", type=float, default=16.0)
     parser.add_argument("--head-lr", type=float, default=2e-4)
     parser.add_argument("--head-warmup-steps", type=int, default=12)
     parser.add_argument("--brier-weight", type=float, default=0.5)
@@ -62,13 +68,16 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
     from areno import Trainer
+    from areno.adapters.config import LoraConfig
     from areno.api.algorithms import get_algorithm
+    from areno.api.jev import JevTrainerConfig
     from areno.api.trainer_factory import build_trainer
     from areno.cli.model_refs import resolve_model_refs_for_config
-    from areno.experimental.classify import ClassifyTrainerConfig
 
-    config = ClassifyTrainerConfig(
-        algo="classify",
+    lora = LoraConfig(rank=args.lora_r, alpha=args.lora_alpha) if args.lora else None
+
+    config = JevTrainerConfig(
+        algo="jev",
         ckpt=args.ckpt,
         dataset_path=args.records,
         backend="cuda",
@@ -82,6 +91,7 @@ def main() -> None:
         batch_size=args.questions_per_step,
         optimizer_lr=args.backbone_lr,
         optimizer_min_lr=0.0,
+        lora=lora,
         lr_decay_steps=args.max_steps,
         lr_decay_style=args.lr_decay_style,
         weight_decay=0.01,
@@ -94,9 +104,8 @@ def main() -> None:
         attn_backend=args.attn_backend,
         metrics_log_dir=args.metrics_log_dir,
         brier_weight=args.brier_weight,
-        microbatch_tokens=args.microbatch_tokens,
         max_seq_len=args.max_seq_len,
-        score_head_lr=args.head_lr,
+        head_lr=args.head_lr,
         score_head_warmup_steps=args.head_warmup_steps,
         seed=args.seed,
     )
@@ -123,7 +132,7 @@ def _register_with_dashboard(config) -> None:
     The dashboard only discovers processes listed in its registry
     (~/.areno/dashboard-jobs.json) and reads their TensorBoard scalars from
     `metrics_log_dir`; every `Trainer.train` result key appears there as
-    `train/<key>` (loss, classify_ce, classify_brier, classify_top1, lr, ...).
+    `train/<key>` (jev_ce, jev_brier, jev_questions, lr, ...).
     """
 
     if not config.metrics_log_dir:

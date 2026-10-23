@@ -36,7 +36,9 @@ from areno.api.backend.cuda.generation import rollout_options
 from areno.api.backend.cuda.losses import dispatch_loss
 from areno.api.backend.cuda.training import (
     annotate_sft_token_mean_packs,
+    is_jev_loss_fn,
     is_sft_loss_fn,
+    jev_pack_loss,
     make_train_pack,
     pad_token_id,
     sft_target_token_count,
@@ -102,7 +104,7 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
             distributed=True,
@@ -515,9 +517,12 @@ class CudaBackend(Backend):
         packs = []
         is_sft = is_sft_loss_fn(loss_fn)
         sft_target_counts = [] if is_sft else None
+        # JEV needs the per-question softmax and the torch grouped loss; the
+        # algorithm loss (MLX-typed) only carries the bound hyperparameters.
+        pack_loss_fn = jev_pack_loss(loss_fn) if is_jev_loss_fn(loss_fn) else loss_fn
         for seqs in train_microbatches(batch_data, mini_bs):
             pack = make_train_pack(seqs)
-            pack["_loss_fn"] = loss_fn
+            pack["_loss_fn"] = pack_loss_fn
             packs.append(pack)
             if is_sft:
                 sft_target_counts.append(sft_target_token_count(seqs))

@@ -1,4 +1,4 @@
-"""Convert an AReno classify checkpoint into JevForge's checkpoint layout.
+"""Convert an AReno JEV checkpoint into JevForge's checkpoint layout.
 
 Input:  `<ckpt>/` = HF backbone saved by AReno + `score_head.safetensors`.
 Output: `<out>/best.safetensors` (`backbone.*` + `head.*`), `<out>/config.json`,

@@ -1,10 +1,10 @@
-"""Serve a classify checkpoint behind the Jev decisions API.
+"""Serve a JEV checkpoint behind the Jev decisions API.
 
     POST /api/alpha/decisions  {model, state, questions} -> {model, answers, usage, latency_ms}
     POST /v1/systemone         same contract (jev-forge's path)
     GET  /v1/models, /health
 
-The checkpoint is an AReno classify output (`step_XXXXXX/`): an HF backbone
+The checkpoint is an AReno JEV training output (`step_XXXXXX/`): an HF backbone
 plus `score_head.safetensors`, e.g. `~/areno-runs/ling-3.0-tiny-jev`. It is
 loaded through AReno's own model adapter (`SequenceScorer`), not the
 checkpoint's `trust_remote_code` modeling file, so the forward is the same one
@@ -101,7 +101,7 @@ class DecisionModel:
     def __init__(self, checkpoint: str, *, max_length: int, temperature: float, attn_backend: str, max_tokens: int):
         import torch
 
-        from areno.experimental.classify.scorer import SequenceScorer
+        from areno.api.backend.cuda.decision import SequenceScorer
 
         self.torch = torch
         self.scorer = SequenceScorer(checkpoint, attn_backend=attn_backend, max_tokens=max_tokens)
@@ -229,7 +229,7 @@ def build_app(model: DecisionModel, model_name: str, api_key: str | None):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", required=True, help="classify step dir (HF backbone + score_head.safetensors)")
+    parser.add_argument("--checkpoint", required=True, help="JEV step dir (HF backbone + score_head.safetensors)")
     parser.add_argument("--model-name", default=None, help="defaults to the checkpoint directory name")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8123)
