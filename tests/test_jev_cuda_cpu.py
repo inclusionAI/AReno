@@ -99,7 +99,9 @@ class JevLossTest(unittest.TestCase):
         from areno.api.algorithms import get_algorithm
 
         spec = get_algorithm("jev")
-        loss_fn = spec.make_loss_fn(JevTrainerConfig(algo="jev", ckpt="unused", dataset_path="unused", backend="cuda"))
+        loss_fn = spec.make_loss_fn(
+            JevTrainerConfig(algo="jev", ckpt="unused", dataset_path="unused", backend="cuda", save_path="unused")
+        )
         self.assertTrue(is_jev_loss_fn(loss_fn))
         self.assertFalse(is_jev_loss_fn(lambda pack, scores: None))
         pack = {"sequence_labels": _question_labels([(0, 2, [1.0, 0.0])])}
@@ -171,7 +173,7 @@ class ScoreHeadTest(unittest.TestCase):
                 model, hidden_size=8, dtype=torch.float32, device=torch.device("cpu"), model_path=tmp
             )
             self.assertIs(model.score_head, head)
-            self.assertEqual(float(head[2].bias), 3.0)
+            self.assertEqual(float(head[2].bias.detach()), 3.0)
             self.assertEqual(head[0].weight._areno_lr_group, "score_head")
             self.assertTrue(Path(tmp, SCORE_HEAD_FILENAME).is_file())
 
@@ -199,6 +201,7 @@ class JevCudaConfigTest(unittest.TestCase):
             ckpt="unused",
             dataset_path="unused",
             backend="cuda",
+            save_path="unused",
             head_lr=1e-3,
             score_head_warmup_steps=5,
         )
@@ -211,6 +214,18 @@ class JevCudaConfigTest(unittest.TestCase):
     def test_head_lr_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "head_lr"):
             JevCudaConfig(head_lr=0.0)
+
+    def test_direct_construction_runs_base_post_init(self):
+        # `JevCudaConfig` subclasses a slots dataclass, whose class-object
+        # rewrite breaks a zero-arg `super()`; constructing it directly must
+        # still run the base validation and stamp the score-head runtime keys.
+        config = JevCudaConfig(head_lr=2e-4)
+        self.assertTrue(config.runtime["score_head"])
+        self.assertEqual(config.optimizer["score_head_lr"], 2e-4)
+        from areno.adapters.config import LoraConfig
+
+        with self.assertRaisesRegex(ValueError, "matching train and rollout TP"):
+            JevCudaConfig(lora=LoraConfig(qlora=True), tp_size=2, rollout_tp_size=4)
 
     def test_cuda_trainer_config_rejects_unknown_backend(self):
         with self.assertRaisesRegex(ValueError, "backend"):

@@ -44,7 +44,10 @@ class JevCudaConfig(CudaConfig):
     max_seq_len: int = 1024
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        # `CudaConfig` is a slots dataclass; the slots rewrite replaces the
+        # class object, so a zero-arg `super()` cannot resolve. Call the base
+        # implementation unbound instead.
+        CudaConfig.__post_init__(self)
         if not math.isfinite(self.head_lr) or self.head_lr <= 0:
             raise ValueError("head_lr must be positive")
         if self.score_head_warmup_steps < 0:

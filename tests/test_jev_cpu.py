@@ -277,8 +277,15 @@ def test_jev_sdk_config_builds_typed_runtime_and_binds_loss():
     assert isinstance(runtime, JevMlxConfig)
     assert runtime.lora.rank == 32 and runtime.max_seq_len == 512 and runtime.head_lr == 3e-4
     assert get_algorithm("jev").make_loss_fn(config).keywords == {"brier_weight": 0.25}
+    # CUDA is a JEV backend too; only an unknown backend is rejected.
+    cuda = JevTrainerConfig(
+        algo="jev", ckpt="unused", dataset_path="unused", backend="cuda", save_path="unused"
+    ).backend_config()
+    from areno.api.jev import JevCudaConfig
+
+    assert isinstance(cuda, JevCudaConfig) and cuda.runtime["score_head"] is True
     with pytest.raises(ValueError, match="requires backend"):
-        JevTrainerConfig(algo="jev", ckpt="unused", dataset_path="unused", backend="cuda", save_path="unused")
+        JevTrainerConfig(algo="jev", ckpt="unused", dataset_path="unused", backend="npu", save_path="unused")
 
 
 def test_jev_cli_config_restores_head_alongside_a_saved_lora(tmp_path):
