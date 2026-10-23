@@ -37,6 +37,8 @@ QWEN35_TARGETS = (*QWEN3_DENSE_TARGETS, "in_proj_qkv", "in_proj_z", "in_proj_b",
 
 NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS, *QWEN35_TARGETS)))
 
+LORA_FA_CONFIG_NAME = "areno_lora_fa_config.json"
+
 
 @dataclass(frozen=True, slots=True)
 class LoraConfig:
@@ -44,6 +46,11 @@ class LoraConfig:
 
     When ``adapter_path`` is set, its standard PEFT metadata is authoritative
     for rank, alpha, dropout, and targets.
+
+    ``lora_fa`` freezes projection A and trains only B (LoRA-FA,
+    arXiv:2308.03303), so autograd keeps the rank-r ``x A^T`` instead of the
+    full-width input. ``lora_fa_grad_correction`` additionally rescales each
+    B gradient by ``(r/alpha)^2 (A A^T)^-1`` (Theorem 4.1).
     """
 
     rank: int = 8
@@ -52,9 +59,18 @@ class LoraConfig:
     target_modules: tuple[str, ...] = QWEN3_DENSE_TARGETS
     adapter_path: str | None = None
     qlora: bool = False
+    lora_fa: bool = False
+    lora_fa_grad_correction: bool = False
 
     def __post_init__(self) -> None:
         if self.adapter_path is not None:
+            lora_fa_path = Path(self.adapter_path) / LORA_FA_CONFIG_NAME
+            if lora_fa_path.exists():
+                lora_fa = json.loads(lora_fa_path.read_text(encoding="utf-8"))
+                if set(lora_fa) != {"frozen", "grad_correction"} or lora_fa["frozen"] != "lora_A":
+                    raise ValueError("unsupported AReno LoRA-FA adapter metadata")
+                object.__setattr__(self, "lora_fa", True)
+                object.__setattr__(self, "lora_fa_grad_correction", bool(lora_fa["grad_correction"]))
             adapter_config = _read_adapter_config(self.adapter_path)
             object.__setattr__(self, "rank", int(adapter_config["r"]))
             object.__setattr__(self, "alpha", float(adapter_config["lora_alpha"]))
@@ -73,6 +89,8 @@ class LoraConfig:
         supported = set(NATIVE_LORA_TARGETS)
         if not requested or not requested <= supported:
             raise ValueError(f"target_modules must be a non-empty subset of {NATIVE_LORA_TARGETS}")
+        if self.lora_fa_grad_correction and not self.lora_fa:
+            raise ValueError("lora_fa_grad_correction requires lora_fa=True")
 
     @property
     def scale(self) -> float:

@@ -177,6 +177,16 @@ def test_initialize_lora_rejects_unsupported_model_families_before_import(monkey
         initialize_lora(_FakeModel({}), LoraConfig(), model_type=model_type)
 
 
+def test_initialize_lora_rejects_lora_fa_before_import(monkeypatch):
+    monkeypatch.setattr(
+        "areno.api.backend.mlx.lora._mlx_lora_api",
+        lambda: pytest.fail("MLX should not be imported for an unsupported LoRA-FA request"),
+    )
+
+    with pytest.raises(ValueError, match="LoRA-FA"):
+        initialize_lora(_FakeModel({}), LoraConfig(lora_fa=True), model_type="qwen3")
+
+
 def test_initialize_lora_accepts_quantized_targets_and_freezes_base(monkeypatch):
     model = _FakeModel({"model.layers.0.self_attn.q_proj": _FakeQuantizedLinear(4, 6)})
     config = LoraConfig(rank=2, target_modules=("q_proj",))

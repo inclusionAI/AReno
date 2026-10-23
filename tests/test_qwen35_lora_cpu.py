@@ -178,6 +178,25 @@ def test_qwen35_fused_gdn_projection_and_gradients_cpu(qwen35_module, qlora):
         torch.testing.assert_close(owner(x), F.linear(x, weight), atol=0, rtol=0)
 
 
+def test_qwen35_lora_fa_freezes_every_a_and_trains_only_b_cpu(qwen35_module):
+    torch.manual_seed(613)
+    model = build_model(qwen35_module)
+    config = LoraConfig(rank=2, alpha=4, target_modules=QWEN35_TARGETS, lora_fa=True, lora_fa_grad_correction=True)
+    registry = initialize_lora(model, config, seed=5)
+    registry.install_lora_fa_grad_correction()
+    slots = registry.slots.values()
+    assert registry.parameters() == tuple(slot.lora_B for slot in slots)
+    assert {id(p) for p in model.parameters() if p.requires_grad} == {id(slot.lora_B) for slot in slots}
+    owner = model.layers[0].attention.in_proj_qkvz
+    with torch.no_grad():
+        for slot in slots:
+            slot.lora_B.normal_(0, 0.03)
+    owner(torch.randn(2, 3, 32)).square().sum().backward()
+    qkv = registry.slots["layers.0.linear_attn.in_proj_qkv"]
+    assert qkv.lora_A.grad is None
+    assert qkv.lora_B.grad is not None and qkv.lora_B.grad.abs().sum() > 0
+
+
 def test_fused_component_peft_tp2_canonical_row_order_cpu(monkeypatch, tmp_path):
     import areno.adapters.peft as peft
     from areno.engine.policy_sync import build_adapter_policy_plan

@@ -143,6 +143,8 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lora_dropout",
             "lora_target_modules",
             "lora_adapter_path",
+            "lora_fa",
+            "lora_fa_grad_correction",
             "reference_mode",
             "lr",
             "min_lr",
@@ -456,9 +458,19 @@ def _lora_config_from_options(args):
             target_modules=targets,
             adapter_path=adapter_path,
             qlora=getattr(args, "qlora", False),
+            lora_fa=getattr(args, "lora_fa", False),
+            lora_fa_grad_correction=getattr(args, "lora_fa_grad_correction", False),
         )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
+
+
+def _lora_fa_summary(lora) -> str:
+    if lora is None:
+        return "n/a"
+    if not lora.lora_fa:
+        return "no"
+    return "yes (grad correction)" if lora.lora_fa_grad_correction else "yes"
 
 
 def _parse_cuda_devices(value: str | None, option_name: str) -> list[int] | None:
@@ -564,6 +576,7 @@ def _format_training_config_summary(
                 ("lora_rank", str(config.lora.rank) if config.lora is not None else "disabled"),
                 ("lora_alpha", str(config.lora.alpha) if config.lora is not None else "n/a"),
                 ("lora_dropout", str(config.lora.dropout) if config.lora is not None else "n/a"),
+                ("lora_fa", _lora_fa_summary(config.lora)),
                 (
                     "lora_target_modules",
                     ",".join(config.lora.target_modules) if config.lora is not None else "n/a",
@@ -1756,6 +1769,19 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter used to initialize native LoRA.")
+@click.option(
+    "--lora-fa",
+    is_flag=True,
+    help=(
+        "Freeze LoRA A and train only B (LoRA-FA); avoids saving full-width adapter inputs for backward. "
+        "Memory savings are significant only with --no-activation-checkpointing."
+    ),
+)
+@click.option(
+    "--lora-fa-grad-correction",
+    is_flag=True,
+    help="With --lora-fa, rescale B gradients by (r/alpha)^2 (A A^T)^-1 (LoRA-FA Theorem 4.1).",
+)
 @click.option(
     "--reference-mode",
     type=click.Choice(["independent", "reuse_actor_base"]),

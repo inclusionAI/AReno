@@ -85,6 +85,8 @@ class ArenoWorker:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
             load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
+        if self.adapter_registry is not None and config.role == "train":
+            self.adapter_registry.install_lora_fa_grad_correction()
         opt = config.optimizer
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
