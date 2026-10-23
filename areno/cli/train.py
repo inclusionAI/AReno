@@ -1698,7 +1698,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Override global concurrent rollout prompts; defaults to batch-size * n-samples.",
 )
 @click.option("--lr", type=float, default=1.0e-6, show_default=True, help="Policy optimizer learning rate.")
-@click.option("--qlora", is_flag=True, help="Enable native NF4 + double quantization + paged optimizer (CUDA).")
+@click.option(
+    "--qlora",
+    is_flag=True,
+    help="Enable QLoRA: NF4 with paging on CUDA; prequantized MLX 4-bit affine base on Apple Silicon.",
+)
 @click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
 @click.option("--q4", is_flag=True, help="Load with MLX 4-bit online quantization; source weights stay unchanged.")
 @click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")

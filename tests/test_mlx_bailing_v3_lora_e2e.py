@@ -1,7 +1,7 @@
 """Opt-in Ling MLX numerical and real-checkpoint LoRA validation.
 
 Set ARENO_E2E_MLX_BAILING_SYNTHETIC=1 for reduced upstream models, or
-ARENO_E2E_MLX_BAILING_MODEL to a non-quantized local Ling checkpoint.
+ARENO_E2E_MLX_BAILING_MODEL to a local Ling checkpoint (set ARENO_E2E_MLX_QLORA=1 for a quantized base).
 Set ARENO_E2E_MLX_BAILING_METRICS_DIR to also register the real-model run
 with the dashboard and record training/continuation metrics.
 No test downloads weights. These gates are intentionally separate from CPU contracts.
@@ -25,6 +25,7 @@ from areno.adapters import LoraConfig
 from areno.api import MLX, MlxConfig, TrainSequence, sft_loss_fn
 
 TARGETS = ("q_proj", "k_proj", "v_proj", "f_proj", "o_proj", "q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "dense")
+EXPANDED_TARGETS = TARGETS + ("g_proj", "gate_proj", "up_proj", "down_proj")
 
 
 def _runtime():
@@ -41,9 +42,9 @@ def _runtime():
     return mx, module
 
 
-def _config(*, adapter_path=None, compile_step=False, checkpointing=False):
+def _config(*, adapter_path=None, compile_step=False, checkpointing=False, targets=TARGETS, qlora=False):
     return MlxConfig(
-        lora=LoraConfig(rank=8, alpha=16, target_modules=TARGETS, adapter_path=adapter_path),
+        lora=LoraConfig(rank=8, alpha=16, target_modules=targets, adapter_path=adapter_path, qlora=qlora),
         optimizer={"lr": 1e-3, "min_lr": 1e-3, "lr_decay_style": "constant", "weight_decay": 0.0},
         compile_train_step=compile_step,
         gradient_checkpointing=checkpointing,
@@ -61,7 +62,9 @@ def _base_digest(model, mx):
         digest = hashlib.sha256()
         flat = value.reshape(-1)
         for start in range(0, value.size, 1 << 20):
-            part = flat[start : start + (1 << 20)].astype(mx.float32)
+            part = flat[start : start + (1 << 20)]
+            if value.dtype != mx.uint32:
+                part = part.astype(mx.float32)
             mx.eval(part)
             digest.update(np.array(part).tobytes())
         result[name.replace(".linear.", ".")] = (tuple(value.shape), str(value.dtype), digest.hexdigest())
@@ -73,8 +76,59 @@ def _assert_step(metrics):
     assert np.isfinite(metrics["grad_norm"]) and metrics["grad_norm"] > 0
 
 
+@pytest.mark.parametrize("token_count", [3, 40])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_routed_mlp_matches_explicit_expert_updates(token_count, quantized):
+    if os.getenv("ARENO_E2E_MLX_BAILING_SYNTHETIC") != "1":
+        pytest.skip("set ARENO_E2E_MLX_BAILING_SYNTHETIC=1")
+    mx, _ = _runtime()
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+    from mlx_lm.models.switch_layers import SwitchGLU
+    from mlx_lm.tuner.lora import LoRASwitchLinear
+
+    mx.random.seed(11)
+    width = 64 if quantized else 8
+    mlp = SwitchGLU(width, 128 if quantized else 12, 4)
+    mlp.freeze()
+    for name in ("gate_proj", "up_proj", "down_proj"):
+        base = getattr(mlp, name)
+        if quantized:
+            base = base.to_quantized(group_size=64, bits=4)
+        slot = LoRASwitchLinear.from_base(base, r=2, scale=2)
+        slot.lora_b = mx.random.normal(slot.lora_b.shape) * 0.05
+        setattr(mlp, name, slot)
+    x = mx.random.normal((1, token_count, width))
+    indices = mx.array([[[i % 3, (i + 1) % 3] for i in range(token_count)]])
+
+    def reference(value):
+        def project(name, inputs):
+            slot = getattr(mlp, name)
+            weight = slot.linear.weight
+            if quantized:
+                weight = mx.dequantize(weight, slot.linear.scales, slot.linear.biases, group_size=64, bits=4)
+            weight = weight + slot.scale * (slot.lora_b @ slot.lora_a)
+            selected = weight[indices]
+            return mx.squeeze(mx.expand_dims(inputs, -2) @ selected.swapaxes(-1, -2), -2)
+
+        inputs = mx.broadcast_to(value[:, :, None, :], (1, token_count, 2, width))
+        gate, up = project("gate_proj", inputs), project("up_proj", inputs)
+        return project("down_proj", nn.silu(gate) * up)
+
+    np.testing.assert_allclose(np.array(mlp(x, indices)), np.array(reference(x)), atol=1e-5, rtol=1e-4)
+    actual = mx.grad(lambda value: mx.sum(mlp(value, indices) ** 2))(x)
+    expected = mx.grad(lambda value: mx.sum(reference(value) ** 2))(x)
+    np.testing.assert_allclose(np.array(actual), np.array(expected), atol=1e-5, rtol=1e-4)
+    _, gradients = nn.value_and_grad(mlp, lambda model: mx.sum(model(x, indices) ** 2))(mlp)
+    for _, grad in tree_flatten(gradients):
+        assert bool(mx.all(mx.isfinite(grad)).item())
+        assert float(mx.sum(mx.abs(grad[:3])).item()) > 0
+        np.testing.assert_array_equal(np.array(grad[3]), 0)
+
+
 @pytest.mark.parametrize("compile_step,checkpointing", [(False, False), (False, True), (True, False), (True, True)])
-def test_reduced_ling_train_export_reload(monkeypatch, tmp_path, compile_step, checkpointing):
+@pytest.mark.parametrize("targets", [TARGETS, EXPANDED_TARGETS], ids=["attention", "expanded"])
+def test_reduced_ling_train_export_reload(monkeypatch, tmp_path, compile_step, checkpointing, targets):
     if os.getenv("ARENO_E2E_MLX_BAILING_SYNTHETIC") != "1":
         pytest.skip("set ARENO_E2E_MLX_BAILING_SYNTHETIC=1")
     mx, upstream = _runtime()
@@ -128,15 +182,18 @@ def test_reduced_ling_train_export_reload(monkeypatch, tmp_path, compile_step, c
             raise
         return backend, ctx
 
-    backend, ctx = make_backend(model, _config(compile_step=compile_step, checkpointing=checkpointing))
+    backend, ctx = make_backend(model, _config(compile_step=compile_step, checkpointing=checkpointing, targets=targets))
     row = TrainSequence(tokens=[1, 2, 3, 4, 5], prompt_mask=[True, True, False, False, False], eos_token_id=0)
     try:
         np.testing.assert_allclose(np.array(model(tokens)), initial_logits, atol=1e-5, rtol=1e-4)
-        assert len(backend._lora_state.slots) == 19
+        assert len(backend._lora_state.slots) == (44 if targets == EXPANDED_TARGETS else 19)
         # Each wrapped projection must match an explicit dense low-rank update,
         # including input gradients (the base stays frozen, its input does not).
-        for slot in backend._lora_state.slots.values():
+        for name, slot in backend._lora_state.slots.items():
             slot.lora_b = mx.random.normal(slot.lora_b.shape) * 0.01
+            if name in backend._lora_state.expert_slots:
+                # Packed expert output/gradient semantics are covered below.
+                continue
             x = mx.random.normal((2, slot.lora_a.shape[0]))
             weight = slot.linear.weight + slot.scale * (slot.lora_b.T @ slot.lora_a.T)
 
@@ -158,6 +215,17 @@ def test_reduced_ling_train_export_reload(monkeypatch, tmp_path, compile_step, c
             grad = flat_gradients[f"model.layers.{index}.attention.{name}.lora_b"]
             assert bool(mx.all(mx.isfinite(grad)).item())
             assert float(mx.sum(mx.abs(grad)).item()) > 0
+        if targets == EXPANDED_TARGETS:
+            for path in (
+                "0.attention.g_proj",
+                "3.attention.g_proj",
+                "0.mlp.gate_proj",
+                "3.mlp.shared_experts.up_proj",
+                "3.mlp.switch_mlp.down_proj",
+            ):
+                grad = flat_gradients[f"model.layers.{path}.lora_b"]
+                assert bool(mx.all(mx.isfinite(grad)).item())
+                assert float(mx.sum(mx.abs(grad)).item()) > 0
         before = {name: np.array(slot.lora_b) for name, slot in backend._lora_state.slots.items()}
         for _ in range(2):
             ctx.step()
@@ -205,6 +273,14 @@ def test_real_ling_two_steps_and_reload(tmp_path, request):
     length = int(os.getenv("ARENO_E2E_MLX_BAILING_TOKENS", "128"))
     assert length >= 2
     report = {"model_path": str(path), "tokens": length, "steps": [], "memory": [], "status": "running"}
+
+    def finish_report():
+        if report["status"] == "running":
+            report["status"] = "failed"
+        report["final_peak_bytes"] = mx.get_peak_memory()
+        (tmp_path / "ling-validation.json").write_text(json.dumps(report, indent=2))
+
+    request.addfinalizer(finish_report)
     recorder = None
     metrics_dir = os.getenv("ARENO_E2E_MLX_BAILING_METRICS_DIR")
     if metrics_dir:
@@ -254,13 +330,34 @@ def test_real_ling_two_steps_and_reload(tmp_path, request):
             recorder.record_dashboard_state(stage=phase, step=len(report["steps"]) + int("continued_step" in report))
 
     mx.random.seed(42)
-    trainer = Trainer(1, str(path), backend_type=MLX, custom_config=_config(checkpointing=True))
+    targets = EXPANDED_TARGETS if os.getenv("ARENO_E2E_MLX_BAILING_EXPANDED") == "1" else TARGETS
+    report["targets"] = list(targets)
+    qlora = os.getenv("ARENO_E2E_MLX_QLORA") == "1"
+    report["qlora"] = qlora
+    trainer = Trainer(
+        1, str(path), backend_type=MLX, custom_config=_config(checkpointing=True, targets=targets, qlora=qlora)
+    )
     try:
         trainer.init()
         record("initialized")
         backend = trainer._backend
-        assert len(backend._lora_state.slots) == 114
+        assert len(backend._lora_state.slots) == (279 if targets == EXPANDED_TARGETS else 114)
         original = _base_digest(backend.model, mx)
+        if qlora:
+            from areno.api import SamplingParams
+
+            report["quantized_modules"] = len(backend._lora_state.quantization["layers"])
+            trainer.begin_rollout_session()
+            try:
+                generated = trainer.rollout_batch(
+                    ["The capital of France is"], 1, SamplingParams(temperature=0, max_new_tokens=32)
+                )
+            finally:
+                trainer.end_rollout_session()
+            sequence = generated[0].sequences[0]
+            assert sequence.resp_tokens and all(np.isfinite(sequence.resp_logprobs))
+            report["generation"] = trainer.get_tokenizer().decode(sequence.resp_tokens)
+            record("generated")
         seed_tokens = trainer.get_tokenizer().encode("The capital of France is Paris. ", add_special_tokens=False)
         assert seed_tokens
         # Purpose-built bounded synthetic text, not truncation of a user dataset.

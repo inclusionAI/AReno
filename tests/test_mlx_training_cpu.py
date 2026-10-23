@@ -300,7 +300,8 @@ def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch, fa
         events.append("load_provider")
         return provider
 
-    def inject(model_arg, config_arg, *, model_type, model_config):
+    def inject(model_arg, config_arg, *, model_type, model_config, quantization):
+        assert quantization is None
         assert model_arg is model
         assert config_arg is config.lora
         assert model_type == "qwen3"
@@ -319,6 +320,7 @@ def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch, fa
     monkeypatch.setattr("areno.api.backend.mlx.backend.load_provider", load_provider)
     monkeypatch.setattr("areno.api.backend.mlx.backend.initialize_lora", inject)
     monkeypatch.setattr("areno.api.backend.mlx.backend.build_optimizer", make_optimizer)
+    monkeypatch.setattr("areno.api.backend.mlx.gated_delta.install_parallel_gated_delta", lambda: None)
     config = MlxConfig(lora=LoraConfig(), gradient_checkpointing=False)
     backend = MlxBackend()
     ctx = SimpleNamespace(

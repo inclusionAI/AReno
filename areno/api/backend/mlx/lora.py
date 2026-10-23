@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import logging
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from math import prod
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
 from areno.adapters.config import LoraConfig
+from areno.api.backend.mlx.quantization import logical_weight_shape, validate_adapter_base
 
 _PEFT_PREFIX = "base_model.model.model."
 _BAILING_KDA_TARGETS = ("q_proj", "k_proj", "v_proj", "f_proj", "o_proj")
 _BAILING_MLA_TARGETS = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "dense")
+_MLP_TARGETS = ("gate_proj", "up_proj", "down_proj")
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -21,6 +27,8 @@ class MlxLoraState:
 
     slots: dict[str, Any]
     config: LoraConfig
+    expert_slots: set[str] = field(default_factory=set)
+    quantization: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +37,9 @@ class _MlxLoraApi:
     linear_type: type
     quantized_linear_type: type
     lora_linear_type: type
+    switch_linear_type: type
+    quantized_switch_linear_type: type
+    lora_switch_linear_type: type
     tree_flatten: Any
     tree_unflatten: Any
 
@@ -51,11 +62,11 @@ def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str,
         architectures = (architectures,)
     if "BailingMoeV3ForCausalLM" not in architectures:
         raise ValueError("MLX Ling LoRA requires architecture BailingMoeV3ForCausalLM")
-    allowed = set(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS)
+    allowed = set(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS + ("g_proj",) + _MLP_TARGETS)
     if not requested <= allowed:
         raise ValueError(
             f"unsupported MLX Ling LoRA targets: {', '.join(sorted(requested - allowed))}; "
-            f"use --lora-target-modules {','.join(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS)}"
+            f"use --lora-target-modules {','.join(sorted(allowed))}"
         )
     args = getattr(model, "args", None)
     layers = getattr(getattr(model, "model", None), "layers", None)
@@ -72,33 +83,54 @@ def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str,
     kda_width = heads * args.head_dim
     kda_shapes = {name: (kda_width, hidden) for name in _BAILING_KDA_TARGETS if name != "o_proj"}
     kda_shapes["o_proj"] = (hidden, kda_width)
+    kda_shapes["g_proj"] = (kda_width, hidden)
     mla_shapes = {
         "q_a_proj": (args.q_lora_rank, hidden),
         "q_b_proj": (heads * (args.qk_nope_head_dim + args.qk_rope_head_dim), args.q_lora_rank),
         "kv_a_proj_with_mqa": (args.kv_lora_rank + args.qk_rope_head_dim, hidden),
         "dense": (hidden, heads * args.v_head_dim),
+        "g_proj": (heads, hidden),
     }
     modules = dict(model.named_modules())
     targets = []
     for index, layer in enumerate(layers):
         if not isinstance(getattr(layer, "is_linear", None), bool):
             raise ValueError(f"MLX Ling LoRA layer {index} has no KDA/MLA discriminator")
-        shapes = kda_shapes if layer.is_linear else mla_shapes
-        for name in sorted(requested & shapes.keys()):
-            path = f"model.layers.{index}.attention.{name}"
+        prefix = f"model.layers.{index}"
+        shapes = {
+            f"{prefix}.attention.{name}": shape
+            for name, shape in (kda_shapes if layer.is_linear else mla_shapes).items()
+        }
+        if requested.intersection(_MLP_TARGETS):
+            if index < args.first_k_dense_replace:
+                mlps = [(f"{prefix}.mlp", args.intermediate_size, ())]
+            else:
+                mlps = [
+                    (
+                        f"{prefix}.mlp.shared_experts",
+                        args.moe_shared_expert_intermediate_size * args.num_shared_experts,
+                        (),
+                    ),
+                    (f"{prefix}.mlp.switch_mlp", args.moe_intermediate_size, (args.num_experts,)),
+                ]
+            for mlp_path, width, leading in mlps:
+                for name in _MLP_TARGETS:
+                    shape = (hidden, width) if name == "down_proj" else (width, hidden)
+                    shapes[f"{mlp_path}.{name}"] = leading + shape
+        for path, expected_shape in sorted(shapes.items()):
+            if path.rsplit(".", 1)[-1] not in requested:
+                continue
             module = modules.get(path)
             if module is None:
                 raise ValueError(f"MLX Ling LoRA target {path!r} is missing")
-            shape = tuple(getattr(getattr(module, "weight", None), "shape", ()))
-            if hasattr(module, "bits") and len(shape) == 2:
-                shape = (shape[0], shape[1] * 32 // module.bits)
-            if shape != shapes[name]:
-                raise ValueError(f"MLX Ling LoRA target {path!r} has shape {shape}, expected {shapes[name]}")
+            shape = logical_weight_shape(module)
+            if shape != expected_shape:
+                raise ValueError(f"MLX Ling LoRA target {path!r} has shape {shape}, expected {expected_shape}")
             targets.append((path, module))
     expected_paths = {path for path, _ in targets}
     unexpected = {path for path in modules if path.rsplit(".", 1)[-1] in requested and path not in expected_paths}
     if unexpected:
-        raise ValueError(f"MLX Ling LoRA targets outside supported attention paths: {sorted(unexpected)}")
+        raise ValueError(f"MLX Ling LoRA targets outside supported projection paths: {sorted(unexpected)}")
     return targets
 
 
@@ -132,11 +164,17 @@ def initialize_lora(
     *,
     model_type: str,
     model_config: dict[str, Any] | None = None,
+    quantization: dict[str, Any] | None = None,
 ) -> MlxLoraState:
     """Validate a model family's projections, freeze the base and inject LoRA."""
 
     resolver = _TARGET_RESOLVERS.get(model_type, _decoder_targets)
 
+    if config.qlora and quantization is None:
+        raise ValueError("MLX QLoRA requires a validated quantized base checkpoint")
+    if not config.qlora and quantization is not None:
+        raise ValueError("MLX base fingerprint metadata requires QLoRA")
+    validate_adapter_base(config.adapter_path, quantization)
     requested = set(config.target_modules)
     resolved = resolver(model, requested, model_config or {})
     api = _mlx_lora_api()
@@ -145,12 +183,20 @@ def initialize_lora(
     for module_path, module in resolved:
         target_name = module_path.rsplit(".", 1)[-1]
         matched.add(target_name)
-        if not isinstance(module, (api.linear_type, api.quantized_linear_type)):
+        is_expert = model_type == "bailing_hybrid" and ".mlp.switch_mlp." in module_path
+        expected_type = (
+            (api.switch_linear_type, api.quantized_switch_linear_type)
+            if is_expert
+            else (api.linear_type, api.quantized_linear_type)
+        )
+        if not isinstance(module, expected_type):
             raise TypeError(
                 f"MLX LoRA target {module_path!r} has unsupported type {type(module).__name__}; "
-                "only Linear or QuantizedLinear layers are supported"
+                f"expected one of {[kind.__name__ for kind in expected_type]}"
             )
         logical_name = module_path.replace(".model.", ".").removeprefix("model.")
+        if is_expert:
+            logical_name = logical_name.replace(".mlp.switch_mlp.", ".mlp.experts.{expert}.")
         targets.append((module_path, logical_name, module))
 
     missing = requested - matched
@@ -160,9 +206,12 @@ def initialize_lora(
     model.freeze()
     replacements = []
     slots: dict[str, Any] = {}
+    expert_slots: set[str] = set()
     module_paths: list[str] = []
     for module_path, logical_name, module in sorted(targets):
-        lora_module = api.lora_linear_type.from_base(
+        is_expert = isinstance(module, (api.switch_linear_type, api.quantized_switch_linear_type))
+        wrapper = api.lora_switch_linear_type if is_expert else api.lora_linear_type
+        lora_module = wrapper.from_base(
             module,
             r=config.rank,
             dropout=config.dropout,
@@ -170,18 +219,43 @@ def initialize_lora(
         )
         replacements.append((module_path, lora_module))
         slots[logical_name] = lora_module
+        if is_expert:
+            expert_slots.add(logical_name)
         module_paths.append(module_path)
     model.update_modules(api.tree_unflatten(replacements))
     _validate_trainable_parameters(model, module_paths, api.tree_flatten)
 
-    state = MlxLoraState(slots=slots, config=config)
+    state = MlxLoraState(slots=slots, config=config, expert_slots=expert_slots, quantization=quantization)
     if config.adapter_path is not None:
         _load_peft_adapter(state, config.adapter_path, api)
+    trainable = sum(slot.lora_a.size + slot.lora_b.size for slot in slots.values())
+    total = sum(array.size for _, array in api.tree_flatten(model.parameters()))
+    # Packed uint32 values and scales are storage, not logical model parameters.
+    for _, module in model.named_modules():
+        if hasattr(module, "scales") and hasattr(module, "bits"):
+            total += prod(logical_weight_shape(module)) - module.weight.size - module.scales.size
+            if getattr(module, "biases", None) is not None:
+                total -= module.biases.size
+    counts = {
+        "attention": sum(".attention." in path or ".self_attn." in path for path in slots),
+        "dense_mlp": sum(
+            ".mlp." in path and ".shared_experts." not in path and path not in expert_slots for path in slots
+        ),
+        "shared_experts": sum(".shared_experts." in path for path in slots),
+        "routed_experts": len(expert_slots),
+    }
+    _logger.info(
+        "MLX LoRA: layers=%d modules=%s adapter_parameters=%d trainable=%.4f%%",
+        len({path.split(".")[1] for path in slots}),
+        counts,
+        trainable,
+        100 * trainable / total,
+    )
     return state
 
 
 def load_peft_adapter(state: MlxLoraState, path: str | Path) -> None:
-    """Load one standard dense PEFT adapter into already-injected MLX slots."""
+    """Load one standard PEFT adapter into already-injected MLX slots."""
 
     _load_peft_adapter(state, path, _mlx_lora_api())
 
@@ -203,6 +277,7 @@ def export_peft_adapter(
 
 
 def _load_peft_adapter(state: MlxLoraState, path: str | Path, api: _MlxLoraApi) -> None:
+    validate_adapter_base(path, state.quantization)
     adapter_file = Path(path) / "adapter_model.safetensors"
     if not adapter_file.is_file():
         raise FileNotFoundError(f"PEFT adapter weights do not exist: {adapter_file}")
@@ -224,8 +299,15 @@ def _load_peft_adapter(state: MlxLoraState, path: str | Path, api: _MlxLoraApi) 
 
     converted: dict[str, tuple[Any, Any]] = {}
     for logical_name, slot in state.slots.items():
-        lora_a = tensors[_peft_key(logical_name, "A")].T.astype(slot.lora_a.dtype)
-        lora_b = tensors[_peft_key(logical_name, "B")].T.astype(slot.lora_b.dtype)
+        if logical_name in state.expert_slots:
+            names = [logical_name.format(expert=i) for i in range(slot.lora_a.shape[0])]
+            lora_a = api.mx.stack([tensors[_peft_key(name, "A")] for name in names])
+            lora_b = api.mx.stack([tensors[_peft_key(name, "B")] for name in names])
+        else:
+            lora_a = tensors[_peft_key(logical_name, "A")].T
+            lora_b = tensors[_peft_key(logical_name, "B")].T
+        lora_a = lora_a.astype(slot.lora_a.dtype)
+        lora_b = lora_b.astype(slot.lora_b.dtype)
         converted[logical_name] = (lora_a, lora_b)
     api.mx.eval(*(array for pair in converted.values() for array in pair))
     for logical_name, (lora_a, lora_b) in converted.items():
@@ -245,10 +327,8 @@ def _export_peft_adapter(
     from safetensors.numpy import save_file
 
     arrays: dict[str, Any] = {}
-    for logical_name in sorted(state.slots):
-        slot = state.slots[logical_name]
-        arrays[_peft_key(logical_name, "A")] = slot.lora_a.T.astype(api.mx.float32)
-        arrays[_peft_key(logical_name, "B")] = slot.lora_b.T.astype(api.mx.float32)
+    for key, array in _peft_arrays(state):
+        arrays[key] = array.astype(api.mx.float32)
     api.mx.eval(*arrays.values())
     tensors = {name: np.ascontiguousarray(np.array(array, copy=True)) for name, array in arrays.items()}
 
@@ -275,17 +355,32 @@ def _export_peft_adapter(
             encoding="utf-8",
         )
         save_file(tensors, staging_weights)
+        metadata_path = output_path / "areno_quantization_config.json"
+        if state.quantization is not None:
+            staging_metadata = staging_path / metadata_path.name
+            staging_metadata.write_text(json.dumps(state.quantization, indent=2) + "\n", encoding="utf-8")
+            staging_metadata.replace(metadata_path)
+        else:
+            metadata_path.unlink(missing_ok=True)
         staging_weights.replace(output_path / staging_weights.name)
         staging_config.replace(output_path / staging_config.name)
     return str(output_path)
 
 
 def _expected_peft_shapes(state: MlxLoraState) -> dict[str, tuple[int, ...]]:
-    shapes: dict[str, tuple[int, ...]] = {}
-    for logical_name, slot in state.slots.items():
-        shapes[_peft_key(logical_name, "A")] = (int(slot.lora_a.shape[1]), int(slot.lora_a.shape[0]))
-        shapes[_peft_key(logical_name, "B")] = (int(slot.lora_b.shape[1]), int(slot.lora_b.shape[0]))
-    return shapes
+    return {key: tuple(array.shape) for key, array in _peft_arrays(state)}
+
+
+def _peft_arrays(state: MlxLoraState) -> Iterator[tuple[str, Any]]:
+    for name, slot in sorted(state.slots.items()):
+        if name in state.expert_slots:
+            # SwitchLinear already stores [expert, rank, in] / [expert, out, rank].
+            for expert in range(slot.lora_a.shape[0]):
+                yield _peft_key(name.format(expert=expert), "A"), slot.lora_a[expert]
+                yield _peft_key(name.format(expert=expert), "B"), slot.lora_b[expert]
+        else:
+            yield _peft_key(name, "A"), slot.lora_a.T
+            yield _peft_key(name, "B"), slot.lora_b.T
 
 
 def _validate_trainable_parameters(model: Any, module_paths: list[str], tree_flatten: Any) -> None:
@@ -307,13 +402,17 @@ def _mlx_lora_api() -> _MlxLoraApi:
     import mlx.core as mx
     import mlx.nn as nn
     from mlx.utils import tree_flatten, tree_unflatten
-    from mlx_lm.tuner.lora import LoRALinear
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear, SwitchLinear
+    from mlx_lm.tuner.lora import LoRALinear, LoRASwitchLinear
 
     return _MlxLoraApi(
         mx=mx,
         linear_type=nn.Linear,
         quantized_linear_type=nn.QuantizedLinear,
         lora_linear_type=LoRALinear,
+        switch_linear_type=SwitchLinear,
+        quantized_switch_linear_type=QuantizedSwitchLinear,
+        lora_switch_linear_type=LoRASwitchLinear,
         tree_flatten=tree_flatten,
         tree_unflatten=tree_unflatten,
     )

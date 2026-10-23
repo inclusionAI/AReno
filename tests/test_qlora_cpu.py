@@ -34,8 +34,7 @@ def test_qlora_config_enables_paging_and_preserves_base_layout_cpu():
     assert not runtime.eager_decode
     with pytest.raises(ValueError, match="matching train and rollout TP"):
         CudaConfig(lora=lora, tp_size=1, rollout_tp_size=2, rollout_devices=[1, 2])
-    with pytest.raises(ValueError, match="QLoRA requires CUDA"):
-        MlxConfig(lora=lora)
+    assert MlxConfig(lora=lora).lora.qlora
     with pytest.raises(ValueError, match="explicit optimizer state offload"):
         EngineConfig(model=ModelConfig(), lora=lora, runtime=RuntimeConfig(optimizer_state_offload="cpu"), devices=[0])
 

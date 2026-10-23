@@ -1,8 +1,13 @@
-"""Model-independent, bounded-memory online quantization for MLX providers."""
+"""Online MLX quantization and validation of prequantized QLoRA checkpoints."""
 
+from __future__ import annotations
+
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
+
+from areno.adapters.config import LoraConfig, read_adapter_quantization
 
 METADATA_FILE = "areno_mlx_quantization.json"
 
@@ -82,3 +87,82 @@ def quantize_online(model: Any, config: dict[str, Any], *, bits: int, group_size
             "modules": quantized,
         },
     }
+
+
+def logical_weight_shape(module: Any) -> tuple[int, ...]:
+    shape = tuple(getattr(getattr(module, "weight", None), "shape", ()))
+    if shape and hasattr(module, "scales") and hasattr(module, "bits"):
+        return (*shape[:-1], shape[-1] * 32 // module.bits)
+    return shape
+
+
+def validate_quantized_base(
+    model: Any, config: dict[str, Any], lora: LoraConfig | None, path: str
+) -> dict[str, Any] | None:
+    """Inspect before adapter injection; never quantize a floating base implicitly."""
+
+    quantization = config.get("quantization")
+    if lora is None or not lora.qlora:
+        if quantization is not None or config.get("quantization_config") is not None:
+            raise ValueError("MLX quantized training requires LoRA with qlora=True (--qlora)")
+        return None
+    if config.get("model_type") not in {"qwen3", "bailing_hybrid"}:
+        raise ValueError("MLX QLoRA supports Qwen3 dense and Ling Bailing V3 only")
+    if not isinstance(quantization, dict):
+        raise ValueError("MLX QLoRA requires a preconverted MLX 4-bit affine checkpoint")
+    if config.get("quantization_config", quantization) != quantization:
+        raise ValueError("MLX QLoRA requires native MLX quantization metadata")
+    _validate_parameters(quantization)
+    for name, value in quantization.items():
+        if name in {"bits", "group_size", "mode"}:
+            continue
+        if value is not False:
+            if not isinstance(value, dict):
+                raise ValueError(f"unsupported MLX quantization entry: {name}")
+            _validate_parameters(value)
+
+    layers = {}
+    predicate = getattr(model, "quant_predicate", None)
+    for name, module in model.named_modules():
+        if not hasattr(module, "scales") or not hasattr(module, "bits"):
+            continue
+        parameters = {"bits": module.bits, "group_size": module.group_size, "mode": module.mode}
+        _validate_parameters(parameters)
+        if predicate is not None and predicate(name, module) is False:
+            raise ValueError(f"MLX QLoRA requires floating weights for model-protected layer {name}")
+        layers[name] = {**parameters, "shape": list(logical_weight_shape(module))}
+    if not layers:
+        raise ValueError("MLX QLoRA checkpoint contains no quantized modules")
+
+    root = Path(path)
+    weights = sorted(root.glob("*.safetensors"))
+    if not weights or not (root / "config.json").is_file():
+        raise ValueError("MLX QLoRA requires a local checkpoint with config.json and safetensors weights")
+    descriptor = {
+        "format": "mlx-affine-v1",
+        "model_type": config["model_type"],
+        "quantization": quantization,
+        "layers": layers,
+        "base_config_sha256": _file_digest(root / "config.json"),
+        "base_weights_sha256": {file.name: _file_digest(file) for file in weights},
+    }
+    validate_adapter_base(lora.adapter_path, descriptor)
+    return descriptor
+
+
+def validate_adapter_base(path: str | Path | None, descriptor: dict[str, Any] | None) -> None:
+    if path is not None and read_adapter_quantization(path) != descriptor:
+        raise ValueError("adapter quantization/base fingerprint does not match the loaded MLX base checkpoint")
+
+
+def _validate_parameters(parameters: dict[str, Any]) -> None:
+    if (parameters.get("bits"), parameters.get("group_size"), parameters.get("mode", "affine")) != (4, 64, "affine"):
+        raise ValueError("MLX QLoRA currently requires 4-bit affine quantization with group_size=64")
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

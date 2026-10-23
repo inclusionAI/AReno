@@ -60,11 +60,7 @@ class LoraConfig:
             object.__setattr__(self, "alpha", float(adapter_config["lora_alpha"]))
             object.__setattr__(self, "dropout", float(adapter_config.get("lora_dropout", 0.0)))
             object.__setattr__(self, "target_modules", tuple(adapter_config["target_modules"]))
-            quantization_path = Path(self.adapter_path) / "areno_quantization_config.json"
-            if quantization_path.exists():
-                quantization = json.loads(quantization_path.read_text(encoding="utf-8"))
-                if quantization != {"format": "nf4-dq-v1", "block_size": 64, "scale_block_size": 256}:
-                    raise ValueError("unsupported AReno QLoRA checkpoint quantization format")
+            if read_adapter_quantization(self.adapter_path) is not None:
                 object.__setattr__(self, "qlora", True)
         object.__setattr__(self, "target_modules", tuple(self.target_modules))
         if self.rank < 1:
@@ -109,3 +105,22 @@ def _read_adapter_config(path: str) -> dict:
     if unsupported:
         raise ValueError(f"unsupported PEFT LoRA options: {', '.join(unsupported)}")
     return adapter_config
+
+
+def read_adapter_quantization(path: str | Path | None) -> dict | None:
+    """Read backend-specific QLoRA metadata without importing a tensor runtime."""
+    if path is None:
+        return None
+    metadata = Path(path) / "areno_quantization_config.json"
+    if not metadata.exists():
+        return None
+    value = json.loads(metadata.read_text(encoding="utf-8"))
+    if value == {"format": "nf4-dq-v1", "block_size": 64, "scale_block_size": 256}:
+        return value
+    if isinstance(value, dict) and value.get("format") == "mlx-affine-v1":
+        if all(
+            value.get(key)
+            for key in ("model_type", "quantization", "layers", "base_config_sha256", "base_weights_sha256")
+        ):
+            return value
+    raise ValueError("unsupported AReno QLoRA checkpoint quantization format")

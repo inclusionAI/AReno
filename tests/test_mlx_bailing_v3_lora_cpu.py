@@ -7,15 +7,24 @@ from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
-from safetensors.numpy import load_file
+from safetensors.numpy import load_file, save_file
 
 from areno.adapters import LoraConfig
 from areno.api.backend.mlx.lora import export_peft_adapter, initialize_lora, load_peft_adapter
-from tests.test_mlx_lora_cpu import _fake_api, _FakeLinear, _FakeLoraLinear, _FakeModel, _FakeQuantizedLinear
+from tests.test_mlx_lora_cpu import (
+    _fake_api,
+    _FakeLinear,
+    _FakeLoraLinear,
+    _FakeModel,
+    _FakeQuantizedLinear,
+    _FakeQuantizedSwitchLinear,
+    _FakeSwitchLinear,
+)
 
 KDA_TARGETS = ("q_proj", "k_proj", "v_proj", "f_proj", "o_proj")
 MLA_TARGETS = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "dense")
 TARGETS = KDA_TARGETS + MLA_TARGETS
+EXPANDED_TARGETS = TARGETS + ("g_proj", "gate_proj", "up_proj", "down_proj")
 MODEL_CONFIG = {"model_type": "bailing_hybrid", "architectures": ["BailingMoeV3ForCausalLM"]}
 
 
@@ -34,6 +43,12 @@ class _LingModel(_FakeModel):
             no_kda_lora=True,
             kda_safe_gate=True,
             rope_interleave=True,
+            first_k_dense_replace=1,
+            intermediate_size=16,
+            moe_shared_expert_intermediate_size=12,
+            num_shared_experts=1,
+            moe_intermediate_size=10,
+            num_experts=3,
         )
         self.model = SimpleNamespace(layers=[SimpleNamespace(is_linear=(i % 4 != 3)) for i in range(layers)])
         modules = {}
@@ -47,9 +62,17 @@ class _LingModel(_FakeModel):
                 module = _FakeLinear(in_dims, out_dims)
                 module.weight = np.zeros((out_dims, in_dims), dtype=np.float32)
                 modules[f"model.layers.{index}.attention.{name}"] = module
-            # Frozen MLP/router and gated output modules must not acquire slots.
-            modules[f"model.layers.{index}.mlp.gate_proj"] = _FakeLinear(8, 16)
-            modules[f"model.layers.{index}.attention.g_proj"] = _FakeLinear(8, 8)
+            modules[f"model.layers.{index}.attention.g_proj"] = _FakeLinear(8, 8 if layer.is_linear else 2)
+            mlps = [("mlp", 16)] if index == 0 else [("mlp.shared_experts", 12), ("mlp.switch_mlp", 10)]
+            for path, width in mlps:
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    in_dims, out_dims = (width, 8) if name == "down_proj" else (8, width)
+                    module = (
+                        _FakeSwitchLinear(in_dims, out_dims, 3)
+                        if "switch_mlp" in path
+                        else _FakeLinear(in_dims, out_dims)
+                    )
+                    modules[f"model.layers.{index}.{path}.{name}"] = module
         super().__init__(modules)
 
 
@@ -92,12 +115,76 @@ def test_projection_subset_covers_every_applicable_layer(target):
     assert set(state.slots) == {f"layers.{i}.attention.{target}" for i in indices}
 
 
-@pytest.mark.parametrize("targets", [("g_proj",), ("kv_b_proj",), ("gate_proj",), LoraConfig().target_modules])
+@pytest.mark.parametrize("targets", [("kv_b_proj",), ("g_proj", "kv_b_proj")])
 def test_unsupported_targets_fail_before_freeze(targets):
     model = _LingModel()
     with pytest.raises(ValueError, match="unsupported MLX Ling LoRA targets.*--lora-target-modules"):
         _initialize(model, targets)
     assert not model.frozen and not model.updated
+
+
+def test_expanded_targets_cover_attention_dense_shared_and_routed_experts(caplog):
+    with caplog.at_level("INFO"):
+        state = _initialize(_LingModel(), EXPANDED_TARGETS)
+    assert len(state.slots) == 44
+    assert len(state.expert_slots) == 9
+    assert all(".experts.{expert}." in name for name in state.expert_slots)
+    assert "layers.0.mlp.gate_proj" in state.slots
+    assert "layers.3.mlp.shared_experts.down_proj" in state.slots
+    assert "layers.3.attention.g_proj" in state.slots
+    assert "adapter_parameters=" in caplog.text and "routed_experts': 9" in caplog.text
+    # Existing default suffixes now cover MLP too, without enabling new gates.
+    assert _initialize(_LingModel(), LoraConfig().target_modules).expert_slots
+
+
+@pytest.mark.parametrize("mutation", ["missing_shared", "expert_count", "wrong_type", "outside"])
+def test_invalid_mlp_structure_fails_before_freeze(mutation):
+    model = _LingModel()
+    path = "model.layers.3.mlp.switch_mlp.down_proj"
+    if mutation == "missing_shared":
+        del model.modules["model.layers.3.mlp.shared_experts.up_proj"]
+    elif mutation == "expert_count":
+        model.modules[path].weight = np.zeros((2, 8, 10))
+    elif mutation == "wrong_type":
+        model.modules[path] = SimpleNamespace(weight=np.zeros((3, 8, 10)))
+    else:
+        model.modules["model.layers.3.mlp.router.gate_proj"] = _FakeLinear(8, 3)
+    with pytest.raises((ValueError, TypeError)):
+        _initialize(model, EXPANDED_TARGETS)
+    assert not model.frozen and not model.updated and not _FakeLoraLinear.events
+
+
+def test_expert_peft_roundtrip_and_failed_load_are_atomic(monkeypatch, tmp_path):
+    state = _initialize(_LingModel(), EXPANDED_TARGETS)
+    for index, slot in enumerate(state.slots.values()):
+        slot.lora_a[:] = np.arange(slot.lora_a.size).reshape(slot.lora_a.shape) + index
+        slot.lora_b[:] = np.arange(slot.lora_b.size).reshape(slot.lora_b.shape) - index
+    export_peft_adapter(state, tmp_path, base_model_name_or_path="synthetic-ling")
+    tensors = load_file(tmp_path / "adapter_model.safetensors")
+    assert len(tensors) == (35 + 9 * 3) * 2
+    for name in state.expert_slots:
+        for expert in range(3):
+            prefix = f"base_model.model.model.{name.format(expert=expert)}"
+            np.testing.assert_array_equal(tensors[f"{prefix}.lora_A.weight"], state.slots[name].lora_a[expert])
+            np.testing.assert_array_equal(tensors[f"{prefix}.lora_B.weight"], state.slots[name].lora_b[expert])
+    monkeypatch.setattr("areno.api.backend.mlx.lora._mlx_lora_api", lambda: _fake_api(tensors=tensors))
+    reloaded = initialize_lora(
+        _LingModel(), LoraConfig(adapter_path=str(tmp_path)), model_type="bailing_hybrid", model_config=MODEL_CONFIG
+    )
+    for name, slot in reloaded.slots.items():
+        np.testing.assert_array_equal(slot.lora_a, state.slots[name].lora_a)
+        np.testing.assert_array_equal(slot.lora_b, state.slots[name].lora_b)
+    bad_key = "base_model.model.model.layers.3.mlp.experts.2.up_proj.lora_B.weight"
+    tensors[bad_key] = np.zeros((1, 1), dtype=np.float32)
+    save_file(tensors, tmp_path / "adapter_model.safetensors")
+    with pytest.raises(ValueError, match="has shape"):
+        load_peft_adapter(reloaded, tmp_path)
+    del tensors[bad_key]
+    with pytest.raises(ValueError, match="tensor keys"):
+        load_peft_adapter(reloaded, tmp_path)
+    for name, slot in reloaded.slots.items():
+        np.testing.assert_array_equal(slot.lora_a, state.slots[name].lora_a)
+        np.testing.assert_array_equal(slot.lora_b, state.slots[name].lora_b)
 
 
 @pytest.mark.parametrize("architectures", [None, [], ["BailingMoeForCausalLM"]])
@@ -126,6 +213,7 @@ def test_invalid_structure_never_partially_injects(mutation):
     elif mutation == "quantized":
         module = _FakeQuantizedLinear(8, 8)
         module.bits = 4
+        module.scales = np.ones((8, 1))
         module.weight = np.zeros((8, 8))
         model.modules[path] = module
     elif mutation == "outside":
@@ -144,6 +232,15 @@ def test_quantized_checkpoint_allows_dense_excluded_targets():
     model = _LingModel()
     assert _initialize(model, config={**MODEL_CONFIG, "quantization": {"bits": 4}}).slots
     assert model.frozen
+
+
+def test_online_quantized_expert_allows_ordinary_lora():
+    model = _LingModel()
+    path = "model.layers.3.mlp.switch_mlp.down_proj"
+    model.modules[path] = _FakeQuantizedSwitchLinear(10, 8, 3)
+    state = _initialize(model, EXPANDED_TARGETS)
+    assert "layers.3.mlp.experts.{expert}.down_proj" in state.expert_slots
+    assert state.quantization is None and model.frozen
 
 
 def test_target_with_no_applicable_layer_is_rejected():

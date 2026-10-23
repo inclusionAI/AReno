@@ -22,6 +22,7 @@ from areno.api.backend.mlx.losses import mlx_loss
 from areno.api.backend.mlx.numerics import selected_token_logprobs
 from areno.api.backend.mlx.optimizer import apply_optimizer_update, build_optimizer, set_group_learning_rates
 from areno.api.backend.mlx.provider import MlxModelProvider, load_provider
+from areno.api.backend.mlx.quantization import validate_quantized_base
 from areno.api.backend.mlx.roles import MlxRole, load_language_role, load_value_role, role_output
 from areno.api.backend.mlx.training import (
     clip_grad_norm,
@@ -93,6 +94,10 @@ class MlxBackend(Backend):
                 raise ValueError("online quantization conflicts with the adapter's saved quantization")
             quantization = requested
         if quantization is not None:
+            if self.config.lora is not None and self.config.lora.qlora:
+                raise ValueError(
+                    "MLX --qlora requires a preconverted checkpoint; cannot combine with online quantization"
+                )
             provider_kwargs["quantization"] = quantization
         if getattr(self.config, "decision_head", False):
             provider_kwargs["text_only"] = True
@@ -112,14 +117,23 @@ class MlxBackend(Backend):
             # A unified rollout/training process cannot let Metal retain all
             # temporary generation buffers for reuse across the phase change.
             mx.set_cache_limit(0)
-        if (
-            self.model_config.get("quantization") is not None
-            and self.config.lora is None
-            and not self.config.inference_only
-        ):
-            raise ValueError(
-                "MLX training on a quantized base requires LoRA; full quantized-weight training is unsupported"
-            )
+        try:
+            # Online quantization uses its own provider metadata and supports
+            # ordinary LoRA. Only explicit QLoRA binds an adapter to base files.
+            quantization = None
+            if self.config.lora is not None and self.config.lora.qlora:
+                quantization = validate_quantized_base(self.model, self.model_config, self.config.lora, model_path)
+            elif (
+                self.model_config.get("quantization") is not None
+                and self.config.lora is None
+                and not self.config.inference_only
+            ):
+                raise ValueError(
+                    "MLX training on a quantized base requires LoRA; full quantized-weight training is unsupported"
+                )
+        except Exception:
+            self.close()
+            raise
         self._validate_tokenizer(ctx.tokenizer)
         optimizer_config = self.config.optimizer
         if self.config.lora is None:
@@ -133,6 +147,7 @@ class MlxBackend(Backend):
                     self.config.lora,
                     model_type=str(self.model_config.get("model_type", "")),
                     model_config=self.model_config,
+                    quantization=quantization,
                 )
             except Exception:
                 self.close()
@@ -275,6 +290,8 @@ class MlxBackend(Backend):
 
             with training_allocator_cache():
                 return train_questions(self, ctx, batch_data, mini_bs=mini_bs, **spec.kwargs)
+        if self._lora_state is not None and self._lora_state.quantization is not None and spec.name != "sft":
+            raise ValueError("MLX QLoRA currently supports SFT only")
         microbatches = train_microbatches(batch_data, mini_bs)
         accumulation = accumulation_steps(len(microbatches), gradient_accumulation_steps)
 
@@ -382,6 +399,8 @@ class MlxBackend(Backend):
 
         del ctx
         self._require_runtime()
+        if self._lora_state is not None and self._lora_state.quantization is not None and set(roles) - {"actor"}:
+            raise ValueError("MLX QLoRA auxiliary roles are not supported yet; use SFT")
         unsupported = set(roles) - self.capabilities().model_roles
         if unsupported:
             names = ", ".join(sorted(unsupported))

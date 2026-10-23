@@ -29,6 +29,7 @@ def test_qlora_cli_enables_default_rank_without_explicit_lora():
     cfg = _trainer_config_from_options(**_options(qlora=True, lora_rank=None, lora_adapter_path=None))
     assert cfg.lora.qlora and cfg.lora.rank == 8
     assert cfg.cuda_config().lora.qlora
+    assert cfg.mlx_config().lora.qlora
 
 
 def test_train_config_requires_dataset_path():

@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from areno.accel import areno_grouped_linear
-from areno.adapters.config import LoraConfig
+from areno.adapters.config import LoraConfig, read_adapter_quantization
 from areno.engine.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -237,6 +237,9 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
 
     from areno.models.registry import _adapter
 
+    metadata = read_adapter_quantization(config.adapter_path)
+    if metadata is not None and metadata["format"] != "nf4-dq-v1":
+        raise ValueError("native CUDA LoRA cannot restore an MLX affine QLoRA checkpoint")
     model_config = getattr(model, "config", None)
     model_type = getattr(model_config, "model_type", None)
     initializer = _adapter(model_type).lora_initializer
