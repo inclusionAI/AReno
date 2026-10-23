@@ -1,5 +1,7 @@
-"""Task-level reward, shared across each attempt's model turns by AReno."""
+"""Share the core task reward across each attempt's model turns."""
+
+from areno.api.harness import HarnessRunner
 
 
 def reward_fn(record):
-    return float(record.source_record["pi_result"]["reward"])
+    return HarnessRunner.reward_fn(record)

@@ -1,24 +1,16 @@
-"""Normalize self-contained pi coding tasks for AReno training."""
+"""Load Pi tasks using the adapter registered by this example.
+
+For another source format, pass a callable or ``file.py:read_rows`` as
+HarnessRunner.loader_fn, with source-specific options in loader_kwargs.
+The callable returns task records; it can read CSV, a database, an SDK, etc.
+CLI callers can also supply their own --dataset-loader-fn file directly.
+"""
+
+from areno.api.harness import HarnessRunner
+from examples.agentic.pi import svg_dataset  # noqa: F401 -- register the example adapter
+
+_workflow = HarnessRunner(harness="pi", dataset="svg_icon")
 
 
 def load_training_dataset(dataset_path, *, default_loader, **kwargs):
-    records = []
-    for row in default_loader(dataset_path):
-        record = dict(row)
-        prompt = record.get("prompt") or record.get("problem_statement")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("pi task requires prompt or problem_statement")
-        if not isinstance(record.get("files"), dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in record["files"].items()
-        ):
-            raise ValueError("pi task files must map relative paths to text")
-        if not isinstance(record.get("verify"), str) or not record["verify"].strip():
-            raise ValueError("pi task requires trusted Python verify code")
-        binary = record.get("binary_files", {})
-        if not isinstance(binary, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in binary.items()
-        ):
-            raise ValueError("binary_files must map relative paths to base64 strings")
-        record["prompt"] = prompt
-        records.append(record)
-    return records
+    return _workflow.dataset_loader(dataset_path, default_loader=default_loader, **kwargs)
