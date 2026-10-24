@@ -281,7 +281,7 @@ def _sequences():
 
 
 def test_real_backend_packing_preserves_teacher_without_critic():
-    from areno.api.backend.areno.backend import _make_train_pack
+    from areno.api.backend.cuda.training import make_train_pack as _make_train_pack
     from areno.engine.runtime.train_step import _pack_train_data
 
     padded = _make_train_pack(_sequences())
@@ -303,7 +303,7 @@ def test_real_backend_packing_preserves_teacher_without_critic():
 
 
 def test_real_backend_pack_loss_and_gradients_match_padded():
-    from areno.api.backend.areno.backend import _make_train_pack
+    from areno.api.backend.cuda.training import make_train_pack as _make_train_pack
     from areno.engine.runtime.train_step import _pack_train_data
 
     padded_pack = _make_train_pack(_sequences())
@@ -328,7 +328,7 @@ def test_real_backend_pack_loss_and_gradients_match_padded():
 
 
 def test_packing_independently_keeps_optional_fields():
-    from areno.api.backend.areno.backend import _make_train_pack
+    from areno.api.backend.cuda.training import make_train_pack as _make_train_pack
     from areno.engine.runtime.train_step import _pack_train_data
     seqs = _sequences()
     # PPO-like fields should still work unchanged.

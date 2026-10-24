@@ -963,7 +963,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
         )

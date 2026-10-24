@@ -20,7 +20,7 @@ import math
 
 import torch
 
-from areno.api.loss_fns.layout import masked_mean, response_layout
+from areno.api.backend.cuda.losses import masked_mean, response_layout
 
 
 def opd_loss_fn(
@@ -57,8 +57,29 @@ def opd_loss_fn(
     if ref_key not in data_pack:
         raise ValueError(f"OPD requires teacher scores ({ref_key})")
 
+    # Upstream's response_layout only accepts canonical packed training data.
+    # OPD also supports rectangular (B, T) batches in standalone use and tests.
+    # Adapt those to the same action-axis fields without changing shared losses.
+    if packed:
+        layout_pack = data_pack
+    else:
+        prompt_mask = data_pack.get("prompt_mask")
+        if not isinstance(prompt_mask, torch.Tensor) or prompt_mask.ndim != 2:
+            raise ValueError("OPD padded batches require a 2D prompt_mask")
+        response_mask = ~prompt_mask[:, 1:].to(dtype=torch.bool)
+        loss_mask = data_pack.get("loss_mask")
+        if loss_mask is not None:
+            if not isinstance(loss_mask, torch.Tensor) or loss_mask.shape != prompt_mask.shape:
+                raise ValueError("OPD loss_mask shapes must match prompt_mask")
+            response_mask = response_mask & loss_mask[:, 1:].to(dtype=torch.bool)
+        layout_pack = {
+            "packed_response_mask": response_mask,
+            "packed_logprobs": data_pack["logprobs"][:, 1:],
+            "packed_ref_logprobs": data_pack["ref_logprobs"][:, 1:],
+        }
+
     layout = response_layout(
-        data_pack,
+        layout_pack,
         logprobs,
         need_old_logprobs=True,
         need_ref_logprobs=True,

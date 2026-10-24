@@ -194,7 +194,7 @@ class FakeEngine:
 
 
 def test_backend_real_train_path_updates_student_and_keeps_teacher_frozen():
-    from areno.api.backend.areno.backend import CudaBackend
+    from areno.api.backend.cuda.backend import CudaBackend
 
     backend = CudaBackend()
     fake = FakeEngine()

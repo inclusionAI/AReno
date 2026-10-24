@@ -96,7 +96,7 @@ class FakeStudentTeacherBackend:
     def train(self, rows, loss_fn, *, mini_bs, gradient_accumulation_steps):
         self.events.append("train")
         self.trained_rows.extend(rows)
-        from areno.api.backend.areno.backend import _make_train_pack
+        from areno.api.backend.cuda.training import make_train_pack as _make_train_pack
         pack = _make_train_pack(rows)
         logprobs = pack["logprobs"][:, 1:].detach().clone() + self.param
         loss, stats = loss_fn(pack, logprobs)
