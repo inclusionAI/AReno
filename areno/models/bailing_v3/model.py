@@ -1818,7 +1818,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
             for layer in self.layers:
                 hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
-            mtp_logits_shard = None
+            mtp_hidden_states = None
             if self.mtp_layers is not None and train_meta is not None and train_meta.mtp_enabled:
                 mtp_hidden = hidden_states
                 mtp_ids = input_ids
@@ -1832,24 +1832,29 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     if use_sequence_parallel:
                         mtp_embeds = scatter_to_sequence_parallel_region(mtp_embeds)
                     mtp_hidden = mtp_layer(mtp_embeds, mtp_hidden, position_ids, train_meta)
-                # TODO(agent): this holds a second full-sequence fp32 vocab
-                # shard live through backward; score MTP targets from
-                # mtp_hidden with a chunked-projection variant of
-                # packed_next_token_logprobs_from_hidden to remove the peak.
-                if self.lm_head.weight.dtype == torch.float32:
-                    mtp_hidden = mtp_hidden.float()
-                mtp_logits_shard = self.lm_head(mtp_hidden)
+                # Hand back hidden states instead of a full-sequence vocab
+                # shard: the trainer projects them in recomputed chunks. Apply
+                # the LM head's TP/SP input boundary once here (gather under SP,
+                # gradient all-reduce otherwise) so the chunked projection is a
+                # plain local matmul with the same backward as `self.lm_head`.
+                mtp_hidden_states = (
+                    gather_from_sequence_parallel_region(mtp_hidden)
+                    if use_sequence_parallel
+                    else copy_to_tensor_parallel_region(mtp_hidden)
+                )
             if defer_lm_head:
                 # The caller projects the trunk hidden states in chunks; MTP
-                # logits are still returned so the MTP loss stays active.
-                return CausalLMOutput(logits_shard=None, hidden_states=hidden_states, mtp_logits_shard=mtp_logits_shard)
+                # hidden states are still returned so the MTP loss stays active.
+                return CausalLMOutput(
+                    logits_shard=None, hidden_states=hidden_states, mtp_hidden_states=mtp_hidden_states
+                )
             logits_input = hidden_states
             if self.lm_head.weight.dtype == torch.float32:
                 logits_input = hidden_states.float()
             return CausalLMOutput(
                 logits_shard=self.lm_head(logits_input),
                 hidden_states=hidden_states,
-                mtp_logits_shard=mtp_logits_shard,
+                mtp_hidden_states=mtp_hidden_states,
             )
 
     def enable_mtp_draft(self, *, max_rows: int, tokens_per_seq: int) -> None:

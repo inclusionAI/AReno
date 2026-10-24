@@ -36,6 +36,11 @@ class CausalLMOutput:
     # at position t. Only populated during training when the model has MTP
     # layers and `TrainMeta.mtp_enabled` is set.
     mtp_logits_shard: torch.Tensor | None = None
+    # Alternative to `mtp_logits_shard`: the MTP layer output over the full
+    # (sequence-parallel gathered) sequence, ready for the LM head. The trainer
+    # projects it in recomputed chunks so no full-sequence vocab tensor lives
+    # through backward.
+    mtp_hidden_states: torch.Tensor | None = None
 
 
 @runtime_checkable

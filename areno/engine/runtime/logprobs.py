@@ -191,6 +191,49 @@ def packed_next_token_logprobs_from_hidden(
     return selected
 
 
+def packed_mtp_token_logprobs_from_hidden(
+    mtp_hidden: torch.Tensor,
+    tokens: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    head_weight: torch.Tensor,
+    chunk_size: int = 256,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`packed_mtp_token_logprobs` from MTP hidden states, projecting in recomputed chunks.
+
+    ``mtp_hidden`` must already be on the LM head's input side of the TP/SP
+    boundary (full sequence, see `CausalLMOutput.mtp_hidden_states`), so each
+    chunk is a plain local matmul against the vocab-sharded ``head_weight``
+    and no chunk issues a collective of its own. Only one chunk of logits is
+    alive at a time; backward recomputes it, exactly like the trunk's
+    `packed_next_token_logprobs_from_hidden`.
+    """
+
+    flat_tokens, keep, positions, action_count = _packed_action_sites(tokens, cu_seqlens)
+    if action_count == 0:
+        return (
+            torch.zeros(0, device=mtp_hidden.device, dtype=torch.float32),
+            torch.zeros(0, device=tokens.device, dtype=torch.bool),
+        )
+    valid = keep[positions + 1]
+    labels = flat_tokens[(positions + 2).clamp(max=flat_tokens.numel() - 1)]
+    flat_hidden = mtp_hidden.reshape(-1, mtp_hidden.shape[-1])
+
+    def score_chunk(chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
+        logits = torch.nn.functional.linear(chunk_hidden.to(head_weight.dtype), head_weight)
+        return vocab_parallel_selected_logprobs(logits, chunk_labels)
+
+    selected = torch.empty(action_count, device=mtp_hidden.device, dtype=torch.float32)
+    for start in range(0, action_count, chunk_size):
+        end = min(start + chunk_size, action_count)
+        selected[start:end] = checkpoint(
+            score_chunk,
+            flat_hidden.index_select(0, positions[start:end]),
+            labels[start:end],
+            use_reentrant=False,
+        )
+    return selected, valid
+
+
 def vocab_parallel_selected_logprobs(logits_shard: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Select label logprobs without gathering full vocabulary logits.
 

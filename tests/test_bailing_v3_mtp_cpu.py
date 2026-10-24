@@ -7,7 +7,7 @@ import torch
 
 import areno.engine.runtime.logprobs as logprob_ops
 from areno.engine.config import ModelConfig
-from areno.engine.runtime.logprobs import packed_mtp_token_logprobs
+from areno.engine.runtime.logprobs import packed_mtp_token_logprobs, packed_mtp_token_logprobs_from_hidden
 from areno.engine.runtime.metadata import TrainMeta
 from tests.helpers import PatchedContext, single_tp_context
 
@@ -47,6 +47,52 @@ class TestPackedMtpTokenLogprobs:
         assert torch.allclose(logprobs[0], _log_softmax_at(logits[0, 1], int(tokens[3])), atol=1e-5)
 
 
+class TestPackedMtpTokenLogprobsFromHidden:
+    @pytest.mark.parametrize("chunk_size", [1, 3, 256])
+    @pytest.mark.parametrize("weight_dtype", [torch.float32, torch.float64])
+    def test_matches_full_projection_values_and_gradients(self, chunk_size, weight_dtype):
+        """Chunked recomputed projection == projecting the whole sequence at once."""
+
+        torch.manual_seed(0)
+        hidden_size, vocab = 8, 11
+        tokens = torch.randint(0, vocab, (1, 9))
+        # Three packed rows, including a length-one row with no action site.
+        cu_seqlens = torch.tensor([0, 4, 5, 9])
+        hidden0 = torch.randn(1, 9, hidden_size, dtype=torch.float64)
+        weight0 = torch.randn(vocab, hidden_size, dtype=weight_dtype)
+        upstream = torch.randn(6, dtype=torch.float32)  # 9 tokens - 3 row tails
+
+        def run(chunked: bool):
+            hidden = hidden0.clone().requires_grad_(True)
+            weight = weight0.clone().requires_grad_(True)
+            with PatchedContext(logprob_ops, get_tp_context=single_tp_context):
+                if chunked:
+                    logprobs, valid = packed_mtp_token_logprobs_from_hidden(
+                        hidden, tokens, cu_seqlens, weight, chunk_size=chunk_size
+                    )
+                else:
+                    logits = torch.nn.functional.linear(hidden.to(weight.dtype), weight)
+                    logprobs, valid = packed_mtp_token_logprobs(logits, tokens, cu_seqlens)
+            (logprobs * upstream).sum().backward()
+            return logprobs.detach(), valid, hidden.grad, weight.grad
+
+        ref_lp, ref_valid, ref_dh, ref_dw = run(chunked=False)
+        lp, valid, dh, dw = run(chunked=True)
+        assert ref_lp.shape == (6,)
+        assert torch.equal(valid, ref_valid)
+        tol = 1e-5 if weight_dtype == torch.float32 else 1e-10
+        assert torch.allclose(lp, ref_lp, atol=tol, rtol=tol)
+        assert torch.allclose(dh, ref_dh, atol=tol, rtol=tol)
+        assert torch.allclose(dw, ref_dw, atol=tol, rtol=tol)
+
+    def test_empty_action_axis(self):
+        with PatchedContext(logprob_ops, get_tp_context=single_tp_context):
+            logprobs, valid = packed_mtp_token_logprobs_from_hidden(
+                torch.randn(1, 2, 4), torch.tensor([[1, 2]]), torch.tensor([0, 1, 2]), torch.randn(5, 4)
+            )
+        assert logprobs.shape == (0,) and valid.shape == (0,)
+
+
 class TestTrainingMtpLoss:
     def test_mtp_loss_masks_row_boundaries_and_prompt_targets(self):
         from areno.engine.training import TrainingManager
@@ -61,7 +107,8 @@ class TestTrainingMtpLoss:
         }
 
         with PatchedContext(logprob_ops, get_tp_context=single_tp_context):
-            loss = TrainingManager._mtp_loss(None, logits, tokens, data_pack)
+            logprobs, valid = packed_mtp_token_logprobs(logits, tokens, data_pack["train_cu_seqlens"])
+            loss = TrainingManager._mtp_loss(None, logprobs, valid, data_pack)
 
         # Trainable MTP sites: action 0 (target = response token at action 1)
         # and action 1; actions 2 and 3 are row-final sites.
@@ -223,13 +270,16 @@ def test_forward_emits_mtp_logits_only_when_enabled(monkeypatch):
 
     meta_on = TrainMeta(cu_seqlens=cu_seqlens, max_seqlen=4, packed=True, mtp_enabled=True)
     out = model(tokens, train_meta=meta_on)
-    assert out.mtp_logits_shard is not None
-    assert out.mtp_logits_shard.shape == out.logits_shard.shape
-    out.mtp_logits_shard.sum().backward()
+    # The model returns MTP hidden states for chunked projection, never a
+    # full-sequence vocab tensor.
+    assert out.mtp_logits_shard is None
+    assert out.mtp_hidden_states is not None
+    assert out.mtp_hidden_states.shape == out.hidden_states.shape
+    out.mtp_hidden_states.sum().backward()
     assert model.mtp_layers[0].eh_proj.weight.grad is not None
 
     meta_off = TrainMeta(cu_seqlens=cu_seqlens, max_seqlen=4, packed=True, mtp_enabled=False)
-    assert model(tokens, train_meta=meta_off).mtp_logits_shard is None
+    assert model(tokens, train_meta=meta_off).mtp_hidden_states is None
 
 
 def test_checkpoint_spec_declares_mtp_extra_layers():

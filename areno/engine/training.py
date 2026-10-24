@@ -15,6 +15,7 @@ from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.logprobs import (
     packed_mtp_token_logprobs,
+    packed_mtp_token_logprobs_from_hidden,
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
 )
@@ -169,9 +170,18 @@ class TrainingManager:
             loss = loss_out
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
+        mtp_hidden_states = getattr(out, "mtp_hidden_states", None)
         mtp_logits_shard = getattr(out, "mtp_logits_shard", None)
-        if mtp_logits_shard is not None:
-            mtp_loss = self._mtp_loss(mtp_logits_shard, tokens, data_pack)
+        if mtp_hidden_states is not None or mtp_logits_shard is not None:
+            if mtp_hidden_states is not None:
+                mtp_logprobs, mtp_valid = packed_mtp_token_logprobs_from_hidden(
+                    mtp_hidden_states, tokens, data_pack["train_cu_seqlens"], train_model.lm_head.weight
+                )
+            else:
+                mtp_logprobs, mtp_valid = packed_mtp_token_logprobs(
+                    mtp_logits_shard, tokens, data_pack["train_cu_seqlens"]
+                )
+            mtp_loss = self._mtp_loss(mtp_logprobs, mtp_valid, data_pack)
             loss = loss + mtp_loss_scale * mtp_loss
             # Keep the tensor; the returned metrics are converted to floats
             # after backward, avoiding a GPU sync on the hot path here.
@@ -398,10 +408,9 @@ class TrainingManager:
             return 0.0
         return float(getattr(config.runtime, "mtp_loss_scale", None) or 0.0)
 
-    def _mtp_loss(self, mtp_logits_shard: torch.Tensor, tokens: torch.Tensor, data_pack: dict) -> torch.Tensor:
+    def _mtp_loss(self, mtp_logprobs: torch.Tensor, mtp_valid: torch.Tensor, data_pack: dict) -> torch.Tensor:
         """Mean negative logprob of each response token t+2 under the MTP head."""
 
-        mtp_logprobs, mtp_valid = packed_mtp_token_logprobs(mtp_logits_shard, tokens, data_pack["train_cu_seqlens"])
         response_mask = data_pack["packed_response_mask"]
         seq_ids = data_pack["packed_seq_ids"]
         # The t+2 target at action site k is trainable iff the next action
