@@ -1,9 +1,9 @@
-"""Command-line entrypoint for SFT/DPO/GSPO/GRPO/PPO training.
+"""Command-line entrypoint for SFT/DPO/GSPO/GRPO/PPO/OPD training.
 
 The flow is:
     1. `train_command` collects Click options and builds either a
-       `TrainerConfig` (sft/gspo/grpo), `DPOTrainerConfig`, or
-       `PPOTrainerConfig`.
+       `TrainerConfig` (sft), `DPOTrainerConfig`, `PolicyTrainerConfig`
+       (gspo/grpo), `PPOTrainerConfig`, or `OPDTrainerConfig`.
     2. The algorithm registry selects the default loss function and concrete
        trainer implementation for the requested algorithm.
     3. `run` constructs an `areno.api.Trainer` with the areno backend,
@@ -17,6 +17,7 @@ import ast
 import importlib.util
 import json
 import logging
+import math
 import os
 import shutil
 import textwrap
@@ -31,6 +32,7 @@ from areno.api.algorithms import get_algorithm
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
+    OPDTrainerConfig,
     PolicyTrainerConfig,
     PPOTrainerConfig,
     RolloutTrainerConfig,
@@ -168,12 +170,14 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "weight_decay",
             "grad_clip_norm",
             "ref_ckpt",
+            "teacher_ckpt",
             "critic_ckpt",
             "critic_lr",
             "critic_warmup_steps",
             "gspo_clip_eps",
             "grpo_clip_eps",
             "dpo_beta",
+            "opd_coef",
             "use_kl_loss",
             "kl_loss_coef",
             "kl_loss_type",
@@ -275,6 +279,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     else:
         args.train_devices = _parse_cuda_devices(getattr(args, "train_devices", None), "--train-devices")
         args.rollout_devices = _parse_cuda_devices(getattr(args, "rollout_devices", None), "--rollout-devices")
+    args.teacher_ckpt = getattr(args, "teacher_ckpt", None)
+    args.opd_coef = getattr(args, "opd_coef", 1.0)
     if args.rollout_tp_size is not None and args.rollout_tp_size <= 0:
         raise click.UsageError("--rollout-tp-size must be positive")
     if args.backend != "mlx" and args.train_devices is not None:
@@ -314,7 +320,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if tune_max_samples <= 0:
         raise click.UsageError("--tune-max-samples must be positive")
     if (
-        algorithm.requires_rollout
+        algorithm.requires_reward
         and not (smoke_infer or smoke_train)
         and args.reward_fn_path is None
         and args.reward_ckpt is None
@@ -419,6 +425,14 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.value_loss_coef, "--value-loss-coef")
         _require_positive_float(args.gamma, "--gamma")
         _require_positive_float(args.lam, "--lam")
+    if algorithm.name == "opd":
+        if not args.teacher_ckpt or not args.teacher_ckpt.strip():
+            raise click.UsageError(
+                "--teacher-ckpt is required for --algo opd"
+            )
+
+        if (not math.isfinite(args.opd_coef) or args.opd_coef <= 0):
+            raise click.UsageError("--opd-coef must be a finite positive number")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     _preflight_task_hooks(args, algorithm)
@@ -509,6 +523,7 @@ def _format_training_config_summary(
                 ("name", algorithm.name),
                 ("default_loss", _callable_name(algorithm.default_loss_fn)),
                 ("requires_rollout", _format_bool(algorithm.requires_rollout)),
+                ("requires_reward",_format_bool(algorithm.requires_reward),),
             ],
         ),
         (
@@ -524,6 +539,8 @@ def _format_training_config_summary(
                 ),
                 ("reward_ckpt", _format_optional(_reward_ckpt_for_summary(config, reward_ckpt))),
                 ("agent_fn", _format_optional(config.agent_fn)),
+                ("teacher_ckpt",config.teacher_ckpt if isinstance(config, OPDTrainerConfig) else "n/a",),
+                ("opd_coef",str(config.opd_coef) if isinstance(config, OPDTrainerConfig) else "n/a",),
             ],
         ),
         (
@@ -899,6 +916,56 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     lora = getattr(args, "lora", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
+    if algorithm.name == "opd":
+        return OPDTrainerConfig(
+            algo=algorithm.name,
+            ckpt=args.ckpt,
+            teacher_ckpt=args.teacher_ckpt,
+            opd_coef=args.opd_coef,
+            dataset_path=args.dataset_path,
+            model_hub=args.model_hub,
+            dataset_loader_fn=args.dataset_loader_fn,
+            save_path=args.save_path,
+            save_interval=args.save_interval,
+            epochs=args.epochs,
+            max_steps=args.max_steps,
+            tp_size=args.tp_size,
+            world_size=args.world_size,
+            train_devices=args.train_devices,
+            rollout_tp_size=args.rollout_tp_size,
+            rollout_devices=args.rollout_devices,
+            policy_sync_bucket_mb=args.policy_sync_bucket_mb,
+            batch_size=args.batch_size,
+            n_samples=args.n_samples,
+            mini_bs=args.mini_bs,
+            score_micro_bs=args.score_micro_bs,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_prompt_tokens=args.max_prompt_tokens,
+            max_new_tokens=args.max_new_tokens,
+            max_context_len=args.max_context_len,
+            greedy=args.greedy,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            max_running_prompts=args.max_running_prompts,
+            optimizer_lr=args.lr,
+            optimizer_min_lr=args.min_lr,
+            lr_decay_steps=args.lr_decay_steps,
+            lr_decay_style=args.lr_decay_style,
+            optimizer_beta1=args.adam_beta1,
+            optimizer_beta2=args.adam_beta2,
+            weight_decay=args.weight_decay,
+            grad_clip_norm=args.grad_clip_norm,
+            adam_8bit=args.adam_8bit,
+            activation_checkpointing=args.activation_checkpointing,
+            keep_rollout_state=not args.drop_rollout_state,
+            eager_decode=args.eager_decode,
+            attn_backend=args.attn_backend,
+            metrics_log_dir=args.metrics_log_dir,
+            agent_fn=args.agent_fn,
+            train_tool_results=args.train_tool_results,
+            chat_template_enable_thinking=chat_template_enable_thinking,
+        )
     if algorithm.name == "dpo":
         return DPOTrainerConfig(
             algo=algorithm.name,
@@ -1343,6 +1410,8 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             "Roles and loss",
             [
                 "ref_ckpt",
+                "teacher_ckpt",
+                "opd_coef",
                 "critic_ckpt",
                 "critic_lr",
                 "critic_warmup_steps",
@@ -1596,6 +1665,18 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option(
     "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
+)
+@click.option(
+    "--teacher-ckpt",
+    default=None,
+    help="Frozen OPD teacher checkpoint path or model ID.",
+)
+@click.option(
+    "--opd-coef",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Coefficient for the OPD loss.",
 )
 @click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or remote model repo ID.")
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")

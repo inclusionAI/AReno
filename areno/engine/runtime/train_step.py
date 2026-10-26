@@ -146,6 +146,8 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     packed_returns = torch.empty(action_count, device=input_ids.device, dtype=torch.float32)
     packed_seq_ids = torch.empty(action_count, device=input_ids.device, dtype=torch.long)
 
+    # Optional role scores and critic targets are independent. OPD carries
+    # frozen-teacher logprobs without values or returns, while PPO carries all.
     has_ref_logprobs = isinstance(ref_logprobs, torch.Tensor)
     has_values = isinstance(values, torch.Tensor)
     has_returns = isinstance(returns, torch.Tensor)

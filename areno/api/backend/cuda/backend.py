@@ -37,6 +37,9 @@ from areno.api.backend.cuda.losses import dispatch_loss
 from areno.api.backend.cuda.training import (
     annotate_sft_token_mean_packs,
     is_sft_loss_fn,
+    is_opd_loss_fn,
+    annotate_opd_token_mean_packs,
+    opd_response_token_count,
     make_train_pack,
     pad_token_id,
     sft_target_token_count,
@@ -102,7 +105,7 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "opd"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
             distributed=True,
@@ -514,17 +517,27 @@ class CudaBackend(Backend):
         # forward worker can call it without having to know about the loss API.
         packs = []
         is_sft = is_sft_loss_fn(loss_fn)
+        is_opd = is_opd_loss_fn(loss_fn)
         sft_target_counts = [] if is_sft else None
+        opd_response_counts = [] if is_opd else None
         for seqs in train_microbatches(batch_data, mini_bs):
             pack = make_train_pack(seqs)
             pack["_loss_fn"] = loss_fn
             packs.append(pack)
             if is_sft:
                 sft_target_counts.append(sft_target_token_count(seqs))
+            if is_opd:
+                opd_response_counts.append(opd_response_token_count(pack))
         if is_sft:
             annotate_sft_token_mean_packs(
                 packs,
                 sft_target_counts,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+            )
+        if is_opd:
+            annotate_opd_token_mean_packs(
+                packs,
+                opd_response_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)

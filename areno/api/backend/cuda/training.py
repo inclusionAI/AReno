@@ -10,6 +10,7 @@ from areno.api.algorithms import sft_loss_fn
 from areno.api.backend.common import accumulation_steps, train_sequence_ids
 from areno.api.context import Context
 from areno.api.models import TrainSequence
+from areno.api.loss_fns.opd import opd_loss_fn
 
 
 def make_train_pack(seqs: list[TrainSequence], *, include_routing_replay: bool = True) -> dict[str, torch.Tensor]:
@@ -198,7 +199,57 @@ def _sequence_prompt_len(seq: TrainSequence) -> int:
     return next((index for index, is_prompt in enumerate(seq.prompt_mask) if not is_prompt), len(seq.prompt_mask))
 
 
+
+def is_opd_loss_fn(loss_fn: Callable) -> bool:
+    """Identify the built-in OPD objective through nested partial wrappers."""
+    from functools import partial
+
+    while isinstance(loss_fn, partial):
+        loss_fn = loss_fn.func
+    return loss_fn is opd_loss_fn
+
+
+def opd_response_token_count(pack: dict) -> int:
+    """Count valid response next-token sites, excluding masks and padding."""
+    prompt_mask = pack["prompt_mask"]
+    response_mask = ~prompt_mask[:, 1:].bool()
+    loss_mask = pack.get("loss_mask")
+    if loss_mask is not None:
+        response_mask = response_mask & loss_mask[:, 1:].bool()
+    return int(response_mask.sum().item())
+
+
+def annotate_opd_token_mean_packs(
+    packs: list[dict],
+    response_counts: list[int],
+    *,
+    gradient_accumulation_steps: int | None,
+) -> None:
+    """Normalize OPD across all valid response tokens per accumulation window.
+
+    The engine divides each microbatch loss by the window's number of packs.
+    OPD multiplies by that group size and divides by its total response tokens,
+    so uneven mini-batches produce the same summed gradient as full batches.
+    """
+    if len(packs) != len(response_counts):
+        raise ValueError("OPD packs and response token counts must align")
+    if not packs:
+        return
+    steps = accumulation_steps(len(packs), gradient_accumulation_steps)
+    for start in range(0, len(packs), steps):
+        end = min(start + steps, len(packs))
+        total_tokens = sum(response_counts[start:end])
+        if total_tokens <= 0:
+            raise ValueError("OPD optimizer group contains no response tokens")
+        for pack in packs[start:end]:
+            pack["_opd_total_response_tokens"] = total_tokens
+            pack["_opd_grad_scale"] = end - start
+
+
 __all__ = [
+    "annotate_opd_token_mean_packs",
+    "is_opd_loss_fn",
+    "opd_response_token_count",
     "annotate_sft_token_mean_packs",
     "is_sft_loss_fn",
     "make_routing_replay",
