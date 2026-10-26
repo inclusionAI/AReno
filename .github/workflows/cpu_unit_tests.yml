@@ -67,6 +67,7 @@ jobs:
             psutil \
             numpy \
             pydantic \
+            "harbor==0.24.0; python_version >= '3.12'" \
             click \
             fastapi \
             openai \
