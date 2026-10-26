@@ -34,6 +34,8 @@ class VisualWorkspaceDataset(FileWorkspaceDataset):
     with page defects included as evidence for proportional deductions.
     """
 
+    judge_class = VLMJudge
+
     def __init__(self, *, renderer: BrowserCapture | None = None, judge: VLMJudge | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.renderer = renderer or BrowserCapture()
@@ -79,7 +81,7 @@ class VisualWorkspaceDataset(FileWorkspaceDataset):
         else:
             references = {f"Reference {label}": path.read_bytes() for label, path in task.references.items()}
             result.update(
-                await (self.judge or VLMJudge.from_env()).score(
+                await (self.judge or self.judge_class.from_env()).score(
                     instruction=task.instruction,
                     images={**references, **images},
                     dimensions=task.dimensions,

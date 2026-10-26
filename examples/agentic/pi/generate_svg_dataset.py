@@ -22,25 +22,30 @@ def task_record(raw: dict, *, reference: Path, source: dict, max_turns: int) -> 
         brief += "\n" + detail
     return {
         "prompt": (
-            "Create one polished SVG icon matching this description:\n\n"
+            "Create one SVG icon accurately matching this description:\n\n"
             + brief
-            + "\n\nDeliver /workspace/icon.svg as a self-contained SVG with a viewBox and SVG namespace. "
-            "Use a few clean vector shapes or short paths, intentional spacing and consistent strokes. "
+            + f"\n\nYou have at most {max_turns} assistant turns (model calls), including turns that use tools. "
+            "Write /workspace/icon.svg first, then preview and correct inaccuracies within this budget. "
+            "Deliver /workspace/icon.svg as a self-contained SVG with a viewBox and SVG namespace. "
+            "Preserve the requested subject, parts, counts, directions and spatial relationships. "
             "It is displayed on white at 448x448; use a transparent or white background. "
-            "Do not build a website, add labels, use raster images, install packages or access the network. "
-            "Keep the SVG concise; you can simplify details while preserving the subject and style. "
+            "Do not build a website, add unrequested labels, use raster images, install packages or access the network. "
+            "Keep the SVG concise without omitting requested content. "
             "Write the icon first. Then run `node /workspace/preview.mjs /workspace/preview.json` "
             "and read /workspace/preview/report.json for rendering problems. "
             "Read the JSON report, not screenshot files. Refine the SVG if needed and finish briefly. "
             "Preview helpers are provided; do not modify them. Only icon.svg is graded. "
-            "Visible icons receive continuous scores for semantic match, composition, geometry, style and aesthetics. "
+            "Visible icons are scored only for accuracy against the description. "
+            "Colors, text and style matter only when explicitly requested; visual polish earns no extra points. "
             "Missing, blank or unrenderable submissions receive zero."
         ),
         "source_prompt": brief,
         "grading_instruction": "Original task prompt:\n"
         + brief
         + "\nEvaluate a single vector icon; no website, text labels or interactions are required. "
-        "The reference illustrates the subject and style; do not require pixel identity.",
+        "Judge only accuracy against the original prompt: subject, parts, counts, directions and relationships. "
+        "Consider colors, text and style only when explicitly requested. Do not reward aesthetic appeal or polish. "
+        "Use the reference to clarify requested content; do not require pixel identity.",
         "files": {"icon.svg": ""},
         "entrypoint": "icon.svg",
         "reference_images": {"icon": str(reference.resolve())},
