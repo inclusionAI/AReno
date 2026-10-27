@@ -217,6 +217,10 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
             "packed_logprobs": packed_logprobs,
             "packed_seq_ids": packed_seq_ids,
             "packed_num_sequences": num_loss_sequences,
+            # Sequence-scoring heads emit one score per packed row (candidate),
+            # which can exceed the number of logical loss sequences when several
+            # rows share one sequence id (JEV groups candidates into questions).
+            "packed_num_scoring_rows": batch,
             "packed_singleton_padding": singleton_padding,
         }
     )

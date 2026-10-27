@@ -7,7 +7,14 @@ from typing import Any
 from areno.api.models import TrainSequence
 
 
-def encode_question(question: dict[str, Any], tokenizer: Any, max_seq_len: int) -> list[TrainSequence]:
+def encode_question(
+    question: dict[str, Any],
+    tokenizer: Any,
+    max_seq_len: int,
+    *,
+    group: int | None = None,
+    weight: float = 1.0,
+) -> list[TrainSequence]:
     candidates, target = question["candidates"], question["target"]
     if len(candidates) < 2 or len(candidates) != len(target):
         raise ValueError("a question needs >=2 candidates and one target per candidate")
@@ -22,17 +29,40 @@ def encode_question(question: dict[str, Any], tokenizer: Any, max_seq_len: int) 
         raise ValueError("question prefix is empty")
     # Keep the question and full candidate/answer suffix even for long states.
     prefix = prefix[-budget:]
+    if group is None:
+        # Standalone encoding (MLX path, tests): keep the features sidecar and
+        # leave grouping to `group_questions`.
+        return [
+            TrainSequence(
+                tokens=prefix + suffix,
+                features={
+                    "jev_question": question["question_id"],
+                    "jev_target": float(probability),
+                    "jev_candidates": len(candidates),
+                    "jev_index": index,
+                },
+            )
+            for index, (suffix, probability) in enumerate(zip(suffixes, target, strict=True))
+        ]
     return [
         TrainSequence(
             tokens=prefix + suffix,
-            features={
-                "jev_question": question["question_id"],
-                "jev_target": float(probability),
-                "jev_candidates": len(candidates),
-                "jev_index": index,
+            # The candidate rows of one question share a single softmax, so the
+            # engine must never split them across DP ranks or microbatches.
+            # The question index is the trajectory id, which makes the engine's
+            # grouped DP split hand whole questions to each rank; the score
+            # head still emits one logit per candidate row.
+            trajectory_id=group,
+            sequence_labels={
+                "group": float(group),
+                "target": float(probability),
+                # Per-question loss weight from the trainer, chosen so the
+                # DP- and accumulation-averaged gradient equals the mean over
+                # the step's questions. Identical on every row of the question.
+                "weight": float(weight),
             },
         )
-        for index, (suffix, probability) in enumerate(zip(suffixes, target, strict=True))
+        for suffix, probability in zip(suffixes, target, strict=True)
     ]
 
 

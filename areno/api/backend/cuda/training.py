@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 
 import torch
 
@@ -46,6 +47,9 @@ def make_train_pack(seqs: list[TrainSequence], *, include_routing_replay: bool =
     features = [seq.features for seq in seqs]
     if any(feature is not None for feature in features):
         pack["features"] = features
+    labels = _make_sequence_labels(seqs)
+    if labels is not None:
+        pack["sequence_labels"] = labels
     if include_routing_replay:
         routing_replay = make_routing_replay(
             [seq.tokens for seq in seqs], [seq.routed_experts for seq in seqs], width=max_len
@@ -96,6 +100,39 @@ def is_sft_loss_fn(loss_fn: Callable) -> bool:
     """Return whether a callable is the built-in SFT loss or its partial."""
 
     return loss_fn is sft_loss_fn or getattr(loss_fn, "func", None) is sft_loss_fn
+
+
+def is_jev_loss_fn(loss_fn: Callable) -> bool:
+    """Return whether a callable is the registered JEV decision loss."""
+
+    from areno.api.algorithms import describe_loss_fn
+
+    try:
+        return describe_loss_fn(loss_fn).name == "jev"
+    except ValueError:
+        return False
+
+
+def jev_pack_loss(loss_fn: Callable) -> Callable:
+    """Bind the registered JEV loss to the CUDA pack-level signature.
+
+    The pack is pickled across the worker process boundary, so the callable is
+    a `functools.partial` over a top-level function rather than a local closure.
+    """
+
+    from areno.api.algorithms import describe_loss_fn
+
+    brier_weight = float(describe_loss_fn(loss_fn).kwargs.get("brier_weight", 0.5))
+    return partial(jev_pack_loss_fn, brier_weight=brier_weight)
+
+
+def jev_pack_loss_fn(pack: dict, scores, *, brier_weight: float = 0.5):
+    """Top-level CUDA JEV loss entry, picklable for the worker boundary."""
+
+    from areno.api.backend.cuda.decision import jev_loss
+
+    pack["_loss_settings"] = {"brier_weight": brier_weight}
+    return jev_loss(pack, scores)
 
 
 def annotate_sft_token_mean_packs(
@@ -192,6 +229,20 @@ def _make_advantages(
     return pad_rows([seq.advantages for seq in seqs], dtype=torch.float32, width=max_len)
 
 
+def _make_sequence_labels(seqs: list[TrainSequence]) -> dict[str, torch.Tensor] | None:
+    """Stack per-sequence scalars into batch-major tensors (DP-sliceable)."""
+
+    keys = set(seqs[0].sequence_labels)
+    if any(set(seq.sequence_labels) != keys for seq in seqs):
+        raise ValueError("every TrainSequence in a batch must carry the same sequence_labels keys")
+    if not keys:
+        return None
+    return {
+        key: torch.tensor([float(seq.sequence_labels[key]) for seq in seqs], dtype=torch.float32)
+        for key in sorted(keys)
+    }
+
+
 def _sequence_prompt_len(seq: TrainSequence) -> int:
     if seq.prompt_len is not None:
         return int(seq.prompt_len)
@@ -200,7 +251,10 @@ def _sequence_prompt_len(seq: TrainSequence) -> int:
 
 __all__ = [
     "annotate_sft_token_mean_packs",
+    "is_jev_loss_fn",
     "is_sft_loss_fn",
+    "jev_pack_loss",
+    "jev_pack_loss_fn",
     "make_routing_replay",
     "make_train_pack",
     "pad_token_id",

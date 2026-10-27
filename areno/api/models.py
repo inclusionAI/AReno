@@ -79,7 +79,9 @@ class TrainSequence(BaseModel):
     positions, so loss functions can train only on response tokens while still
     conditioning on the prompt. Optional fields (`returns`, `values`,
     `ref_logprobs`) are only populated for algorithms that need them (PPO with
-    a critic and reference model).
+    a critic and reference model). `sequence_labels` carries per-sequence
+    scalars (for example a group id and target probability) for sequence-level
+    losses; every row in one batch must use the same keys.
     """
 
     prompt_mask: list[bool] = Field(default_factory=list)
@@ -99,3 +101,7 @@ class TrainSequence(BaseModel):
     # Rows may have different causal contexts while sharing one sequence loss.
     # The id is local to a train() call; mini_bs counts these trajectories.
     trajectory_id: int | None = Field(default=None)
+    # Per-sequence scalar labels for sequence-level objectives (for example a
+    # question id and target probability). Every row in one batch must carry
+    # the same keys; see `areno.api.jev.data`.
+    sequence_labels: dict[str, float] = Field(default_factory=dict)

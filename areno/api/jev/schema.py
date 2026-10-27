@@ -1,4 +1,4 @@
-"""Convert JevForge records into `ClassifyTrainer` question rows.
+"""Convert JevForge records into `JevTrainer` question rows.
 
 Mirrors `jevforge/encode.py` and `jevforge/schema.py` so AReno sees the exact
 candidate paths JevForge trains on:
