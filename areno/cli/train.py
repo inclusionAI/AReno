@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import inspect
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from areno.api.trainer_config import (
     PolicyTrainerConfig,
     PPOTrainerConfig,
     RolloutTrainerConfig,
+    SFTTrainerConfig,
     TrainerConfig,
 )
 from areno.cli.model_refs import resolve_model_refs_for_config
@@ -88,6 +90,13 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "dataset_path",
             "model_hub",
             "dataset_loader_fn",
+            "validation_dataset_path",
+            "validation_dataset_loader_fn",
+            "eval_interval",
+            "eval_batches",
+            "eval_before_step",
+            "shuffle",
+            "seed",
             "tune_params",
             "mem_frac",
             "tune_max_samples",
@@ -135,6 +144,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "score_micro_bs",
             "gradient_accumulation_steps",
             "activation_checkpointing",
+            "mlx_compile_train_step",
             "mtp_loss_scale",
             "lora_rank",
             "q4",
@@ -150,6 +160,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lr_decay_style",
             "adam_beta1",
             "adam_beta2",
+            "adam_bias_correction",
             "adam_8bit",
             "adam_4bit",
             "optimizer_state_offload",
@@ -167,6 +178,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "multimodal_projector_lr_decay_style",
             "weight_decay",
             "grad_clip_norm",
+            "clip_gradients",
             "ref_ckpt",
             "critic_ckpt",
             "critic_lr",
@@ -263,6 +275,17 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     args.reference_mode = getattr(args, "reference_mode", "independent")
     args.lora = _lora_config_from_options(args)
+    if args.lora is not None and args.lora.dropout != 0.0 and args.backend != "mlx":
+        raise click.UsageError("nonzero --lora-dropout currently requires --backend mlx")
+    if not getattr(args, "adam_bias_correction", True) and args.backend != "mlx":
+        raise click.UsageError("--no-adam-bias-correction currently requires --backend mlx")
+    if not getattr(args, "mlx_compile_train_step", True) and args.backend != "mlx":
+        raise click.UsageError("--no-mlx-compile-train-step requires --backend mlx")
+    if not getattr(args, "clip_gradients", True) and args.backend != "mlx":
+        raise click.UsageError("--no-grad-clip currently requires --backend mlx")
+    seed = getattr(args, "seed", None)
+    if seed is not None and not 0 <= seed < 2**32:
+        raise click.UsageError("--seed must be in [0, 2**32)")
     if args.backend == "mlx":
         if args.train_devices is not None or args.rollout_devices is not None or args.rollout_tp_size is not None:
             raise click.UsageError("MLX does not use CUDA device or rollout TP options")
@@ -298,6 +321,25 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.model_hub not in {"hf", "modelscope"}:
         raise click.UsageError("--model-hub must be one of: hf, modelscope")
     algorithm = _algorithm_for_cli(args.algo)
+    validation_path = getattr(args, "validation_dataset_path", None)
+    validation_loader = getattr(args, "validation_dataset_loader_fn", None)
+    if algorithm.name != "sft" and (
+        validation_path
+        or validation_loader
+        or getattr(args, "shuffle", False)
+        or getattr(args, "eval_before_step", False)
+        or getattr(args, "eval_interval", 50) != 50
+        or getattr(args, "eval_batches", None) is not None
+    ):
+        raise click.UsageError("validation datasets and --shuffle currently require --algo sft")
+    if validation_loader and not validation_path:
+        raise click.UsageError("--validation-dataset-loader-fn requires --validation-dataset-path")
+    if getattr(args, "eval_interval", 50) < 1:
+        raise click.UsageError("--eval-interval must be positive")
+    if getattr(args, "eval_batches", None) is not None and args.eval_batches < 1:
+        raise click.UsageError("--eval-batches must be positive")
+    if getattr(args, "eval_before_step", False) and not validation_path:
+        raise click.UsageError("--eval-before-step requires --validation-dataset-path")
     if algorithm.name == "sft" and args.dataset_loader_fn is None:
         raise click.UsageError("--dataset-loader-fn is required for --algo sft")
     tune_params = bool(getattr(args, "tune_params", False))
@@ -559,6 +601,8 @@ def _format_training_config_summary(
                 ("sequence_parallel", _sequence_parallel_for_summary(config, model_config)),
                 ("mini_bs", str(config.mini_bs)),
                 ("score_micro_bs", str(config.score_micro_bs)),
+                ("seed", _format_optional(config.seed)),
+                ("mlx_compile_train_step", _format_bool(config.mlx_compile_train_step)),
                 ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
                 ("qlora", "yes" if config.lora is not None and config.lora.qlora else "no"),
                 ("lora_rank", str(config.lora.rank) if config.lora is not None else "disabled"),
@@ -579,13 +623,20 @@ def _format_training_config_summary(
                         f"decay={config.lr_decay_style}/{config.lr_decay_steps}, "
                         f"betas=({config.optimizer_beta1}, {config.optimizer_beta2}), "
                         f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}, "
-                        f"adam_4bit={_format_bool(config.adam_4bit)}"
+                        f"adam_4bit={_format_bool(config.adam_4bit)}, "
+                        f"bias_correction={_format_bool(config.adam_bias_correction)}"
                     ),
                 ),
                 ("optimizer_state_offload", str(config.optimizer_state_offload)),
                 ("optimizer_state_offload_dir", _format_optional(config.optimizer_state_offload_dir)),
                 ("optimizer_state_offload_batch_size", str(config.optimizer_state_offload_batch_size)),
                 ("grad_clip_norm", str(config.grad_clip_norm)),
+                ("clip_gradients", _format_bool(config.clip_gradients)),
+                ("validation_dataset", _format_optional(getattr(config, "validation_dataset_path", None))),
+                ("eval_interval", str(getattr(config, "eval_interval", "disabled"))),
+                ("eval_batches", _format_optional(getattr(config, "eval_batches", None), default="all")),
+                ("eval_before_step", _format_bool(getattr(config, "eval_before_step", False))),
+                ("shuffle", _format_bool(getattr(config, "shuffle", False))),
             ],
         ),
         (
@@ -800,15 +851,20 @@ def _style(text: str, *, color: bool, fg: str | None = None, bold: bool = False)
 def _preflight_task_hooks(args, algorithm) -> None:
     """Validate user task hook files before backend/model initialization."""
 
-    if args.dataset_loader_fn is not None:
+    for option, spec_text in (
+        ("--dataset-loader-fn", args.dataset_loader_fn),
+        ("--validation-dataset-loader-fn", getattr(args, "validation_dataset_loader_fn", None)),
+    ):
+        if spec_text is None:
+            continue
         try:
-            loader_path, fn_name = _split_loader_fn_spec(args.dataset_loader_fn)
+            loader_path, fn_name = _split_loader_fn_spec(spec_text)
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
         _validate_python_callable(
             loader_path,
             fn_name,
-            option_name="--dataset-loader-fn",
+            option_name=option,
             expected=f"{fn_name}(...)",
             positional_args=1,
         )
@@ -896,6 +952,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     args.reference_mode = getattr(args, "reference_mode", "independent")
+    runtime_options = {
+        "clip_gradients": getattr(args, "clip_gradients", True),
+        "adam_bias_correction": getattr(args, "adam_bias_correction", True),
+        "seed": getattr(args, "seed", None),
+        "mlx_compile_train_step": getattr(args, "mlx_compile_train_step", True),
+    }
     lora = getattr(args, "lora", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
@@ -961,6 +1023,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dpo_beta=args.dpo_beta,
             lora=lora,
             reference_mode=args.reference_mode,
+            **runtime_options,
         )
     if algorithm.name in {"sft", "jev"}:
         config = TrainerConfig(
@@ -1022,12 +1085,32 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
             reference_mode=args.reference_mode,
+            **runtime_options,
         )
         if algorithm.name == "jev":
             from areno.api.jev import JevTrainerConfig
 
             return JevTrainerConfig(**{field.name: getattr(config, field.name) for field in fields(config)})
-        return config
+        if not any(
+            (
+                getattr(args, "validation_dataset_path", None),
+                getattr(args, "validation_dataset_loader_fn", None),
+                getattr(args, "eval_interval", 50) != 50,
+                getattr(args, "eval_batches", None) is not None,
+                getattr(args, "eval_before_step", False),
+                getattr(args, "shuffle", False),
+            )
+        ):
+            return config
+        return SFTTrainerConfig(
+            **{field.name: getattr(config, field.name) for field in fields(config)},
+            validation_dataset_path=getattr(args, "validation_dataset_path", None),
+            validation_dataset_loader_fn=getattr(args, "validation_dataset_loader_fn", None),
+            eval_interval=getattr(args, "eval_interval", 50),
+            eval_batches=getattr(args, "eval_batches", None),
+            eval_before_step=getattr(args, "eval_before_step", False),
+            shuffle=getattr(args, "shuffle", False),
+        )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
             algo=algorithm.name,
@@ -1101,6 +1184,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
             reference_mode=args.reference_mode,
+            **runtime_options,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -1188,6 +1272,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         chat_template_enable_thinking=chat_template_enable_thinking,
         lora=lora,
         reference_mode=args.reference_mode,
+        **runtime_options,
     )
 
 
@@ -1219,11 +1304,21 @@ def run(trainer_config: TrainerConfig):
     dataset = _load_dataset_for_training(
         trainer_config.dataset_path,
         dataset_loader_fn=trainer_config.dataset_loader_fn,
+        model_path=trainer_config.ckpt,
         model_hub=trainer_config.model_hub,
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
+    if isinstance(trainer_config, SFTTrainerConfig) and trainer_config.validation_dataset_path:
+        trainer.validation_dataset = _load_dataset_for_training(
+            trainer_config.validation_dataset_path,
+            dataset_loader_fn=trainer_config.validation_dataset_loader_fn or trainer_config.dataset_loader_fn,
+            model_path=trainer_config.ckpt,
+            model_hub=trainer_config.model_hub,
+            load_dataset=load_dataset,
+            load_from_disk=load_from_disk,
+        )
     trainer.fit()
 
 
@@ -1335,6 +1430,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "optimizer_beta2",
                 "weight_decay",
                 "grad_clip_norm",
+                "clip_gradients",
                 "adam_8bit",
                 "adam_4bit",
             ],
@@ -1402,7 +1498,13 @@ def _reward_fn_path_for_config(config: TrainerConfig) -> str | None:
 
 
 def _load_dataset_for_training(
-    dataset_path: str, *, model_hub: str = "modelscope", dataset_loader_fn: str | None, load_dataset, load_from_disk
+    dataset_path: str,
+    *,
+    model_hub: str = "modelscope",
+    dataset_loader_fn: str | None,
+    load_dataset,
+    load_from_disk,
+    model_path: str | None = None,
 ):
     def default_loader(path):
         return _load_dataset_from_path(
@@ -1414,12 +1516,19 @@ def _load_dataset_for_training(
 
     if dataset_loader_fn is not None:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn)
-        return loader_fn(
-            dataset_path,
-            default_loader=default_loader,
-            load_dataset=load_dataset,
-            load_from_disk=load_from_disk,
-        )
+        options = dict(default_loader=default_loader, load_dataset=load_dataset, load_from_disk=load_from_disk)
+        model_parameter = inspect.signature(loader_fn).parameters.get("model_path")
+        if (
+            model_path is not None
+            and model_parameter is not None
+            and model_parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        ):
+            options["model_path"] = model_path
+        return loader_fn(dataset_path, **options)
     return default_loader(dataset_path)
 
 
@@ -1574,6 +1683,44 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Run a registered training algorithm with the areno backend.",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
+@click.option(
+    "--seed",
+    type=click.IntRange(0, 2**32 - 1),
+    default=None,
+    help="Seed SFT shuffling and MLX model/LoRA initialization.",
+)
+@click.option(
+    "--shuffle/--no-shuffle", default=False, show_default=True, help="Shuffle SFT training and validation rows."
+)
+@click.option(
+    "--validation-dataset-path", default=None, help="Optional held-out SFT dataset, loaded separately from training."
+)
+@click.option(
+    "--validation-dataset-loader-fn", default=None, help="Validation loader; defaults to --dataset-loader-fn."
+)
+@click.option(
+    "--eval-interval", type=int, default=50, show_default=True, help="SFT validation interval in optimizer steps."
+)
+@click.option(
+    "--eval-batches", type=int, default=None, help="Maximum SFT validation batches per evaluation; default: all."
+)
+@click.option(
+    "--eval-before-step",
+    is_flag=True,
+    help="Evaluate before scheduled SFT updates, including the initial and final updates.",
+)
+@click.option(
+    "--adam-bias-correction/--no-adam-bias-correction",
+    default=True,
+    show_default=True,
+    help="Adam bias correction; disabling currently requires MLX.",
+)
+@click.option(
+    "--mlx-compile-train-step/--no-mlx-compile-train-step",
+    default=True,
+    show_default=True,
+    help="Compile the MLX loss/gradient function.",
+)
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")
 @click.option(
     "--base-model-name-or-path",
@@ -1745,7 +1892,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
 @click.option("--q4", is_flag=True, help="Load with MLX 4-bit online quantization; source weights stay unchanged.")
 @click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
-@click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")
+@click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="LoRA dropout; nonzero requires MLX.")
 @click.option(
     "--lora-target-modules",
     default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
@@ -1830,6 +1977,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--weight-decay", type=float, default=1.0e-2, show_default=True, help="Policy optimizer weight decay.")
 @click.option("--grad-clip-norm", type=float, default=1.0, show_default=True, help="Policy gradient clipping norm.")
+@click.option(
+    "--grad-clip/--no-grad-clip",
+    "clip_gradients",
+    default=True,
+    show_default=True,
+    help="Apply gradient clipping; disabling currently requires MLX.",
+)
 @click.option(
     "--activation-checkpointing/--no-activation-checkpointing",
     default=True,

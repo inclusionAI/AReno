@@ -63,6 +63,8 @@ class _LingModel(_FakeModel):
                 module.weight = np.zeros((out_dims, in_dims), dtype=np.float32)
                 modules[f"model.layers.{index}.attention.{name}"] = module
             modules[f"model.layers.{index}.attention.g_proj"] = _FakeLinear(8, 8 if layer.is_linear else 2)
+            if layer.is_linear:
+                modules[f"model.layers.{index}.attention.b_proj"] = _FakeLinear(8, 2)
             mlps = [("mlp", 16)] if index == 0 else [("mlp.shared_experts", 12), ("mlp.switch_mlp", 10)]
             for path, width in mlps:
                 for name in ("gate_proj", "up_proj", "down_proj"):
@@ -135,6 +137,20 @@ def test_expanded_targets_cover_attention_dense_shared_and_routed_experts(caplog
     assert "adapter_parameters=" in caplog.text and "routed_experts': 9" in caplog.text
     # Existing default suffixes now cover MLP too, without enabling new gates.
     assert _initialize(_LingModel(), LoraConfig().target_modules).expert_slots
+
+
+def test_payment_targets_include_all_24_layers_and_propagate_dropout():
+    targets = EXPANDED_TARGETS + ("b_proj",)
+    state = initialize_lora(
+        _LingModel(24),
+        LoraConfig(rank=4, alpha=32, dropout=0.05, target_modules=targets),
+        model_type="bailing_hybrid",
+        model_config=MODEL_CONFIG,
+    )
+    assert len(state.slots) == 297
+    assert len([path for path in state.slots if path.endswith("b_proj") and not path.endswith("q_b_proj")]) == 18
+    assert all(slot.dropout == 0.05 and slot.scale == 8 for slot in state.slots.values())
+    assert state.expert_slots
 
 
 @pytest.mark.parametrize("mutation", ["missing_shared", "expert_count", "wrong_type", "outside"])

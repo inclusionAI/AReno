@@ -48,6 +48,14 @@ class MetricsRecorder:
         with self._sample_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
+    def record_validation_stats(self, stats: dict[str, float], *, step: int) -> None:
+        """Persist token-weighted validation loss in TensorBoard and JSONL."""
+
+        for name, value in stats.items():
+            self._writer.add_scalar(f"validation/{name}", value, step)
+        with (self._log_dir / "validation_metrics.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"step": step, **stats}) + "\n")
+
     def record_dashboard_state(
         self,
         *,

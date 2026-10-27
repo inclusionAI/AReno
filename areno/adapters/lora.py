@@ -235,6 +235,8 @@ class AdapterRegistry:
 def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> AdapterRegistry:
     """Freeze one supported native base and attach its canonical targets."""
 
+    if config.dropout != 0.0:
+        raise ValueError("native CUDA/NPU LoRA currently requires dropout=0; nonzero dropout requires MLX")
     from areno.models.registry import _adapter
 
     metadata = read_adapter_quantization(config.adapter_path)

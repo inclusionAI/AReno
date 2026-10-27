@@ -35,7 +35,7 @@ BAILING_V3_TARGETS = (
 
 QWEN35_TARGETS = (*QWEN3_DENSE_TARGETS, "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
 
-NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS, *QWEN35_TARGETS)))
+NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS, *QWEN35_TARGETS, "b_proj")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +67,8 @@ class LoraConfig:
             raise ValueError("lora rank must be >= 1")
         if self.alpha <= 0:
             raise ValueError("lora alpha must be > 0")
-        if self.dropout != 0.0:
-            raise ValueError("native LoRA currently requires dropout=0")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("LoRA dropout must be in [0, 1)")
         requested = set(self.target_modules)
         supported = set(NATIVE_LORA_TARGETS)
         if not requested or not requested <= supported:

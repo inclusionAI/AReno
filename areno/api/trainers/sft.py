@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import logging
 import time
+from itertools import islice
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
@@ -44,11 +47,13 @@ class SFTTrainer:
     checkpoint behavior stay shared with GSPO/GRPO/PPO.
     """
 
-    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn):
+    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn, validation_dataset=None):
         del reward_fn
         self.config = config
         self.areno = instance
         self.dataset = dataset
+        self.validation_dataset = validation_dataset
+        self._rng = np.random.RandomState(getattr(config, "seed", None))
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
 
@@ -77,6 +82,8 @@ class SFTTrainer:
             ):
                 if not train_batch:
                     continue
+                if getattr(self.config, "eval_before_step", False):
+                    self._maybe_validate(epoch, step, tokenizer, processor, before_step=True)
                 self.logger.info(
                     "epoch=%d step=%d role=policy stage=train_start rows=%d", epoch, step, len(train_batch)
                 )
@@ -97,6 +104,8 @@ class SFTTrainer:
                 self.logger.info("epoch=%d step=%d role=policy stage=train_end rows=%d", epoch, step, len(train_batch))
                 record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy")
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
+                if not getattr(self.config, "eval_before_step", False):
+                    self._maybe_validate(epoch, step + 1, tokenizer, processor, before_step=False)
                 self._maybe_save(epoch, step)
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:
@@ -107,17 +116,28 @@ class SFTTrainer:
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role="policy")
 
     def _iter_train_batches(self, tokenizer, processor, *, max_prompt_tokens: int, max_new_tokens: int):
+        yield from self._iter_batches(
+            self.dataset,
+            tokenizer,
+            processor,
+            max_prompt_tokens=max_prompt_tokens,
+            max_new_tokens=max_new_tokens,
+            shuffle=getattr(self.config, "shuffle", False),
+        )
+
+    def _iter_batches(self, dataset, tokenizer, processor, *, max_prompt_tokens, max_new_tokens, shuffle):
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
         batch = []
         skipped = 0
         accepted = 0
-        total_rows = len(self.dataset)
-        for index in range(total_rows):
+        total_rows = len(dataset)
+        indices = self._rng.permutation(total_rows) if shuffle else range(total_rows)
+        for index in indices:
             # Normalize each supported row schema into one TrainSequence.
             seq = _record_to_train_sequence(
-                self.dataset[index],
+                dataset[int(index)],
                 tokenizer,
                 processor,
                 max_prompt_tokens=max_prompt_tokens,
@@ -141,6 +161,57 @@ class SFTTrainer:
             )
         if batch:
             yield batch
+
+    def _maybe_validate(self, epoch, step, tokenizer, processor, *, before_step):
+        if self.validation_dataset is None:
+            return
+        interval = self.config.eval_interval
+        max_steps = getattr(self.config, "max_steps", None)
+        scheduled = (
+            step == 0 or (step + 1) % interval == 0 or step + 1 == max_steps
+            if before_step
+            else step % interval == 0 or step == max_steps
+        )
+        if not scheduled:
+            return
+        started = time.perf_counter()
+        total_nll, targets, batches = 0.0, 0, 0
+        iterator = self._iter_batches(
+            self.validation_dataset,
+            tokenizer,
+            processor,
+            max_prompt_tokens=self.config.max_prompt_tokens,
+            max_new_tokens=self.config.max_new_tokens,
+            shuffle=getattr(self.config, "shuffle", False),
+        )
+        for batch in islice(iterator, self.config.eval_batches):
+            scores = self.areno.score_logprobs(
+                "actor",
+                [row.tokens for row in batch],
+                features=[row.features for row in batch] if any(row.features is not None for row in batch) else None,
+                microbatch_size=self.config.score_micro_bs,
+            )
+            for sequence, logprobs in zip(batch, scores, strict=True):
+                if len(logprobs) != len(sequence.tokens):
+                    raise ValueError("validation logprobs must align with input tokens, including the initial zero")
+                loss_mask = sequence.loss_mask or [True] * len(sequence.tokens)
+                active = [
+                    not prompt and enabled for prompt, enabled in zip(sequence.prompt_mask, loss_mask, strict=True)
+                ]
+                total_nll -= sum(value for value, enabled in zip(logprobs[1:], active[1:], strict=True) if enabled)
+                targets += sum(active[1:])
+            batches += 1
+        if targets == 0:
+            raise ValueError("SFT validation produced no supervised target tokens")
+        stats = {
+            "loss": total_nll / targets,
+            "target_tokens": targets,
+            "batches": batches,
+            "elapsed_s": time.perf_counter() - started,
+        }
+        self.areno.record_validation_stats(stats, step=step)
+        self.logger.info("epoch=%d step=%d validation_stats=%s", epoch, step, stats)
+        record_dashboard_state(self.areno, stage="validation_end", epoch=epoch, step=step, role="policy", extra=stats)
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         # Keep the same step-based checkpoint cadence as the RL trainers.

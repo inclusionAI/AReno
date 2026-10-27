@@ -60,6 +60,10 @@ class TrainerConfig:
     optimizer_beta2: float = 0.999
     weight_decay: float = 1.0e-2
     grad_clip_norm: float = 1.0
+    clip_gradients: bool = field(default=True, kw_only=True)
+    adam_bias_correction: bool = field(default=True, kw_only=True)
+    seed: int | None = field(default=None, kw_only=True)
+    mlx_compile_train_step: bool = field(default=True, kw_only=True)
     adam_8bit: bool = False
     adam_4bit: bool = False
     unfreeze_multimodal_tower: bool = False
@@ -98,6 +102,14 @@ class TrainerConfig:
             self.backend = self.backend.lower()
         if self.backend not in {"cuda", "mlx", "npu"}:
             raise ValueError("backend must be one of: cuda, mlx, npu")
+        if not self.adam_bias_correction and self.backend != "mlx":
+            raise ValueError("disabling Adam bias correction currently requires backend=mlx")
+        if not self.mlx_compile_train_step and self.backend != "mlx":
+            raise ValueError("mlx_compile_train_step=False requires backend=mlx")
+        if not self.clip_gradients and self.backend != "mlx":
+            raise ValueError("disabling gradient clipping currently requires backend=mlx")
+        if self.seed is not None and not 0 <= self.seed < 2**32:
+            raise ValueError("seed must be in [0, 2**32)")
         if self.gguf_file_type not in {"f16", "q8_0"}:
             raise ValueError("gguf_file_type must be one of: f16, q8_0")
         if self.export_gguf_path is not None:
@@ -171,14 +183,14 @@ class TrainerConfig:
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""
 
-        return {
+        optimizer = {
             "lr": self.optimizer_lr,
             "min_lr": self.optimizer_min_lr,
             "lr_decay_steps": self.lr_decay_steps,
             "lr_decay_style": self.lr_decay_style,
             "betas": (self.optimizer_beta1, self.optimizer_beta2),
             "weight_decay": self.weight_decay,
-            "grad_clip_norm": self.grad_clip_norm,
+            "grad_clip_norm": self.grad_clip_norm if self.clip_gradients else None,
             "adam_8bit": self.adam_8bit,
             "adam_4bit": self.adam_4bit,
             "unfreeze_multimodal_tower": self.unfreeze_multimodal_tower,
@@ -192,6 +204,9 @@ class TrainerConfig:
             "multimodal_projector_lr_decay_steps": self.multimodal_projector_lr_decay_steps,
             "multimodal_projector_lr_decay_style": self.multimodal_projector_lr_decay_style,
         }
+        if self.backend == "mlx":
+            optimizer["bias_correction"] = self.adam_bias_correction
+        return optimizer
 
     def backend_type(self):
         """Return the selected execution backend without importing it eagerly."""
@@ -218,7 +233,8 @@ class TrainerConfig:
             base_model_name_or_path=self.base_model_name_or_path,
             optimizer=self.optimizer_config(),
             keep_rollout_state=self.keep_rollout_state,
-            compile_train_step=True,
+            compile_train_step=self.mlx_compile_train_step,
+            seed=self.seed,
             gradient_checkpointing=self.activation_checkpointing,
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -252,6 +268,27 @@ class TrainerConfig:
             lora=self.lora,
             reference_mode=self.reference_mode,
         )
+
+
+@dataclass(slots=True)
+class SFTTrainerConfig(TrainerConfig):
+    """Optional deterministic shuffling and held-out validation for SFT."""
+
+    validation_dataset_path: str | None = field(default=None, kw_only=True)
+    validation_dataset_loader_fn: str | None = field(default=None, kw_only=True)
+    eval_interval: int = field(default=50, kw_only=True)
+    eval_batches: int | None = field(default=None, kw_only=True)
+    eval_before_step: bool = field(default=False, kw_only=True)
+    shuffle: bool = field(default=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        TrainerConfig.__post_init__(self)
+        if self.eval_interval < 1:
+            raise ValueError("eval_interval must be positive")
+        if self.eval_batches is not None and self.eval_batches < 1:
+            raise ValueError("eval_batches must be positive or None")
+        if self.validation_dataset_loader_fn and not self.validation_dataset_path:
+            raise ValueError("validation_dataset_loader_fn requires validation_dataset_path")
 
 
 @dataclass(slots=True)
@@ -324,7 +361,8 @@ class RolloutTrainerConfig(TrainerConfig):
             completion_batch_size=max_running,
             prefill_batch_size=min(max_running, 8),
             keep_rollout_state=self.keep_rollout_state,
-            compile_train_step=True,
+            compile_train_step=self.mlx_compile_train_step,
+            seed=self.seed,
             gradient_checkpointing=self.activation_checkpointing,
             lora=self.lora,
             reference_mode=self.reference_mode,

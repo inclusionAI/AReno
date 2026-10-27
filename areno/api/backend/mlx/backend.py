@@ -81,6 +81,8 @@ class MlxBackend(Backend):
             raise RuntimeError("MLX backend requires an Apple Silicon AReno installation") from exc
 
         self.config = config
+        if config.seed is not None:
+            mx.random.seed(config.seed)
         model_path = self.config.model_path or ctx.model_path
         provider_kwargs = {"adapter_path": self.config.adapter_path}
         from areno.api.backend.mlx.quantization import adapter_quantization
@@ -456,18 +458,28 @@ class MlxBackend(Backend):
                 raise RuntimeError(f"MLX model role {role!r} is not initialized")
             provider = loaded.provider
 
-        results: list[list[float]] = []
-        for start in range(0, len(token_rows), microbatch_size):
-            row_features = features[start : start + microbatch_size] if features is not None else None
-            results.extend(
-                _score_token_rows(
-                    provider,
-                    token_rows[start : start + microbatch_size],
-                    self.tokenizer,
-                    row_features,
+        # Preserve existing scoring kernels for configurations without LoRA
+        # dropout. Ling changes KDA kernels between train and eval modes.
+        disable_dropout = self._lora_state is not None and self._lora_state.config.dropout > 0
+        was_training = provider.model.training
+        if disable_dropout:
+            provider.model.eval()
+        try:
+            results: list[list[float]] = []
+            for start in range(0, len(token_rows), microbatch_size):
+                row_features = features[start : start + microbatch_size] if features is not None else None
+                results.extend(
+                    _score_token_rows(
+                        provider,
+                        token_rows[start : start + microbatch_size],
+                        self.tokenizer,
+                        row_features,
+                    )
                 )
-            )
-        return results
+            return results
+        finally:
+            if disable_dropout:
+                provider.model.train(was_training)
 
     def score_values(
         self,

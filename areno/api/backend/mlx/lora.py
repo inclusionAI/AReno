@@ -62,7 +62,7 @@ def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str,
         architectures = (architectures,)
     if "BailingMoeV3ForCausalLM" not in architectures:
         raise ValueError("MLX Ling LoRA requires architecture BailingMoeV3ForCausalLM")
-    allowed = set(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS + ("g_proj",) + _MLP_TARGETS)
+    allowed = set(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS + ("g_proj", "b_proj") + _MLP_TARGETS)
     if not requested <= allowed:
         raise ValueError(
             f"unsupported MLX Ling LoRA targets: {', '.join(sorted(requested - allowed))}; "
@@ -84,6 +84,7 @@ def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str,
     kda_shapes = {name: (kda_width, hidden) for name in _BAILING_KDA_TARGETS if name != "o_proj"}
     kda_shapes["o_proj"] = (hidden, kda_width)
     kda_shapes["g_proj"] = (kda_width, hidden)
+    kda_shapes["b_proj"] = (heads, hidden)
     mla_shapes = {
         "q_a_proj": (args.q_lora_rank, hidden),
         "q_b_proj": (heads * (args.qk_nope_head_dim + args.qk_rope_head_dim), args.q_lora_rank),

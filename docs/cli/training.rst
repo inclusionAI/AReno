@@ -59,6 +59,13 @@ Dataset references use ``repo/name``, ``repo/name:config``, or
 ``repo/name:config:split``. Examples: ``gsm8k:main`` and
 ``AI-MO/NuminaMath-TIR``.
 
+With ``--model-hub hf``, models and datasets are downloaded automatically and
+reuse the Hugging Face cache. ``repo/name::split`` selects a split without
+specifying a configuration. For example, Ling payment SFT uses
+``--ckpt inclusionAI/Ling-3.0-tiny``,
+``--dataset-path AsystemAReno/Ling-Ting-SFT-Augment::train``, and
+``--validation-dataset-path AsystemAReno/Ling-Ting-SFT-Augment::validation``.
+
 ``--dataset-path`` also accepts JSON/JSONL, Parquet, CSV/TSV, Arrow, and
 ``datasets.save_to_disk(...)`` directories.
 
@@ -70,6 +77,31 @@ Use ``--dataset-loader-fn`` when the raw dataset does not already match the
 trainer schema. Without a loader, Areno passes dataset rows through unchanged,
 except for SFT where a loader is required. See :doc:`dataset_loaders` for the
 per-algorithm loader contracts.
+
+``--validation-dataset-path TEXT``
+   Optional held-out SFT dataset. AReno loads it separately and never uses it
+   for optimizer updates.
+
+``--validation-dataset-loader-fn TEXT``
+   Optional validation loader. Defaults to the training dataset loader.
+
+``--eval-interval INTEGER``, ``--eval-batches INTEGER``
+   SFT validation runs every ``50`` optimizer updates by default. Limit each
+   evaluation to this many batches, or omit ``--eval-batches`` to use all
+   accepted validation rows. Loss is weighted by supervised target tokens.
+   Results are saved as ``validation/*`` TensorBoard scalars and
+   ``validation_metrics.jsonl`` in the metrics directory.
+
+``--eval-before-step``
+   Opt in to evaluating before scheduled SFT updates, including the initial
+   update and the last update selected by ``--max-steps``. For an interval of
+   50 and 500 steps, validation occurs before updates 1, 50, 100, ..., 500.
+   Without this flag, evaluation occurs after scheduled updates.
+
+``--shuffle / --no-shuffle``, ``--seed INTEGER``
+   SFT shuffling is disabled by default. When enabled, training and validation
+   consume the same seeded NumPy sampler. The seed also controls MLX model and
+   LoRA initialization; it does not change CUDA model initialization.
 
 ``--algo TEXT``
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
@@ -342,6 +374,16 @@ in its description; flags for other algorithms are ignored.
    Supported CUDA training paths use fixed MST recomputation chunks of 256
    tokens by default. Chunk sizes do not adapt to memory pressure.
 
+``--mlx-compile-train-step / --no-mlx-compile-train-step``
+   Enable compilation of the MLX loss/gradient function. Default: enabled.
+   Disabling this option requires the MLX backend.
+
+``--lora-dropout FLOAT``
+   LoRA branch dropout in ``[0, 1)``. Default: ``0``. Nonzero dropout is
+   supported by MLX dense and routed-expert LoRA. CUDA/NPU native LoRA still
+   requires zero dropout. MLX scoring disables dropout and restores the
+   previous model mode afterwards.
+
 ``--optimizer-state-offload [none|cpu|disk]``
    Select CUDA optimizer-state residency. ``none`` keeps state on the training
    device. ``cpu`` moves state to host memory between train calls. ``disk``
@@ -381,6 +423,10 @@ in its description; flags for other algorithms are ignored.
 
 ``--adam-beta2 FLOAT``
    Policy optimizer Adam beta2. Default: ``0.999``.
+
+``--adam-bias-correction / --no-adam-bias-correction``
+   Adam moment bias correction. Default: enabled. Disabling is supported by
+   MLX FP32 and 8-bit AdamW; CUDA/NPU optimizer behavior is unchanged.
 
 ``--adam-8bit``
    Use block-wise 8-bit Adam moment states instead of FP32 Adam states.
@@ -426,7 +472,11 @@ in its description; flags for other algorithms are ignored.
    Policy optimizer weight decay. Default: ``1.0e-2``.
 
 ``--grad-clip-norm FLOAT``
-   Policy gradient clipping norm. Default: ``1.0``.
+   Policy gradient clipping norm. Default: ``1.0``. Must be positive.
+
+``--grad-clip / --no-grad-clip``
+   Apply gradient clipping. Default: enabled. Disabling clipping currently
+   requires MLX; use ``--no-grad-clip`` instead of changing the norm to zero.
 
 ``--ref-ckpt TEXT``
    Optional PPO/DPO reference model checkpoint path or remote model repo ID.

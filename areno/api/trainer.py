@@ -452,6 +452,12 @@ class Trainer:
         if self._metrics is not None:
             self._metrics.record_rollout_sample(sample)
 
+    def record_validation_stats(self, stats: dict[str, float], *, step: int) -> None:
+        """Write held-out validation metrics without updating the policy."""
+
+        if self._metrics is not None:
+            self._metrics.record_validation_stats(stats, step=step)
+
     def record_dashboard_state(
         self,
         *,
