@@ -66,6 +66,7 @@ def test_microbatches_keep_interleaved_trajectories_whole():
 
 def test_cuda_backend_passes_complete_trajectories_to_each_microbatch():
     from areno.api.backend.cuda.backend import CudaBackend
+    from areno.engine.config import RuntimeConfig
 
     received = []
 
@@ -75,7 +76,7 @@ def test_cuda_backend_passes_complete_trajectories_to_each_microbatch():
         return [SimpleNamespace(loss=0.0, metrics={}, stepped=True, adapter_version=None) for _ in packs]
 
     backend = CudaBackend()
-    backend._train_engine = SimpleNamespace(step=step)
+    backend._train_engine = SimpleNamespace(config=SimpleNamespace(runtime=RuntimeConfig()), step=step)
     backend.train(SimpleNamespace(), _training_rows(), gspo_loss_fn, mini_bs=1)
 
     assert [pack["loss_sequence_ids"].tolist() for pack in received] == [[0, 0], [0]]

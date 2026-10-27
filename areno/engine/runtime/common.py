@@ -108,6 +108,14 @@ def split_data_pack_by_dp(data_pack: dict[str, Any], dp_size: int) -> list[dict[
     """Shard batch-major tensors and containers by data-parallel rank."""
     if dp_size == 1:
         return [data_pack]
+    if "_jev_groups" in data_pack:
+        groups = data_pack["_jev_groups"]
+        if len(groups) < dp_size:
+            return [data_pack for _ in range(dp_size)]
+        return [
+            {**data_pack, "_jev_groups": groups[rank::dp_size], "_jev_weight": dp_size / len(groups)}
+            for rank in range(dp_size)
+        ]
     input_ids = data_pack["input_ids"]
     if not isinstance(input_ids, torch.Tensor):
         raise TypeError("data_pack['input_ids'] must be a torch.Tensor")

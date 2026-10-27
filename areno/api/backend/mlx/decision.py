@@ -1,9 +1,10 @@
 """MLX decision head, joint head/LoRA updates, and checkpoint persistence."""
 
-import json
 import math
 from pathlib import Path
 from typing import Any
+
+from areno.api.jev.data import candidate_packs
 
 
 def initialize_head(backend: Any) -> None:
@@ -35,30 +36,6 @@ def question_logits(provider: Any, rows: list[Any]) -> Any:
 
     pooled = provider.pooled_candidate_hidden_states([row.tokens for row in rows])
     return provider.model.score_head(pooled.astype(mx.float32)).squeeze(-1)
-
-
-def candidate_packs(groups, mini_bs):
-    """Fill candidate microbatches while keeping each question's softmax intact."""
-    # Sorting only changes execution within this optimizer update. Dataset
-    # iteration and per-question loss weights remain unchanged.
-    ordered = sorted(groups, key=lambda group: max(len(row.tokens) for row in group))
-    pack, count, tokens, longest = [], 0, 0, 0
-    for group in ordered:
-        length = max(len(row.tokens) for row in group)
-        padded_tokens = (count + len(group)) * max(longest, length)
-        useful_tokens = tokens + len(group) * length
-        if pack and (count + len(group) > mini_bs or padded_tokens > 1.25 * useful_tokens):
-            yield pack
-            pack, count, tokens, longest = [], 0, 0, 0
-        if len(group) > mini_bs:
-            yield [group]
-            continue
-        pack.append(group)
-        count += len(group)
-        tokens += len(group) * length
-        longest = max(longest, length)
-    if pack:
-        yield pack
 
 
 def train_questions(
@@ -215,17 +192,36 @@ def save_head(backend: Any, path: str | Path) -> None:
     mx.save_safetensors(
         str(destination / "score_head.safetensors"), dict(tree_flatten(backend.model.score_head.parameters()))
     )
-    (destination / "jev_config.json").write_text(
-        json.dumps(
-            {
-                "format_version": 1,
-                "head": "linear-gelu-linear",
-                "pooling": "last_valid_token",
-                "temperature": 1.0,
-                "base_model": backend.config.base_model_name_or_path or backend.config.model_path,
-                "max_seq_len": getattr(backend.config, "max_seq_len", 1024),
-            },
-            indent=2,
-        )
-        + "\n"
+    from areno.api.jev.checkpoint import save_head_config
+
+    save_head_config(
+        destination,
+        base_model=backend.config.base_model_name_or_path or backend.config.model_path,
+        max_seq_len=getattr(backend.config, "max_seq_len", 1024),
     )
+
+
+def parameter_counts(backend):
+    from mlx.utils import tree_flatten
+
+    counts = {"head": 0, "lora": 0, "backbone": 0}
+    for name, value in tree_flatten(backend.model.trainable_parameters()):
+        group = (
+            "head" if name.startswith("score_head.") else "lora" if name.endswith(("lora_a", "lora_b")) else "backbone"
+        )
+        counts[group] += value.size
+    return counts
+
+
+def score_candidates(backend, rows):
+    import mlx.core as mx
+
+    from areno.api.jev.data import group_questions
+
+    values = []
+    for question in group_questions(rows):
+        logits = question_logits(backend.provider, question)
+        mx.eval(logits)
+        values.extend(logits.tolist())
+        mx.clear_cache()
+    return values

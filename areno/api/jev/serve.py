@@ -18,7 +18,16 @@ class DecisionRequest(BaseModel):
 
 
 def create_decision_app(
-    model_path, checkpoint, *, model_name=None, scorer_factory=None, quantization_bits=None, quantization_group_size=64
+    model_path,
+    checkpoint,
+    *,
+    model_name=None,
+    scorer_factory=None,
+    quantization_bits=None,
+    quantization_group_size=64,
+    backend_type=None,
+    tp_size=1,
+    world_size=1,
 ):
     from areno.api.jev.scorer import DecisionScorer
 
@@ -27,7 +36,7 @@ def create_decision_app(
 
     @asynccontextmanager
     async def lifespan(app):
-        # One worker owns all MLX operations, and serializes model access.
+        # One worker owns backend operations and serializes model access.
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="areno-jev")
         app.state.executor = executor
         loop = asyncio.get_running_loop()
@@ -37,6 +46,8 @@ def create_decision_app(
                 if quantization_bits is not None
                 else {}
             )
+            if backend_type is not None:
+                kwargs.update(backend_type=backend_type, tp_size=tp_size, world_size=world_size)
             app.state.scorer = await loop.run_in_executor(executor, partial(factory, model_path, checkpoint, **kwargs))
             yield
         finally:
@@ -67,10 +78,7 @@ def create_decision_app(
         started = time.perf_counter()
         try:
             answers, tokens = await asyncio.get_running_loop().run_in_executor(
-                app.state.executor,
-                scorer.decide,
-                payload.state,
-                payload.questions,
+                app.state.executor, scorer.decide, payload.state, payload.questions
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

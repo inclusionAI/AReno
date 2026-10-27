@@ -236,8 +236,8 @@ def test_gather_packed_hidden_averages_replicated_head_backbone_gradient():
     train_meta = SimpleNamespace(sequence_parallel=True)
 
     with (
-        patch("areno.api.backend.cuda.roles.get_tp_context", return_value=SimpleNamespace(world_size=4)),
-        patch("areno.api.backend.cuda.roles.gather_from_sequence_parallel_region", side_effect=lambda x: x),
+        patch("areno.engine.runtime.heads.get_tp_context", return_value=SimpleNamespace(world_size=4)),
+        patch("areno.engine.runtime.heads.gather_from_sequence_parallel_region", side_effect=lambda x: x),
     ):
         gathered = _gather_packed_hidden(hidden, train_meta)
         gathered.sum().backward()

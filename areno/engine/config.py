@@ -66,6 +66,7 @@ class RuntimeConfig:
     compile_model: bool = True
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
+    decision_head: dict[str, Any] | None = None
     optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1

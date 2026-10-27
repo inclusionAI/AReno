@@ -278,7 +278,7 @@ def test_jev_sdk_config_builds_typed_runtime_and_binds_loss():
     assert runtime.lora.rank == 32 and runtime.max_seq_len == 512 and runtime.head_lr == 3e-4
     assert get_algorithm("jev").make_loss_fn(config).keywords == {"brier_weight": 0.25}
     with pytest.raises(ValueError, match="requires backend"):
-        JevTrainerConfig(algo="jev", ckpt="unused", dataset_path="unused", backend="cuda", save_path="unused")
+        JevTrainerConfig(algo="jev", ckpt="unused", dataset_path="unused", backend="npu", save_path="unused")
 
 
 def test_jev_cli_config_restores_head_alongside_a_saved_lora(tmp_path):
@@ -307,3 +307,38 @@ def test_jev_cli_config_restores_head_alongside_a_saved_lora(tmp_path):
         lora=LoraConfig(adapter_path=str(tmp_path)),
     )
     assert config.backend_config().decision_checkpoint == str(tmp_path)
+
+
+def test_training_normalizes_cli_records_without_including_test_split(tmp_path):
+    from areno.api.jev.data import load_parquet_questions, normalize_questions
+    from areno.api.jev.schema import record_to_questions
+    from areno.api.trainers.jev import JevTrainer
+
+    question = {"type": "choice", "instructions": "Choose", "criteria": {"a": "A", "b": "B"}}
+    record = {
+        "id": "train-1",
+        "source_group": "test-workflow",
+        "request": {"state": "state", "questions": {"q": question}},
+        "targets": {"q": {"a": 0.25, "b": 0.75}},
+    }
+    expected = record_to_questions(record)
+    test = {**record, "id": "held-out", "split": "test"}
+    assert normalize_questions([record, test]) == expected
+    assert normalize_questions({"train": expected, "test": record_to_questions(test)}) == expected
+    trainer = JevTrainer(None, instance=None, dataset=[record, test], reward_fn=None, loss_fn=None)
+    assert trainer.dataset == expected
+
+    typed = {
+        "id": record["id"],
+        "workflow": record["source_group"],
+        "state": "state",
+        "questions": json.dumps({"q": question}),
+        "gold": json.dumps({"q": {"probabilities": {"a": 1, "b": 3}}}),
+    }
+    assert normalize_questions([typed]) == expected
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    path = tmp_path / "train.parquet"
+    pq.write_table(pa.Table.from_pylist([typed]), path)
+    assert load_parquet_questions(path) == expected
+    assert normalize_questions(pq.read_table(path).to_pylist()) == expected

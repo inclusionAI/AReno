@@ -76,44 +76,67 @@ def answer_from_logits(question: dict[str, Any], logits: Any, temperature: float
 
 
 class DecisionScorer:
-    """Load an AReno LoRA+head checkpoint; no vocabulary projection or decoding."""
+    """Load an AReno backbone+head checkpoint; no vocabulary projection or decoding."""
 
-    def __init__(self, model_path, checkpoint, *, max_length=None, quantization_bits=None, quantization_group_size=64):
-        import mlx.core as mx
-
+    def __init__(
+        self,
+        model_path,
+        checkpoint,
+        *,
+        max_length=None,
+        quantization_bits=None,
+        quantization_group_size=64,
+        backend_type=None,
+        tp_size=1,
+        world_size=1,
+    ):
         from areno import LoraConfig, Trainer
-        from areno.api.jev.config import JevMlxConfig
+        from areno.api.config import default_backend_type
+        from areno.api.jev.config import JevCudaConfig, JevMlxConfig
+        from areno.api.models import BackendType
 
         config = json.loads((Path(checkpoint) / "jev_config.json").read_text())
         self.temperature = float(config.get("temperature", 1.0))
         if not math.isfinite(self.temperature) or self.temperature <= 0:
             raise ValueError("checkpoint temperature must be finite and positive")
         self.max_length = max_length or int(config.get("max_seq_len", 1024))
-        runtime = JevMlxConfig(
-            model_path=str(model_path),
-            lora=LoraConfig(adapter_path=str(checkpoint)),
-            decision_checkpoint=str(checkpoint),
-            gradient_checkpointing=False,
-            quantization_bits=quantization_bits,
-            quantization_group_size=quantization_group_size,
-            inference_only=True,
+        backend_type = backend_type or default_backend_type()
+        lora = (
+            LoraConfig(adapter_path=str(checkpoint)) if (Path(checkpoint) / "adapter_config.json").is_file() else None
         )
-        self.trainer = Trainer(1, str(model_path), custom_config=runtime)
+        model_path = str(model_path if lora is not None else checkpoint)
+        if backend_type == BackendType.MLX:
+            runtime = JevMlxConfig(
+                model_path=model_path,
+                lora=lora,
+                decision_checkpoint=str(checkpoint),
+                gradient_checkpointing=False,
+                quantization_bits=quantization_bits,
+                quantization_group_size=quantization_group_size,
+                inference_only=True,
+            )
+        elif backend_type == BackendType.CUDA:
+            if quantization_bits is not None:
+                raise ValueError("online MLX quantization requires backend=mlx")
+            runtime = JevCudaConfig(
+                model_path=model_path,
+                tp_size=tp_size,
+                lora=lora,
+                decision_checkpoint=str(checkpoint),
+                runtime={"activation_checkpointing": False},
+                inference_only=True,
+            )
+        else:
+            raise ValueError("JEV requires backend=mlx or cuda")
+        self.trainer = Trainer(world_size, model_path, backend_type=backend_type, custom_config=runtime)
         try:
             self.trainer.init()
-            self.provider = self.trainer._backend.provider
-            self.provider.model.eval()
-            self.provider.model.set_dtype(mx.float32)
-            mx.eval(self.provider.model.parameters())
         except BaseException:
             self.trainer.close()
             raise
         self.calls = 0
 
-    def decide(self, state: Any, questions: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], int]:
-        import mlx.core as mx
-
-        from areno.api.backend.mlx.decision import question_logits
+    def prepare(self, state: Any, questions: dict[str, dict[str, Any]]):
         from areno.api.jev.data import encode_question
 
         state = render_state(state)
@@ -123,7 +146,7 @@ class DecisionScorer:
             validate_question(qid, question)
         if sum(len(candidate_ids(q)) for q in questions.values()) > 512:
             raise ValueError("at most 512 candidate paths are allowed per request")
-        answers, tokens = {}, 0
+        prepared, tokens = [], 0
         tokenizer = self.trainer.get_tokenizer()
         for qid, question in questions.items():
             ids = candidate_ids(question)
@@ -134,14 +157,23 @@ class DecisionScorer:
                 "target": [1 / len(ids)] * len(ids),
             }
             encoded = encode_question(row, tokenizer, self.max_length)
-            # Training and serving share the exact same suffix-preserving encoding.
-            logits = question_logits(self.provider, encoded)
-            mx.eval(logits)
-            answers[qid] = answer_from_logits(question, np.asarray(logits), self.temperature)
+            prepared.append((qid, question, encoded))
             tokens += sum(len(item.tokens) for item in encoded)
-            mx.clear_cache()
+        return prepared, tokens
+
+    def score_prepared(self, prepared, tokens):
+        rows = [row for _, _, encoded in prepared for row in encoded]
+        logits = self.trainer._backend.decision_scores(self.trainer._ctx, rows)
+        answers, offset = {}, 0
+        for qid, question, encoded in prepared:
+            end = offset + len(encoded)
+            answers[qid] = answer_from_logits(question, logits[offset:end], self.temperature)
+            offset = end
         self.calls += 1
         return answers, tokens
+
+    def decide(self, state: Any, questions: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], int]:
+        return self.score_prepared(*self.prepare(state, questions))
 
     def close(self) -> None:
         self.trainer.close()

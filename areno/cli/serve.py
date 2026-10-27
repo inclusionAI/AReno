@@ -398,8 +398,8 @@ def create_app(
             raise ValueError("--q4 requires --backend mlx")
         validate_quantization(mlx_quantize_bits, mlx_quantize_group_size)
     if decision_checkpoint is not None:
-        if backend_type != MLX or tp_size != 1 or world_size != 1:
-            raise ValueError("JEV serving currently requires --backend mlx --tp-size 1 --world-size 1")
+        if backend_type == MLX and (tp_size != 1 or world_size != 1):
+            raise ValueError("MLX JEV serving requires --tp-size 1 --world-size 1")
         if lora is not None:
             raise ValueError("--decision-checkpoint includes its LoRA; do not combine with separate LoRA options")
         from areno.api.jev.serve import create_decision_app
@@ -407,6 +407,11 @@ def create_app(
         return create_decision_app(
             model_path,
             decision_checkpoint,
+            **(
+                {"backend_type": backend_type, "tp_size": tp_size, "world_size": world_size}
+                if backend_type != MLX
+                else {}
+            ),
             **(
                 {"quantization_bits": mlx_quantize_bits, "quantization_group_size": mlx_quantize_group_size}
                 if mlx_quantize_bits is not None
@@ -1102,7 +1107,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     "--decision-checkpoint",
     type=click.Path(exists=True, file_okay=False),
     default=None,
-    help="JEV checkpoint containing LoRA, decision head and calibration; serves typed decisions on MLX.",
+    help="JEV checkpoint containing LoRA, decision head and calibration; serves typed decisions.",
 )
 @click.option("--backend", type=click.Choice(["cuda", "mlx", "npu"]), default=None)
 def serve_command(

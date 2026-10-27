@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gc
 import queue
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -81,6 +82,10 @@ class ArenoWorker:
             if self.device.type != "cuda":
                 raise ValueError("QLoRA requires CUDA")
             initialize_qlora(self.model)
+        if config.runtime.decision_head is not None:
+            from areno.api.backend.cuda.decision import initialize_head
+
+            initialize_head(self)
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
@@ -89,6 +94,8 @@ class ArenoWorker:
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
         )
+        if config.runtime.decision_head is not None and self.adapter_registry is not None:
+            optimizer_parameters = (*optimizer_parameters, *self.model.score_head.parameters())
         self.optimizer = build_optimizer(optimizer_parameters, opt, ctx) if config.role == "train" else None
         self.grad_clip_norm = opt.grad_clip_norm
         self.base_lr = opt.lr
@@ -127,6 +134,13 @@ class ArenoWorker:
             },
         }
         self._global_step = 0
+        if config.runtime.decision_head is not None:
+            checkpoint = config.runtime.decision_head.get("checkpoint")
+            state_path = Path(checkpoint) / "jev_training_state.json" if checkpoint else None
+            if state_path is not None and state_path.is_file():
+                import json
+
+                self._global_step = json.loads(state_path.read_text())["completed_steps"]
         # Paged-KV state: refreshed when the rollout spec changes.
         self._infer_batch_size = 0  # max concurrent sequences supported
         self._infer_cache_blocks = 0  # num_blocks + 1 (extra is scratch)
@@ -192,6 +206,14 @@ class ArenoWorker:
             return self.score_values(cmd.payload)
         if cmd.op is Op.SCORE_REWARDS:
             return self.score_rewards(cmd.payload)
+        if cmd.op is Op.DECISION_INFO:
+            from areno.api.backend.cuda.decision import parameter_counts
+
+            return parameter_counts(self)
+        if cmd.op is Op.SCORE_DECISIONS:
+            from areno.api.backend.cuda.decision import score_candidates
+
+            return score_candidates(self, cmd.payload)
         if cmd.op is Op.TRAIN_VALUES:
             return self.train_values(cmd.payload)
         if cmd.op is Op.SAVE_CHECKPOINT:
@@ -696,6 +718,10 @@ class ArenoWorker:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""
         self._prepare_actor_onloaded()
         path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
+        if self.config.runtime.decision_head is not None:
+            from areno.api.backend.cuda.decision import save_head
+
+            save_head(self, payload.path)
         return {"path": path} if path is not None else None
 
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
@@ -709,6 +735,10 @@ class ArenoWorker:
             payload.path,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
         )
+        if self.config.runtime.decision_head is not None:
+            from areno.api.backend.cuda.decision import save_head
+
+            save_head(self, payload.path)
         return {"path": path} if path is not None else None
 
     def export_gguf(self, payload: ExportGGUFPayload) -> dict | None:

@@ -37,6 +37,8 @@ class Op(Enum):
     SCORE_LOGPROBS = auto()
     SCORE_VALUES = auto()
     SCORE_REWARDS = auto()
+    SCORE_DECISIONS = auto()
+    DECISION_INFO = auto()
     TRAIN_VALUES = auto()
     ROLLOUT_SESSION_BEGIN = auto()
     ROLLOUT_SESSION_SYNC = auto()

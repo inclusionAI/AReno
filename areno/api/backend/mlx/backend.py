@@ -162,7 +162,12 @@ class MlxBackend(Backend):
             from areno.api.backend.mlx.decision import initialize_head
 
             initialize_head(self)
-        self.model.train()
+            if self.config.inference_only:
+                self.model.eval()
+                self.model.set_dtype(mx.float32)
+                mx.eval(self.model.parameters())
+        if not self.config.inference_only:
+            self.model.train()
         mx.eval(self.model.parameters(), self.optimizer.state)
 
     def runtime_components(self) -> BackendRuntimeComponents:
@@ -353,6 +358,16 @@ class MlxBackend(Backend):
             if group != "model":
                 result[f"{group}_lr"] = rate
         return result
+
+    def decision_parameters(self, ctx):
+        from areno.api.backend.mlx.decision import parameter_counts
+
+        return parameter_counts(self)
+
+    def decision_scores(self, ctx, rows):
+        from areno.api.backend.mlx.decision import score_candidates
+
+        return score_candidates(self, rows)
 
     def save_checkpoint(self, ctx: Context, path: str) -> str:
         """Save full MLX weights, or a standard PEFT artifact in LoRA mode."""

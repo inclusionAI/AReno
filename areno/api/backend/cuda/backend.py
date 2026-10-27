@@ -102,7 +102,7 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
             distributed=True,
@@ -170,6 +170,7 @@ class CudaBackend(Backend):
                 optimizer_config=OptimizerConfig(**cfg.optimizer),
                 runtime_config=RuntimeConfig(**cfg.runtime),
                 loss_fn=dispatch_loss,
+                role="rollout" if getattr(cfg, "inference_only", False) else "train",
                 policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
                 lora_config=cfg.lora,
                 reference_mode=cfg.reference_mode,
@@ -504,6 +505,14 @@ class CudaBackend(Backend):
         if self._separate_rollout and self._rollout_session_active:
             raise RuntimeError("cannot update policy weights during an active rollout session")
 
+        if engine.config.runtime.decision_head is not None:
+            from areno.api.algorithms import describe_loss_fn
+            from areno.api.backend.cuda.decision import train_questions
+
+            if describe_loss_fn(loss_fn).name != "jev":
+                raise ValueError("decision-head training requires the registered JEV loss")
+            return train_questions(self, ctx, batch_data, loss_fn=loss_fn, mini_bs=mini_bs)
+
         train_start = time.perf_counter()
         if self._step_e2e_start is None:
             self._step_e2e_start = train_start
@@ -559,6 +568,16 @@ class CudaBackend(Backend):
             result["step_train_time_s"] = train_time_s
             result["step_e2e_time_s"] = step_e2e_time_s
         return result
+
+    def decision_parameters(self, ctx):
+        from areno.engine.protocol import Op
+
+        return self._require_train_engine().cluster.call(Op.DECISION_INFO)[0]
+
+    def decision_scores(self, ctx, rows):
+        from areno.engine.protocol import Op
+
+        return self._require_train_engine().cluster.call(Op.SCORE_DECISIONS, rows)[0]
 
     def save_checkpoint(self, ctx: Context, path: str) -> str:
         engine = self._require_train_engine()

@@ -3,14 +3,14 @@
 import json
 from pathlib import Path
 
-from areno.api.jev.data import QuestionIterator, encode_question
+from areno.api.jev.data import QuestionIterator, encode_question, normalize_questions
 
 
 class JevTrainer:
     def __init__(self, config, *, instance, dataset, reward_fn, loss_fn):
         del reward_fn
         self.config, self.instance, self.loss_fn = config, instance, loss_fn
-        self.dataset = dataset["train"] if isinstance(dataset, dict) else dataset
+        self.dataset = normalize_questions(dataset)
 
     def fit(self) -> None:
         try:
@@ -24,21 +24,14 @@ class JevTrainer:
             raise ValueError("JEV requires a nonempty question dataset and positive batch_size")
         destination = Path(self.config.save_path)
         destination.mkdir(parents=True, exist_ok=True)
-        from mlx.utils import tree_flatten
-
-        trainable = dict(tree_flatten(self.instance._backend.model.trainable_parameters()))
-        counts = {"head": 0, "lora": 0}
-        for name, value in trainable.items():
-            if name.startswith("score_head."):
-                counts["head"] += value.size
-            elif name.endswith(("lora_a", "lora_b")):
-                counts["lora"] += value.size
-            else:
-                raise RuntimeError(f"unexpected trainable base parameter: {name}")
-        if not counts["head"] or not counts["lora"]:
-            raise RuntimeError("both the decision head and backbone LoRA must be trainable")
+        counts = self.instance._backend.decision_parameters(self.instance._ctx)
+        backbone = "lora" if self.config.lora is not None else "backbone"
+        if not counts["head"] or not counts.get(backbone):
+            raise RuntimeError(f"both the decision head and {backbone} must be trainable")
+        if self.config.lora is not None and counts.get("backbone", 0):
+            raise RuntimeError("LoRA JEV requires the base backbone parameters to remain frozen")
         (destination / "trainable_parameters.json").write_text(json.dumps(counts, indent=2) + "\n")
-        checkpoint = self.config.lora.adapter_path if self.config.lora is not None else None
+        checkpoint = self.config.resume_checkpoint()
         state_path = Path(checkpoint) / "jev_training_state.json" if checkpoint else None
         state = json.loads(state_path.read_text()) if state_path and state_path.is_file() else None
         iterator = QuestionIterator(self.dataset, seed=self.config.seed, batch_size=self.config.batch_size, state=state)

@@ -114,80 +114,90 @@ class TrainingManager:
         train_model = _actor_train_model(worker)
         train_model.train()
         data_pack = dict(data_pack_shards[ctx.dp_rank])
-        data_pack = _pack_train_data(data_pack)
-        pack_loss_fn = data_pack.get("_loss_fn")
-        auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
-        accelerator = accelerator_module(worker.device)
-        if auto_tune_probe and accelerator is not None:
-            accelerator.synchronize(worker.device)
-            accelerator.reset_peak_memory_stats(worker.device)
-        data_pack = to_device(data_pack, worker.device)
-        data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
-        data_pack["_mst_chunk_size"] = training_chunk_size(worker.device.type, ctx.world_size)
-        tokens = data_pack["input_ids"].long()
-        position_ids = data_pack.get("position_ids")
-        mtp_loss_scale = self._resolved_mtp_loss_scale()
-        train_meta = _train_meta(
-            data_pack,
-            tokens,
-            sequence_parallel=worker.config.effective_sequence_parallel,
-            mtp_enabled=mtp_loss_scale > 0.0,
-        )
-        model_kwargs = {
-            "input_ids": tokens,
-            "position_ids": position_ids,
-            "train_meta": train_meta,
-        }
-        if data_pack.get("features") is not None:
-            model_kwargs["features"] = data_pack["features"]
-        existing_chunked_head = (
-            worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
-        )
-        defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
-        if defer_lm_head:
-            model_kwargs["defer_lm_head"] = True
-        with routing_replay_context(train_meta):
-            out = train_model(**model_kwargs)
-        if defer_lm_head:
-            logprobs = packed_next_token_logprobs_from_hidden(
-                out.hidden_states,
+        if "_jev_groups" in data_pack:
+            from types import SimpleNamespace
+
+            from areno.api.backend.cuda.decision import backward_questions
+
+            auto_tune_probe = False
+            accelerator = accelerator_module(worker.device)
+            model_kwargs = {"train_meta": SimpleNamespace(sequence_parallel=worker.config.effective_sequence_parallel)}
+            loss, metrics = backward_questions(worker, data_pack, grad_scale=grad_scale, model=train_model)
+        else:
+            data_pack = _pack_train_data(data_pack)
+            pack_loss_fn = data_pack.get("_loss_fn")
+            auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
+            accelerator = accelerator_module(worker.device)
+            if auto_tune_probe and accelerator is not None:
+                accelerator.synchronize(worker.device)
+                accelerator.reset_peak_memory_stats(worker.device)
+            data_pack = to_device(data_pack, worker.device)
+            data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
+            data_pack["_mst_chunk_size"] = training_chunk_size(worker.device.type, ctx.world_size)
+            tokens = data_pack["input_ids"].long()
+            position_ids = data_pack.get("position_ids")
+            mtp_loss_scale = self._resolved_mtp_loss_scale()
+            train_meta = _train_meta(
+                data_pack,
                 tokens,
-                data_pack["train_cu_seqlens"],
-                train_model.lm_head,
-                logit_softcap=getattr(train_model, "final_logit_softcapping", None),
-                # Retain the pre-existing head bound independently of the
-                # tokenwise block schedule; widening it would regress memory.
-                chunk_size=256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256),
+                sequence_parallel=worker.config.effective_sequence_parallel,
+                mtp_enabled=mtp_loss_scale > 0.0,
             )
-        else:
-            logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
-        loss_out = worker.loss_fn(data_pack, logprobs)
-        metrics = None
-        if isinstance(loss_out, tuple):
-            loss, metrics = loss_out
-        else:
-            loss = loss_out
-        if not isinstance(loss, torch.Tensor):
-            raise TypeError("train_loss_fn must return a torch.Tensor")
-        mtp_logits_shard = getattr(out, "mtp_logits_shard", None)
-        if mtp_logits_shard is not None:
-            mtp_loss = self._mtp_loss(mtp_logits_shard, tokens, data_pack)
-            loss = loss + mtp_loss_scale * mtp_loss
-            # Keep the tensor; the returned metrics are converted to floats
-            # after backward, avoiding a GPU sync on the hot path here.
-            metrics = dict(metrics or {})
-            metrics["mtp_loss"] = mtp_loss.detach()
-        elif mtp_loss_scale > 0.0:
-            # E.g. bailing v2 checkpoints declare MTP layers in their config
-            # but the model family implements none; without this the opt-in
-            # would no-op with nothing distinguishing it from a working run.
-            warnings.warn(
-                "runtime.mtp_loss_scale is set but the model produced no MTP logits; "
-                "the MTP loss is inactive for this model family.",
-                RuntimeWarning,
-                stacklevel=2,
+            model_kwargs = {
+                "input_ids": tokens,
+                "position_ids": position_ids,
+                "train_meta": train_meta,
+            }
+            if data_pack.get("features") is not None:
+                model_kwargs["features"] = data_pack["features"]
+            existing_chunked_head = (
+                worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
             )
-        (loss / max(grad_scale, 1)).backward()
+            defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
+            if defer_lm_head:
+                model_kwargs["defer_lm_head"] = True
+            with routing_replay_context(train_meta):
+                out = train_model(**model_kwargs)
+            if defer_lm_head:
+                logprobs = packed_next_token_logprobs_from_hidden(
+                    out.hidden_states,
+                    tokens,
+                    data_pack["train_cu_seqlens"],
+                    train_model.lm_head,
+                    logit_softcap=getattr(train_model, "final_logit_softcapping", None),
+                    # Retain the pre-existing head bound independently of the
+                    # tokenwise block schedule; widening it would regress memory.
+                    chunk_size=256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256),
+                )
+            else:
+                logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
+            loss_out = worker.loss_fn(data_pack, logprobs)
+            metrics = None
+            if isinstance(loss_out, tuple):
+                loss, metrics = loss_out
+            else:
+                loss = loss_out
+            if not isinstance(loss, torch.Tensor):
+                raise TypeError("train_loss_fn must return a torch.Tensor")
+            mtp_logits_shard = getattr(out, "mtp_logits_shard", None)
+            if mtp_logits_shard is not None:
+                mtp_loss = self._mtp_loss(mtp_logits_shard, tokens, data_pack)
+                loss = loss + mtp_loss_scale * mtp_loss
+                # Keep the tensor; the returned metrics are converted to floats
+                # after backward, avoiding a GPU sync on the hot path here.
+                metrics = dict(metrics or {})
+                metrics["mtp_loss"] = mtp_loss.detach()
+            elif mtp_loss_scale > 0.0:
+                # E.g. bailing v2 checkpoints declare MTP layers in their config
+                # but the model family implements none; without this the opt-in
+                # would no-op with nothing distinguishing it from a working run.
+                warnings.warn(
+                    "runtime.mtp_loss_scale is set but the model produced no MTP logits; "
+                    "the MTP loss is inactive for this model family.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            (loss / max(grad_scale, 1)).backward()
         stream_gradient_shards = bool(getattr(worker.optimizer, "stream_gradient_shards", False))
         if stream_gradient_shards:
             # AdamW4bit consumes each microbatch directly into compact BF16 DP
@@ -214,11 +224,18 @@ class TrainingManager:
                 for group in worker.multimodal_lr_schedules
                 if any(getattr(param, "_areno_lr_group", None) == group for param in worker.model.parameters())
             )
+            if "_jev_groups" in data_pack:
+                multimodal_groups = (*multimodal_groups, "head")
             if stream_gradient_shards:
                 grad_norms = _grad_norms_from_shards(worker.optimizer.grad_shards(), multimodal_groups)
             else:
                 grad_norms = _grad_norms(worker.model.parameters(), multimodal_groups)
             grad_norm = grad_norms.pop("global")
+            if "_jev_groups" in data_pack:
+                if not math.isfinite(grad_norm):
+                    raise FloatingPointError("nonfinite JEV gradient; update was not applied")
+                group = "lora" if worker.adapter_registry is not None else "backbone"
+                metrics[group + "_grad_norm"] = math.sqrt(max(grad_norm**2 - grad_norms["head"] ** 2, 0))
             multimodal_grad_metrics = (
                 {f"{group}_grad_norm": grad_norms[group] for group in multimodal_groups} if multimodal_groups else None
             )

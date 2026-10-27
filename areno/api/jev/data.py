@@ -1,6 +1,7 @@
 """Question-preserving candidate tokenization and grouped training rows."""
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -63,16 +64,33 @@ def group_questions(rows: list[TrainSequence]) -> list[list[TrainSequence]]:
 
 def load_parquet_questions(path: str | Path) -> list[dict[str, Any]]:
     """Read typed questions with probability gold or deterministic candidate ids."""
-    import json
-
     import pyarrow.parquet as pq
+
+    return normalize_questions(
+        pq.read_table(path, columns=["id", "workflow", "state", "questions", "gold"]).to_pylist()
+    )
+
+
+def normalize_questions(dataset) -> list[dict[str, Any]]:
+    """Normalize CLI/SDK training records while preserving the selected split."""
+    import json
 
     from areno.api.jev.schema import candidate_ids, record_to_questions
 
-    rows = pq.read_table(path, columns=["id", "workflow", "state", "questions", "gold"]).to_pylist()
+    if isinstance(dataset, Mapping):
+        dataset = dataset["train"]
     result = []
-    for row in rows:
-        questions, gold = json.loads(row["questions"]), json.loads(row["gold"])
+    for row in dataset:
+        if row.get("split", "train") != "train":
+            continue
+        if "prompt" in row and "candidates" in row and "target" in row:
+            result.append(row)
+            continue
+        if "request" in row and "targets" in row:
+            result.extend(record_to_questions(row))
+            continue
+        questions = json.loads(row["questions"]) if isinstance(row["questions"], str) else row["questions"]
+        gold = json.loads(row["gold"]) if isinstance(row["gold"], str) else row["gold"]
         state = row["state"]
         try:
             state = json.dumps(json.loads(state), ensure_ascii=False, sort_keys=True)
@@ -160,3 +178,27 @@ class QuestionIterator:
             "next_index": self.next_index,
             "completed_steps": self.completed_steps,
         }
+
+
+def candidate_packs(groups, mini_bs):
+    """Fill candidate microbatches while keeping each question's softmax intact."""
+    # Sorting only changes execution within this optimizer update. Dataset
+    # iteration and per-question loss weights remain unchanged.
+    ordered = sorted(groups, key=lambda group: max(len(row.tokens) for row in group))
+    pack, count, tokens, longest = [], 0, 0, 0
+    for group in ordered:
+        length = max(len(row.tokens) for row in group)
+        padded_tokens = (count + len(group)) * max(longest, length)
+        useful_tokens = tokens + len(group) * length
+        if pack and (count + len(group) > mini_bs or padded_tokens > 1.25 * useful_tokens):
+            yield pack
+            pack, count, tokens, longest = [], 0, 0, 0
+        if len(group) > mini_bs:
+            yield [group]
+            continue
+        pack.append(group)
+        count += len(group)
+        tokens += len(group) * length
+        longest = max(longest, length)
+    if pack:
+        yield pack

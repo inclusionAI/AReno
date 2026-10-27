@@ -35,7 +35,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
 - 🗜️ **QLoRA**: train Qwen3 dense and Bailing-MoE V3 adapters on CUDA with NF4 weights, double quantization, and paged optimizers.
-- 🎯 **JEV**: jointly train a model-independent decision head and backbone LoRA, then serve typed `choice`, `noul`, and `score` decisions.
+- 🎯 **JEV**: train a model-independent decision head with backbone LoRA or full parameter updates, including native CUDA QLoRA and 4-bit/8-bit AdamW, then serve typed `choice`, `noul`, and `score` decisions.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation
@@ -349,6 +349,25 @@ Adam4bit. `--qlora` enables rank 8 / alpha 16 LoRA by default; the existing
 `--lora-*` options override these settings. Saved adapters automatically
 restore their quantization mode through `--lora-adapter-path`.
 
+#### JEV
+
+Train a decision head together with backbone LoRA using `--algo jev`:
+
+```bash
+areno train \
+  --algo jev --ckpt /path/to/base-model \
+  --dataset-path data/train.jsonl --save-path outputs/jev \
+  --world-size 1 --tp-size 1 --lora-rank 32 --lora-alpha 64 \
+  --batch-size 32 --mini-bs 4 --max-context-len 1024 \
+  --epochs 100 --max-steps 1000 --save-interval 100
+```
+
+For CUDA, add `--qlora` for NF4 adapter training and optionally `--adam-4bit`
+or `--adam-8bit`; omit LoRA options for full-parameter training. `--batch-size`
+counts questions and `--mini-bs` counts candidate sequences. See the
+[JEV concept guide](docs/concepts/jev.rst) for data formats, backbone updates,
+checkpoint continuation, and backend settings.
+
 ### Serving
 
 Serve a trained checkpoint as an OpenAI-compatible endpoint with continuous batching:
@@ -379,6 +398,18 @@ continuous-batch request scheduler and HTTP API.
 Point any OpenAI client at `http://localhost:8000/v1/chat/completions` to start generating. For the full list of serving options, run `areno serve --help`.
 
 Use `--disable-thinking` with `areno serve` to pass `enable_thinking=False` to compatible tokenizer chat templates for request rendering.
+
+For JEV, use `--decision-checkpoint` to load the head and saved adapters or
+backbone, then send typed questions to `POST /v1/systemone`:
+
+```bash
+areno serve \
+  --model-path /path/to/base-model --decision-checkpoint outputs/jev/final \
+  --world-size 1 --tp-size 1 --port 8000
+```
+
+The JEV checkpoint supplies adapter metadata; `--decision-checkpoint` is used
+instead of a separate serving `--lora-adapter-path`.
 
 ## Development
 

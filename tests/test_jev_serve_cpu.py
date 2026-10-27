@@ -74,7 +74,7 @@ def test_create_app_dispatches_decision_checkpoint_without_loading_chat_runtime(
     from areno.cli.serve import create_app
 
     expected = object()
-    monkeypatch.setattr(decision_serve, "create_decision_app", lambda model, path: expected)
+    monkeypatch.setattr(decision_serve, "create_decision_app", lambda model, path, **options: expected)
     kwargs = dict(
         model_path="base",
         tp_size=1,
@@ -85,5 +85,49 @@ def test_create_app_dispatches_decision_checkpoint_without_loading_chat_runtime(
         decision_checkpoint="checkpoint",
     )
     assert create_app(**kwargs, backend_type=BackendType.MLX) is expected
-    with pytest.raises(ValueError, match="requires"):
-        create_app(**kwargs, backend_type=BackendType.CUDA)
+    assert create_app(**kwargs, backend_type=BackendType.CUDA) is expected
+
+
+def test_concurrent_requests_keep_independent_scores_and_serialize_model_access():
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    calls = []
+
+    class Scorer:
+        def __init__(self, model, checkpoint):
+            self.thread = threading.get_ident()
+
+        def decide(self, state, questions):
+            assert threading.get_ident() == self.thread
+            calls.append(state)
+            time.sleep(0.002)
+            if state == "bad":
+                raise ValueError("invalid state")
+            return {"q": {"type": "noul", "noul": int(state) / 20}}, 1
+
+        def decide_many(self, requests):
+            raise AssertionError("independent requests must not be combined")
+
+        def close(self):
+            assert threading.get_ident() == self.thread
+
+    app = create_decision_app("base", "checkpoint", scorer_factory=Scorer)
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=8) as executor:
+        states = [str(index) for index in range(20)] + ["bad"]
+
+        def request(state):
+            return client.post(
+                "/api/alpha/decisions",
+                json={
+                    "state": state,
+                    "questions": {"q": {"type": "noul", "instructions": "Check"}},
+                },
+            )
+
+        responses = list(executor.map(request, states))
+        for index, response in enumerate(responses[:-1]):
+            assert response.status_code == 200
+            assert response.json()["answers"]["q"]["noul"] == index / 20
+        assert responses[-1].status_code == 422
+    assert sorted(calls) == sorted(states)
