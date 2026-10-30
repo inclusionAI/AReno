@@ -32,6 +32,7 @@ from areno.engine.runtime.decode_graph import (
     graph_capture_headroom,
     sync_before_graph_capture,
 )
+from areno.engine.runtime.decode_metadata import DecodeMetadata
 from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.metadata import InferMeta
 from areno.engine.runtime.rollout import _empty_rollout
@@ -460,6 +461,15 @@ class InferenceManager:
         draft_tokens = torch.empty((0, spec_k), device=self.device, dtype=torch.long)
         draft_probs = torch.empty((0, spec_k, self.config.model.vocab_size), device=self.device, dtype=torch.float32)
         spec_verify_rows = 0
+        # Variable-length speculative commits and NPU retain their existing
+        # metadata path. Ordinary CPU/CUDA decode has predictable host lengths.
+        decode_metadata = (
+            DecodeMetadata(state, self.device)
+            if spec_k == 0
+            and self.device.type in {"cpu", "cuda"}
+            and (cancel_flags is None or cancel_flags.device.type == "cpu")
+            else None
+        )
         # -------- decode loop --------
         self._record_decode_progress(
             enabled=progress_enabled,
@@ -529,7 +539,14 @@ class InferenceManager:
                 )
                 draft_tokens = torch.cat([draft_tokens[:previous_count], new_drafts], dim=0)
                 draft_probs = torch.cat([draft_probs[:previous_count], new_probs], dim=0)
-            cancelled = self._cancel_mask_for_active_rows(active_rows, cancel_flags, cancel_indices_tensor)
+            if decode_metadata is not None:
+                decode_metadata.sync_rows(state, active_rows)
+            cancelled = self._cancel_mask_for_active_rows(
+                active_rows,
+                cancel_flags,
+                cancel_indices_tensor,
+                rows_cpu=decode_metadata.rows_cpu if decode_metadata is not None else None,
+            )
             if cancelled is not None:
                 generated[active_rows[cancelled], 0] = cancel_token
                 logprobs[active_rows[cancelled], 0] = 0.0
@@ -561,10 +578,14 @@ class InferenceManager:
                 continue
             if spec_k > 0:
                 self._ensure_speculative_kv_blocks(state, active_rows, cache_seqlens, 2 * spec_k)
-            else:
+            elif decode_metadata is None:
                 self._ensure_decode_kv_blocks(state, active_rows, cache_seqlens)
-            block_table = self._block_table_for_active_rows(state, active_rows)
-            recurrent_slots = self._recurrent_slots_for_active_rows(state, active_rows)
+            if decode_metadata is None:
+                block_table = self._block_table_for_active_rows(state, active_rows)
+                recurrent_slots = self._recurrent_slots_for_active_rows(state, active_rows)
+            else:
+                decode_metadata.sync_rows(state, active_rows)
+                block_table, recurrent_slots = decode_metadata.prepare(state)
             if spec_k > 0:
                 # Speculative decoding writes the accepted tokens, advances the
                 # positions and records its own routing inside the step.
@@ -592,8 +613,12 @@ class InferenceManager:
                 # Cache re-prefill only applies to models that invalidate their
                 # KV cache mid-decode (LongRoPE); those have no MTP layer, so
                 # this never overlaps the speculative path above.
-                reprefill_mask = self._cache_reprefill_mask(cache_seqlens)
-                if bool(reprefill_mask.any().item()):
+                reprefill_mask = (
+                    self._cache_reprefill_mask(cache_seqlens)
+                    if getattr(getattr(self.worker, "model", None), "cache_reprefill_required", None) is not None
+                    else None
+                )
+                if reprefill_mask is not None and bool(reprefill_mask.any().item()):
                     next_tokens, next_logprobs = self._infer_with_cache_reprefill(
                         state,
                         generated,
@@ -646,18 +671,43 @@ class InferenceManager:
                 active_count=active_count,
                 token_delta=step_tokens,
             )
-            remove = torch.zeros(active_count, device=self.device, dtype=torch.bool)
-            if finished is not None:
-                remove |= finished
-            full_length = response_lens[active_rows] >= state.max_new_tokens
-            remove |= full_length
-            # Cancellation filter (overrides the just-written token with the
-            # cancel sentinel so downstream sees a clean stop).
-            cancelled = self._cancel_mask_for_active_rows(active_rows, cancel_flags, cancel_indices_tensor)
-            if cancelled is not None:
-                remove |= cancelled
-            if bool(remove.any().item()):
-                if finished is not None and bool(finished.any().item()):
+            if decode_metadata is None:
+                remove = torch.zeros(active_count, device=self.device, dtype=torch.bool)
+                if finished is not None:
+                    remove |= finished
+                full_length = response_lens[active_rows] >= state.max_new_tokens
+                remove |= full_length
+                cancelled = self._cancel_mask_for_active_rows(active_rows, cancel_flags, cancel_indices_tensor)
+                if cancelled is not None:
+                    remove |= cancelled
+                has_remove = bool(remove.any().item())
+                has_finished = has_remove and finished is not None and bool(finished.any().item())
+                has_full = has_remove and bool(full_length.any().item())
+                has_cancelled = has_remove and cancelled is not None and bool(cancelled.any().item())
+            else:
+                host_finished = decode_metadata.finish_step(finished)
+                host_full = decode_metadata.full_length_mask(state)
+                cancelled = self._cancel_mask_for_active_rows(
+                    active_rows,
+                    cancel_flags,
+                    cancel_indices_tensor,
+                    rows_cpu=decode_metadata.rows_cpu,
+                )
+                has_finished = host_finished is not None and bool(host_finished.any())
+                has_full = host_full is not None and bool(host_full.any())
+                has_cancelled = cancelled is not None
+                has_remove = has_finished or has_full or has_cancelled
+                if has_remove:
+                    remove = torch.zeros(active_count, device=self.device, dtype=torch.bool)
+                    if has_finished:
+                        remove |= finished
+                    full_length = host_full.to(self.device) if has_full else None
+                    if has_full:
+                        remove |= full_length
+                    if has_cancelled:
+                        remove |= cancelled
+            if has_remove:
+                if has_finished:
                     self._mark_rollout_finished_rows(
                         active_rows[finished],
                         generated,
@@ -668,7 +718,7 @@ class InferenceManager:
                         finished_callback,
                         tuple(truncate_stop_token_ids),
                     )
-                if bool(full_length.any().item()):
+                if has_full:
                     self._mark_rollout_finished_rows(
                         active_rows[full_length],
                         generated,
@@ -679,7 +729,7 @@ class InferenceManager:
                         finished_callback,
                         tuple(truncate_stop_token_ids),
                     )
-                if cancelled is not None and bool(cancelled.any().item()):
+                if has_cancelled:
                     cancel_rows = active_rows[cancelled]
                     cancel_pos = response_lens[cancel_rows].clamp_max(state.max_new_tokens - 1)
                     generated[cancel_rows, cancel_pos] = cancel_token
@@ -929,6 +979,8 @@ class InferenceManager:
         active_rows: torch.Tensor,
         cancel_flags: torch.Tensor | None,
         cancel_indices: torch.Tensor | None,
+        *,
+        rows_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         """Return a bool mask marking which active rows have been cancelled.
 
@@ -938,6 +990,10 @@ class InferenceManager:
         """
         if cancel_flags is None or cancel_indices is None or active_rows.numel() == 0:
             return None
+        if rows_cpu is not None:
+            indices = cancel_indices.index_select(0, rows_cpu)
+            cancelled = cancel_flags.index_select(0, indices) != 0
+            return cancelled.to(self.device) if bool(cancelled.any()) else None
         if not bool(cancel_flags.any()):
             return None
         local_flags = cancel_flags.index_select(0, cancel_indices).to(self.device, non_blocking=True)
@@ -1034,10 +1090,10 @@ class InferenceManager:
         logprobs[new_rows, 0] = new_logprobs
         response_lens[new_rows] = 1
         new_cache_seqlens = torch.tensor(
-            [len(state.prompts[int(row)]) for row in new_rows.tolist()], device=self.device, dtype=torch.int32
+            [len(state.prompts[row]) for row in state._last_active_ids], device=self.device, dtype=torch.int32
         )
         new_position_deltas = torch.tensor(
-            state.decode_position_deltas(new_rows.detach().cpu().tolist()), device=self.device, dtype=torch.long
+            state.decode_position_deltas(state._last_active_ids), device=self.device, dtype=torch.long
         )
         new_position_ids = new_cache_seqlens.to(torch.long) + new_position_deltas
         # A bounded chunk can finish some prompts and partially prefill the
