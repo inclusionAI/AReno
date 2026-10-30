@@ -1,0 +1,415 @@
+{
+  "warmup_steps": 2,
+  "sft": {
+    "adamw": {
+      "seeds": [
+        {
+          "run": "examples/galore/results/sft17/adamw_s1",
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.125969413737808,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.1607427012037583
+            ],
+            [
+              100,
+              1.150225283112679
+            ],
+            [
+              150,
+              1.142522380829102
+            ],
+            [
+              200,
+              1.138248632567521
+            ],
+            [
+              250,
+              1.1336790795098353
+            ],
+            [
+              300,
+              1.1303061115442141
+            ],
+            [
+              350,
+              1.1277324439928127
+            ],
+            [
+              400,
+              1.125969413737808
+            ]
+          ],
+          "steady": {
+            "steps": 398,
+            "median_step_time_s": 1.428020264604129,
+            "median_optimizer_step_time_s": 0.07488922856282443,
+            "max_train_peak_allocated_gib": 36.62485885620117,
+            "max_train_peak_reserved_gib": 37.53125,
+            "max_optimizer_peak_allocated_gib": 31.67008399963379,
+            "max_optimizer_peak_reserved_gib": 37.53125,
+            "median_allocated_after_step_gib": 24.07757830619812
+          },
+          "refresh": null,
+          "optimizer_state": {}
+        },
+        {
+          "run": "examples/galore/results/sft17/adamw_s2",
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.1231853775498237,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.1578659903415944
+            ],
+            [
+              100,
+              1.1489429359308012
+            ],
+            [
+              150,
+              1.1414628345701
+            ],
+            [
+              200,
+              1.135158296259737
+            ],
+            [
+              250,
+              1.1308266323380955
+            ],
+            [
+              300,
+              1.126820322886986
+            ],
+            [
+              350,
+              1.1242004615256538
+            ],
+            [
+              400,
+              1.1231853775498237
+            ]
+          ],
+          "steady": {
+            "steps": 398,
+            "median_step_time_s": 1.4087076804134995,
+            "median_optimizer_step_time_s": 0.07354624709114432,
+            "max_train_peak_allocated_gib": 36.61279249191284,
+            "max_train_peak_reserved_gib": 37.564453125,
+            "max_optimizer_peak_allocated_gib": 31.659108638763428,
+            "max_optimizer_peak_reserved_gib": 37.564453125,
+            "median_allocated_after_step_gib": 24.0765962600708
+          },
+          "refresh": null,
+          "optimizer_state": {}
+        },
+        {
+          "run": "examples/galore/results/sft17/adamw_s3",
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.1251966031714513,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.1616647639921205
+            ],
+            [
+              100,
+              1.1507251605403288
+            ],
+            [
+              150,
+              1.1430682365601932
+            ],
+            [
+              200,
+              1.1374752014669642
+            ],
+            [
+              250,
+              1.1320939546934647
+            ],
+            [
+              300,
+              1.1286842781798017
+            ],
+            [
+              350,
+              1.1264803359172197
+            ],
+            [
+              400,
+              1.1251966031714513
+            ]
+          ],
+          "steady": {
+            "steps": 398,
+            "median_step_time_s": 1.4159448849968612,
+            "median_optimizer_step_time_s": 0.07276354893110693,
+            "max_train_peak_allocated_gib": 36.62165975570679,
+            "max_train_peak_reserved_gib": 37.580078125,
+            "max_optimizer_peak_allocated_gib": 31.657297611236572,
+            "max_optimizer_peak_reserved_gib": 37.580078125,
+            "median_allocated_after_step_gib": 24.074934005737305
+          },
+          "refresh": null,
+          "optimizer_state": {}
+        }
+      ],
+      "final_val_loss_mean": 1.1247837981530278,
+      "final_val_loss_std": 0.0014371918318124123,
+      "median_step_time_s": 1.4159448849968612,
+      "median_optimizer_step_time_s": 0.07354624709114432,
+      "max_train_peak_allocated_gib": 36.62485885620117,
+      "max_train_peak_reserved_gib": 37.580078125
+    },
+    "galore": {
+      "seeds": [
+        {
+          "run": "examples/galore/results/sft17/galore_s1",
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.129641665433693,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.162286191884192
+            ],
+            [
+              100,
+              1.151599733761698
+            ],
+            [
+              150,
+              1.1449369361895763
+            ],
+            [
+              200,
+              1.1403540952683895
+            ],
+            [
+              250,
+              1.1367579099700367
+            ],
+            [
+              300,
+              1.1332316220277672
+            ],
+            [
+              350,
+              1.1310564329272468
+            ],
+            [
+              400,
+              1.129641665433693
+            ]
+          ],
+          "steady": {
+            "steps": 395,
+            "median_step_time_s": 1.5853482459206134,
+            "median_optimizer_step_time_s": 0.25440853904001415,
+            "max_train_peak_allocated_gib": 27.029259204864502,
+            "max_train_peak_reserved_gib": 29.060546875,
+            "max_optimizer_peak_allocated_gib": 22.071901321411133,
+            "max_optimizer_peak_reserved_gib": 29.060546875,
+            "median_allocated_after_step_gib": 14.494980812072754
+          },
+          "refresh": {
+            "steps": 3,
+            "median_step_time_s": 5.431640750961378,
+            "median_optimizer_step_time_s": 4.028526143869385,
+            "max_train_peak_allocated_gib": 27.012378215789795,
+            "max_train_peak_reserved_gib": 28.044921875,
+            "max_optimizer_peak_allocated_gib": 22.065227508544922,
+            "max_optimizer_peak_reserved_gib": 28.044921875,
+            "median_allocated_after_step_gib": 14.495715618133545
+          },
+          "optimizer_state": {
+            "projection_bytes": 176160768.0,
+            "moment_bytes": 763363328.0,
+            "master_bytes": 2994733056.0,
+            "adamw_state_bytes": 6302344320.0,
+            "state_bytes": 10236601472.0,
+            "full_rank_moment_bytes": 11274289152.0,
+            "matrices": 196.0,
+            "refreshed_matrices": 0.0
+          }
+        },
+        {
+          "run": "examples/galore/results/sft17/galore_s2",
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.1278177962098588,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.1607429754489154
+            ],
+            [
+              100,
+              1.1518504459687735
+            ],
+            [
+              150,
+              1.1456332494201702
+            ],
+            [
+              200,
+              1.1385556686942382
+            ],
+            [
+              250,
+              1.1346075580773847
+            ],
+            [
+              300,
+              1.1308268360683114
+            ],
+            [
+              350,
+              1.1289809514506146
+            ],
+            [
+              400,
+              1.1278177962098588
+            ]
+          ],
+          "steady": {
+            "steps": 395,
+            "median_step_time_s": 1.5745402600150555,
+            "median_optimizer_step_time_s": 0.25438801920972764,
+            "max_train_peak_allocated_gib": 27.02022647857666,
+            "max_train_peak_reserved_gib": 28.90234375,
+            "max_optimizer_peak_allocated_gib": 22.07014036178589,
+            "max_optimizer_peak_reserved_gib": 28.90234375,
+            "median_allocated_after_step_gib": 14.492002487182617
+          },
+          "refresh": {
+            "steps": 3,
+            "median_step_time_s": 5.548945571063086,
+            "median_optimizer_step_time_s": 4.033710411982611,
+            "max_train_peak_allocated_gib": 27.011662483215332,
+            "max_train_peak_reserved_gib": 29.02734375,
+            "max_optimizer_peak_allocated_gib": 22.064255237579346,
+            "max_optimizer_peak_reserved_gib": 29.02734375,
+            "median_allocated_after_step_gib": 14.493870258331299
+          },
+          "optimizer_state": {
+            "projection_bytes": 176160768.0,
+            "moment_bytes": 763363328.0,
+            "master_bytes": 2994733056.0,
+            "adamw_state_bytes": 6302344320.0,
+            "state_bytes": 10236601472.0,
+            "full_rank_moment_bytes": 11274289152.0,
+            "matrices": 196.0,
+            "refreshed_matrices": 0.0
+          }
+        },
+        {
+          "run": "examples/galore/results/sft17/galore_s3",
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.1289871960423299,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.1631300783581715
+            ],
+            [
+              100,
+              1.1525744197977532
+            ],
+            [
+              150,
+              1.1449934622968982
+            ],
+            [
+              200,
+              1.1396527339100595
+            ],
+            [
+              250,
+              1.1349721065352798
+            ],
+            [
+              300,
+              1.132177762614953
+            ],
+            [
+              350,
+              1.1302641699816172
+            ],
+            [
+              400,
+              1.1289871960423299
+            ]
+          ],
+          "steady": {
+            "steps": 395,
+            "median_step_time_s": 1.590278103016317,
+            "median_optimizer_step_time_s": 0.25486667710356414,
+            "max_train_peak_allocated_gib": 27.023959159851074,
+            "max_train_peak_reserved_gib": 28.166015625,
+            "max_optimizer_peak_allocated_gib": 22.072255611419678,
+            "max_optimizer_peak_reserved_gib": 28.166015625,
+            "median_allocated_after_step_gib": 14.494263172149658
+          },
+          "refresh": {
+            "steps": 3,
+            "median_step_time_s": 5.532069572014734,
+            "median_optimizer_step_time_s": 4.07254194887355,
+            "max_train_peak_allocated_gib": 27.015772819519043,
+            "max_train_peak_reserved_gib": 27.619140625,
+            "max_optimizer_peak_allocated_gib": 22.06659746170044,
+            "max_optimizer_peak_reserved_gib": 27.619140625,
+            "median_allocated_after_step_gib": 14.493664264678955
+          },
+          "optimizer_state": {
+            "projection_bytes": 176160768.0,
+            "moment_bytes": 763363328.0,
+            "master_bytes": 2994733056.0,
+            "adamw_state_bytes": 6302344320.0,
+            "state_bytes": 10236601472.0,
+            "full_rank_moment_bytes": 11274289152.0,
+            "matrices": 196.0,
+            "refreshed_matrices": 0.0
+          }
+        }
+      ],
+      "final_val_loss_mean": 1.1288155525619605,
+      "final_val_loss_std": 0.0009239701562698474,
+      "median_step_time_s": 1.5853482459206134,
+      "median_optimizer_step_time_s": 0.25440853904001415,
+      "max_train_peak_allocated_gib": 27.029259204864502,
+      "max_train_peak_reserved_gib": 29.060546875,
+      "final_val_loss_rel_change": 0.0035844705583003567,
+      "per_seed_rel_change": [
+        0.0032614133661894584,
+        0.0041243580557828174,
+        0.003368827154467402
+      ]
+    }
+  }
+}

@@ -36,6 +36,7 @@ from areno.engine.protocol import (
     ExportAdapterPayload,
     ExportGGUFPayload,
     Op,
+    OptimizerStatePayload,
     RoleSpecPayload,
     RolloutCacheProbePayload,
     RolloutPayload,
@@ -711,6 +712,18 @@ class ArenoEngine:
             return self.export_adapter(path)
         results = self.cluster.call(Op.SAVE_CHECKPOINT, SaveCheckpointPayload(path=path))
         return results[0]["path"]
+
+    def save_optimizer_state(self, path: str) -> str:
+        """Write every train rank's optimizer state and step counter under ``path``."""
+
+        results = self.cluster.call(Op.SAVE_OPTIMIZER_STATE, OptimizerStatePayload(path=path))
+        return next(result["path"] for result in results if result is not None)
+
+    def load_optimizer_state(self, path: str) -> int:
+        """Restore ``save_optimizer_state`` output and return the restored optimizer step."""
+
+        results = self.cluster.call(Op.LOAD_OPTIMIZER_STATE, OptimizerStatePayload(path=path))
+        return next(result["global_step"] for result in results if result is not None)
 
     def export_adapter(self, path: str) -> str:
         """Export the live native LoRA weights as a standard PEFT adapter."""
