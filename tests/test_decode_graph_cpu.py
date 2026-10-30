@@ -132,7 +132,7 @@ def test_cache_initialization_captures_graphs_and_reallocation_invalidates_them(
     worker = SimpleNamespace(
         device=device,
         model=model,
-        config=SimpleNamespace(runtime=SimpleNamespace(speculative_draft_tokens=0)),
+        config=SimpleNamespace(runtime=SimpleNamespace(speculative_draft_tokens=0, kv_cache_dtype="auto")),
         _infer_cache_spec=None,
         _decode_graphs={},
         _verify_graphs={},
