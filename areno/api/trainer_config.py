@@ -83,6 +83,13 @@ class TrainerConfig:
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     attn_backend: str = "flash"
+    # Opt-in compression of saved activations: "adaptive" calibrates 8/4/2-bit
+    # or uncompressed storage per saved tensor within a relative L2 gradient
+    # error budget (CUDA, one training GPU, dense full-parameter models).
+    activation_compression: str = "none"
+    activation_compression_error_budget: float = 0.01
+    activation_compression_bits: tuple[int, ...] = (8, 4, 2)
+    activation_compression_check_interval: int = 50
     # Opt-in auxiliary MTP loss for checkpoints that ship MTP layers; None keeps
     # the layers unbuilt unless speculative decoding needs them.
     mtp_loss_scale: float | None = None
@@ -129,6 +136,10 @@ class TrainerConfig:
             raise ValueError("adam_4bit is only supported by the CUDA and NPU backends")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
+        if self.activation_compression not in {"none", "adaptive"}:
+            raise ValueError("activation_compression must be one of: none, adaptive")
+        if self.activation_compression != "none" and self.backend != "cuda":
+            raise ValueError("activation_compression is only supported by the CUDA backend")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
         if isinstance(self.optimizer_state_offload, bool):
@@ -264,6 +275,10 @@ class TrainerConfig:
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
                 "mtp_loss_scale": self.mtp_loss_scale,
+                "activation_compression": self.activation_compression,
+                "activation_compression_error_budget": self.activation_compression_error_budget,
+                "activation_compression_bits": tuple(self.activation_compression_bits),
+                "activation_compression_check_interval": self.activation_compression_check_interval,
             },
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -339,6 +354,10 @@ class RolloutTrainerConfig(TrainerConfig):
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
                 "mtp_loss_scale": self.mtp_loss_scale,
+                "activation_compression": self.activation_compression,
+                "activation_compression_error_budget": self.activation_compression_error_budget,
+                "activation_compression_bits": tuple(self.activation_compression_bits),
+                "activation_compression_check_interval": self.activation_compression_check_interval,
                 "speculative_draft_tokens": self.speculative_draft_tokens,
                 # R3 is the default CUDA path for rollout-based MoE training.
                 # EngineConfig disables it again when the checkpoint is dense.

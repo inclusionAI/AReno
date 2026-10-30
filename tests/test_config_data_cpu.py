@@ -1134,6 +1134,8 @@ def _train_args(**overrides):
         weight_decay=1e-2,
         grad_clip_norm=1.0,
         activation_checkpointing=True,
+        activation_compression="none",
+        activation_compression_error_budget=0.01,
         drop_rollout_state=False,
         optimizer_state_offload="none",
         optimizer_state_offload_dir=None,

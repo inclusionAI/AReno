@@ -718,6 +718,8 @@ class ArenoWorker:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""
         self._prepare_actor_onloaded()
         path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
+        if self.training is not None and self.training.activation_compression is not None:
+            self.training.activation_compression.save(payload.path)
         if self.config.runtime.decision_head is not None:
             from areno.api.backend.cuda.decision import save_head
 

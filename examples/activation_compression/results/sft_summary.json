@@ -1,0 +1,854 @@
+{
+  "warmup_steps": 2,
+  "sft": {
+    "bf16": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/sft/bf16_s1",
+          "measured_steps": 298,
+          "median_step_time_s": 3.0475751352496445,
+          "min_step_time_s": 2.240693370811641,
+          "max_step_time_s": 5.059657597914338,
+          "median_optimizer_step_time_s": 0.042032897006720304,
+          "max_train_peak_allocated_gib": 14.47305679321289,
+          "max_train_peak_reserved_gib": 19.337890625,
+          "max_optimizer_peak_allocated_gib": 12.485559940338135,
+          "max_optimizer_peak_reserved_gib": 19.337890625,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.333048950231681,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3807007142419612
+            ],
+            [
+              100,
+              1.3604770792922543
+            ],
+            [
+              150,
+              1.3477937836200344
+            ],
+            [
+              200,
+              1.3403147344180903
+            ],
+            [
+              250,
+              1.3353211090166064
+            ],
+            [
+              300,
+              1.333048950231681
+            ]
+          ]
+        },
+        {
+          "run": "examples/activation_compression/results/sft/bf16_s2",
+          "measured_steps": 298,
+          "median_step_time_s": 3.0490528075024486,
+          "min_step_time_s": 2.4757866663858294,
+          "max_step_time_s": 5.117600900121033,
+          "median_optimizer_step_time_s": 0.04134004795923829,
+          "max_train_peak_allocated_gib": 14.488092422485352,
+          "max_train_peak_reserved_gib": 19.34765625,
+          "max_optimizer_peak_allocated_gib": 12.493762016296387,
+          "max_optimizer_peak_reserved_gib": 19.34765625,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3326129149740993,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3790165803800483
+            ],
+            [
+              100,
+              1.3579978298539714
+            ],
+            [
+              150,
+              1.346880236776439
+            ],
+            [
+              200,
+              1.340211404057674
+            ],
+            [
+              250,
+              1.3350097312026732
+            ],
+            [
+              300,
+              1.3326129149740993
+            ]
+          ]
+        },
+        {
+          "run": "examples/activation_compression/results/sft/bf16_s3",
+          "measured_steps": 298,
+          "median_step_time_s": 3.0186755596660078,
+          "min_step_time_s": 2.361901274882257,
+          "max_step_time_s": 5.072559312917292,
+          "median_optimizer_step_time_s": 0.04140366893261671,
+          "max_train_peak_allocated_gib": 14.480276584625244,
+          "max_train_peak_reserved_gib": 19.3515625,
+          "max_optimizer_peak_allocated_gib": 12.492342472076416,
+          "max_optimizer_peak_reserved_gib": 19.3515625,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3327282519149668,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.37956806804442
+            ],
+            [
+              100,
+              1.360531000036609
+            ],
+            [
+              150,
+              1.3485396072683318
+            ],
+            [
+              200,
+              1.3399310079823714
+            ],
+            [
+              250,
+              1.335554377069432
+            ],
+            [
+              300,
+              1.3327282519149668
+            ]
+          ]
+        }
+      ],
+      "final_val_loss_mean": 1.3327967057069157,
+      "final_val_loss_std": 0.00022593390114744187,
+      "median_step_time_s": 3.0475751352496445,
+      "max_train_peak_allocated_gib": 14.488092422485352,
+      "max_train_peak_reserved_gib": 19.3515625
+    },
+    "adaptive": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/sft/actc_s1",
+          "measured_steps": 298,
+          "median_step_time_s": 3.1081353998742998,
+          "min_step_time_s": 2.297892017289996,
+          "max_step_time_s": 112.06924498640001,
+          "median_optimizer_step_time_s": 0.04272647947072983,
+          "max_train_peak_allocated_gib": 14.419679641723633,
+          "max_train_peak_reserved_gib": 19.396484375,
+          "max_optimizer_peak_allocated_gib": 12.427099227905273,
+          "max_optimizer_peak_reserved_gib": 19.396484375,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3330638351835102,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3807606696029247
+            ],
+            [
+              100,
+              1.3604145252617046
+            ],
+            [
+              150,
+              1.3477466287153077
+            ],
+            [
+              200,
+              1.3403746106952257
+            ],
+            [
+              250,
+              1.3352773728599703
+            ],
+            [
+              300,
+              1.3330638351835102
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.6048212051391602,
+            "stored_bytes": 0.5370467305183411,
+            "packed_bytes": 0.0744175910949707,
+            "scale_bytes": 0.009302198886871338,
+            "outlier_bytes": 0.00232638418674469,
+            "kept_bytes": 0.45360565185546875,
+            "workspace_bytes": 0.02085590362548828
+          },
+          "stored_fraction": 0.8981694638119737,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.0037252579548574835,
+            "noise_floor": 0.0009089655349427021,
+            "reference_drift": 0.0008697466737084994,
+            "calibration_error": 0.0076906385244157605,
+            "held_out_error": 0.0076163419977874755,
+            "predicted_error": 0.014340292634813146,
+            "plan_rounds": 3.0,
+            "plan_stored_fraction": 0.6945082254504236,
+            "plan_slots_8bit": 21.0,
+            "plan_slots_4bit": 0.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 8.0,
+            "calibration_passes": 70.0,
+            "calibration_s": 125.93183552287519,
+            "calibration_peak_allocated_bytes": 9711609856.0
+          },
+          "calibration_step_time_s": 132.76011722814292
+        },
+        {
+          "run": "examples/activation_compression/results/sft/actc_s2",
+          "measured_steps": 298,
+          "median_step_time_s": 3.1524949693121016,
+          "min_step_time_s": 2.4299057638272643,
+          "max_step_time_s": 116.70163436140865,
+          "median_optimizer_step_time_s": 0.04336630506440997,
+          "max_train_peak_allocated_gib": 14.42307996749878,
+          "max_train_peak_reserved_gib": 19.326171875,
+          "max_optimizer_peak_allocated_gib": 12.429028034210205,
+          "max_optimizer_peak_reserved_gib": 19.326171875,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3326794992831528,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3790117299890636
+            ],
+            [
+              100,
+              1.3580819052796682
+            ],
+            [
+              150,
+              1.3467502407258998
+            ],
+            [
+              200,
+              1.3402487355046842
+            ],
+            [
+              250,
+              1.334877318759967
+            ],
+            [
+              300,
+              1.3326794992831528
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.60003662109375,
+            "stored_bytes": 0.5212125778198242,
+            "packed_bytes": 0.08432388305664062,
+            "scale_bytes": 0.010540485382080078,
+            "outlier_bytes": 0.0026360750198364258,
+            "kept_bytes": 0.4271392822265625,
+            "workspace_bytes": 0.02069091796875
+          },
+          "stored_fraction": 0.8836222548758207,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.0038633166519039387,
+            "noise_floor": 0.0009054279983005177,
+            "reference_drift": 0.0009264237725132407,
+            "calibration_error": 0.00663711574116066,
+            "held_out_error": 0.007328328598160718,
+            "predicted_error": 0.012213978176657566,
+            "plan_rounds": 2.0,
+            "plan_stored_fraction": 0.7381499615073364,
+            "plan_slots_8bit": 18.0,
+            "plan_slots_4bit": 0.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 11.0,
+            "calibration_passes": 68.0,
+            "calibration_s": 119.70309816021472,
+            "calibration_peak_allocated_bytes": 9705593856.0
+          },
+          "calibration_step_time_s": 125.86038224212825
+        },
+        {
+          "run": "examples/activation_compression/results/sft/actc_s3",
+          "measured_steps": 298,
+          "median_step_time_s": 3.0772531633265316,
+          "min_step_time_s": 2.232237637974322,
+          "max_step_time_s": 114.11629156488925,
+          "median_optimizer_step_time_s": 0.04160572029650211,
+          "max_train_peak_allocated_gib": 14.429123401641846,
+          "max_train_peak_reserved_gib": 19.396484375,
+          "max_optimizer_peak_allocated_gib": 12.437214851379395,
+          "max_optimizer_peak_reserved_gib": 19.396484375,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.332901720450489,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3795992035949127
+            ],
+            [
+              100,
+              1.3601727260154346
+            ],
+            [
+              150,
+              1.3484728099738492
+            ],
+            [
+              200,
+              1.339837415431573
+            ],
+            [
+              250,
+              1.3354572705070797
+            ],
+            [
+              300,
+              1.332901720450489
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.600548267364502,
+            "stored_bytes": 0.5295573994517326,
+            "packed_bytes": 0.07361817359924316,
+            "scale_bytes": 0.009202271699905396,
+            "outlier_bytes": 0.0023014023900032043,
+            "kept_bytes": 0.4472799301147461,
+            "workspace_bytes": 0.020708560943603516
+          },
+          "stored_fraction": 0.8981694797951715,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.004032937937658343,
+            "noise_floor": 0.0008869087409383279,
+            "reference_drift": 0.0009399505380886833,
+            "calibration_error": 0.007795727490838112,
+            "held_out_error": 0.008056852980408147,
+            "predicted_error": 0.014403606590977022,
+            "plan_rounds": 3.0,
+            "plan_stored_fraction": 0.7090551024158741,
+            "plan_slots_8bit": 20.0,
+            "plan_slots_4bit": 0.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 9.0,
+            "calibration_passes": 70.0,
+            "calibration_s": 132.6350720403716,
+            "calibration_peak_allocated_bytes": 9719422976.0
+          },
+          "calibration_step_time_s": 139.8826892832294
+        }
+      ],
+      "final_val_loss_mean": 1.332881684972384,
+      "final_val_loss_std": 0.0001929496990489157,
+      "median_step_time_s": 3.1081353998742998,
+      "max_train_peak_allocated_gib": 14.429123401641846,
+      "max_train_peak_reserved_gib": 19.396484375,
+      "final_val_loss_rel_change": 6.376011067876775e-05,
+      "per_seed_rel_change": [
+        1.1166095458703396e-05,
+        4.996522869116227e-05,
+        0.00013016046990288466
+      ],
+      "train_peak_allocated_change_gib": -0.05896902084350586,
+      "step_time_rel_change": 0.019871623155139906
+    },
+    "adaptive_once": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/sft/actc_once_s1",
+          "measured_steps": 298,
+          "median_step_time_s": 3.1259797252714634,
+          "min_step_time_s": 2.2334004528820515,
+          "max_step_time_s": 5.13480980694294,
+          "median_optimizer_step_time_s": 0.041805519722402096,
+          "max_train_peak_allocated_gib": 14.426148891448975,
+          "max_train_peak_reserved_gib": 20.763671875,
+          "max_optimizer_peak_allocated_gib": 12.430516242980957,
+          "max_optimizer_peak_reserved_gib": 20.763671875,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3331375377709909,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3806013559785966
+            ],
+            [
+              100,
+              1.3603231173693813
+            ],
+            [
+              150,
+              1.34779180771351
+            ],
+            [
+              200,
+              1.3402441753686092
+            ],
+            [
+              250,
+              1.3353498530797465
+            ],
+            [
+              300,
+              1.3331375377709909
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.6048212051391602,
+            "stored_bytes": 0.4200534373521805,
+            "packed_bytes": 0.21898698806762695,
+            "scale_bytes": 0.02737337350845337,
+            "outlier_bytes": 0.006845846772193909,
+            "kept_bytes": 0.16684722900390625,
+            "workspace_bytes": 0.02085590362548828
+          },
+          "stored_fraction": 0.6945084636011354,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.003803291355117057,
+            "noise_floor": 0.0008456789162065351,
+            "reference_drift": 0.0008198446342566582,
+            "calibration_error": 0.007675917333464606,
+            "held_out_error": 0.007617208485786459,
+            "predicted_error": 0.01439443959594016,
+            "plan_rounds": 3.0,
+            "plan_stored_fraction": 0.6945082254504236,
+            "plan_slots_8bit": 21.0,
+            "plan_slots_4bit": 0.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 8.0,
+            "calibration_passes": 70.0,
+            "calibration_s": 121.92052722815424,
+            "calibration_peak_allocated_bytes": 9708386304.0
+          },
+          "calibration_step_time_s": 128.03420608583838
+        },
+        {
+          "run": "examples/activation_compression/results/sft/actc_once_s2",
+          "measured_steps": 298,
+          "median_step_time_s": 3.069413776509464,
+          "min_step_time_s": 2.3314435491338372,
+          "max_step_time_s": 5.4747374802827835,
+          "median_optimizer_step_time_s": 0.04152730666100979,
+          "max_train_peak_allocated_gib": 14.422572135925293,
+          "max_train_peak_reserved_gib": 19.328125,
+          "max_optimizer_peak_allocated_gib": 12.427720546722412,
+          "max_optimizer_peak_reserved_gib": 19.328125,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3326851037361962,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3788393585496896
+            ],
+            [
+              100,
+              1.3581192829279973
+            ],
+            [
+              150,
+              1.3467182349814848
+            ],
+            [
+              200,
+              1.340129681175403
+            ],
+            [
+              250,
+              1.3348871850825046
+            ],
+            [
+              300,
+              1.3326851037361962
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.60003662109375,
+            "stored_bytes": 0.4429171085357666,
+            "packed_bytes": 0.18621826171875,
+            "scale_bytes": 0.02327728271484375,
+            "outlier_bytes": 0.0058214664459228516,
+            "kept_bytes": 0.22760009765625,
+            "workspace_bytes": 0.02069091796875
+          },
+          "stored_fraction": 0.7381501421220963,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.003800192354782016,
+            "noise_floor": 0.0010830737080127098,
+            "reference_drift": 0.0011183174315144006,
+            "calibration_error": 0.006636271111683103,
+            "held_out_error": 0.007307404523853316,
+            "predicted_error": 0.012025272262232226,
+            "plan_rounds": 2.0,
+            "plan_stored_fraction": 0.7381499615073364,
+            "plan_slots_8bit": 18.0,
+            "plan_slots_4bit": 0.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 11.0,
+            "calibration_passes": 68.0,
+            "calibration_s": 113.37428089044988,
+            "calibration_peak_allocated_bytes": 9705593856.0
+          },
+          "calibration_step_time_s": 120.72707982547581
+        },
+        {
+          "run": "examples/activation_compression/results/sft/actc_once_s3",
+          "measured_steps": 298,
+          "median_step_time_s": 3.10600035591051,
+          "min_step_time_s": 2.2455938775092363,
+          "max_step_time_s": 5.1585426377132535,
+          "median_optimizer_step_time_s": 0.0424764147028327,
+          "max_train_peak_allocated_gib": 14.440307140350342,
+          "max_train_peak_reserved_gib": 19.40234375,
+          "max_optimizer_peak_allocated_gib": 12.438040733337402,
+          "max_optimizer_peak_reserved_gib": 19.40234375,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.332812377578397,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3796318535483907
+            ],
+            [
+              100,
+              1.3603422169564985
+            ],
+            [
+              150,
+              1.3484894230479862
+            ],
+            [
+              200,
+              1.3399006170892274
+            ],
+            [
+              250,
+              1.3353989207353782
+            ],
+            [
+              300,
+              1.332812377578397
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.600548267364502,
+            "stored_bytes": 0.4258221685886383,
+            "packed_bytes": 0.20708560943603516,
+            "scale_bytes": 0.025885701179504395,
+            "outlier_bytes": 0.006473809480667114,
+            "kept_bytes": 0.18637704849243164,
+            "workspace_bytes": 0.020708560943603516
+          },
+          "stored_fraction": 0.7090557081574997,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.003937907862635191,
+            "noise_floor": 0.0009596877598217335,
+            "reference_drift": 0.000925857982111029,
+            "calibration_error": 0.007803047770598437,
+            "held_out_error": 0.008046446292011065,
+            "predicted_error": 0.01431223137168992,
+            "plan_rounds": 3.0,
+            "plan_stored_fraction": 0.7090551024158741,
+            "plan_slots_8bit": 20.0,
+            "plan_slots_4bit": 0.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 9.0,
+            "calibration_passes": 70.0,
+            "calibration_s": 131.29892321303487,
+            "calibration_peak_allocated_bytes": 9719422976.0
+          },
+          "calibration_step_time_s": 139.64879128988832
+        }
+      ],
+      "final_val_loss_mean": 1.3328783396951946,
+      "final_val_loss_std": 0.0002333182153186139,
+      "median_step_time_s": 3.10600035591051,
+      "max_train_peak_allocated_gib": 14.440307140350342,
+      "max_train_peak_reserved_gib": 20.763671875,
+      "final_val_loss_rel_change": 6.125014259827921e-05,
+      "per_seed_rel_change": [
+        6.645482845524242e-05,
+        5.417084082393053e-05,
+        6.312289344023725e-05
+      ],
+      "train_peak_allocated_change_gib": -0.047785282135009766,
+      "step_time_rel_change": 0.019171051760165758
+    },
+    "adaptive_5pct": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/sft/actc05_s1",
+          "measured_steps": 298,
+          "median_step_time_s": 3.1659177308902144,
+          "min_step_time_s": 2.3866890808567405,
+          "max_step_time_s": 161.77970003243536,
+          "median_optimizer_step_time_s": 0.041785219218581915,
+          "max_train_peak_allocated_gib": 14.430540084838867,
+          "max_train_peak_reserved_gib": 19.41796875,
+          "max_optimizer_peak_allocated_gib": 12.429787158966064,
+          "max_optimizer_peak_reserved_gib": 19.41796875,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3331806865545441,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3806166047717567
+            ],
+            [
+              100,
+              1.360612349197167
+            ],
+            [
+              150,
+              1.347734282525604
+            ],
+            [
+              200,
+              1.3404642185164892
+            ],
+            [
+              250,
+              1.3355216978621407
+            ],
+            [
+              300,
+              1.3331806865545441
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.6048212051391602,
+            "stored_bytes": 0.33072467148303986,
+            "packed_bytes": 0.2839362621307373,
+            "scale_bytes": 0.03780132532119751,
+            "outlier_bytes": 0.00945378839969635,
+            "kept_bytes": 0.0,
+            "workspace_bytes": 0.02085590362548828
+          },
+          "stored_fraction": 0.5522685668269455,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.003830903516661049,
+            "noise_floor": 0.0008396515124992837,
+            "reference_drift": 0.000829895620695924,
+            "calibration_error": 0.03919848063561828,
+            "held_out_error": 0.03907843834467253,
+            "predicted_error": 0.04272881945129541,
+            "plan_rounds": 2.0,
+            "plan_stored_fraction": 0.5091648893330152,
+            "plan_slots_8bit": 21.0,
+            "plan_slots_4bit": 8.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 0.0,
+            "calibration_passes": 96.0,
+            "calibration_s": 167.45573177095503,
+            "calibration_peak_allocated_bytes": 9713198080.0
+          },
+          "calibration_step_time_s": 174.4162172805518
+        },
+        {
+          "run": "examples/activation_compression/results/sft/actc05_s2",
+          "measured_steps": 298,
+          "median_step_time_s": 3.124890262261033,
+          "min_step_time_s": 2.3432653984054923,
+          "max_step_time_s": 165.08451534900814,
+          "median_optimizer_step_time_s": 0.04139106161892414,
+          "max_train_peak_allocated_gib": 14.42782211303711,
+          "max_train_peak_reserved_gib": 19.416015625,
+          "max_optimizer_peak_allocated_gib": 12.429823875427246,
+          "max_optimizer_peak_reserved_gib": 19.416015625,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.3327911361160822,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3790559709285741
+            ],
+            [
+              100,
+              1.3581040936889417
+            ],
+            [
+              150,
+              1.3468910264526157
+            ],
+            [
+              200,
+              1.340355771137475
+            ],
+            [
+              250,
+              1.3350432176996938
+            ],
+            [
+              300,
+              1.3327911361160822
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.60003662109375,
+            "stored_bytes": 0.3297089710831642,
+            "packed_bytes": 0.28217756748199463,
+            "scale_bytes": 0.037502288818359375,
+            "outlier_bytes": 0.009379029273986816,
+            "kept_bytes": 0.0,
+            "workspace_bytes": 0.02069091796875
+          },
+          "stored_fraction": 0.5522686049593328,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.00392350942970536,
+            "noise_floor": 0.001048604761206299,
+            "reference_drift": 0.0009226899546096191,
+            "calibration_error": 0.03534393500393623,
+            "held_out_error": 0.038287159334666476,
+            "predicted_error": 0.03887892821978361,
+            "plan_rounds": 1.0,
+            "plan_stored_fraction": 0.5177856659533905,
+            "plan_slots_8bit": 22.0,
+            "plan_slots_4bit": 7.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 0.0,
+            "calibration_passes": 94.0,
+            "calibration_s": 157.90519868582487,
+            "calibration_peak_allocated_bytes": 9704419328.0
+          },
+          "calibration_step_time_s": 164.49674863088876
+        },
+        {
+          "run": "examples/activation_compression/results/sft/actc05_s3",
+          "measured_steps": 298,
+          "median_step_time_s": 3.130418051034212,
+          "min_step_time_s": 2.4184077391400933,
+          "max_step_time_s": 163.60566572006792,
+          "median_optimizer_step_time_s": 0.041000783909112215,
+          "max_train_peak_allocated_gib": 14.440850257873535,
+          "max_train_peak_reserved_gib": 19.408203125,
+          "max_optimizer_peak_allocated_gib": 12.437580108642578,
+          "max_optimizer_peak_reserved_gib": 19.408203125,
+          "initial_val_loss": 1.8263092091232973,
+          "final_val_loss": 1.332773122739025,
+          "val_curve": [
+            [
+              0,
+              1.8263092091232973
+            ],
+            [
+              50,
+              1.3793810109257088
+            ],
+            [
+              100,
+              1.3603326594196832
+            ],
+            [
+              150,
+              1.3483711341153426
+            ],
+            [
+              200,
+              1.3399614843877077
+            ],
+            [
+              250,
+              1.3356217882930725
+            ],
+            [
+              300,
+              1.332773122739025
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 0.600548267364502,
+            "stored_bytes": 0.33397915959358215,
+            "packed_bytes": 0.28723621368408203,
+            "scale_bytes": 0.03753426671028137,
+            "outlier_bytes": 0.009387023746967316,
+            "kept_bytes": 0.0,
+            "workspace_bytes": 0.020708560943603516
+          },
+          "stored_fraction": 0.5608893226982226,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.004003614324476839,
+            "noise_floor": 0.0009166644658284166,
+            "reference_drift": 0.0009626062133636706,
+            "calibration_error": 0.03907075454811448,
+            "held_out_error": 0.03772292874004604,
+            "predicted_error": 0.04262145433137809,
+            "plan_rounds": 2.0,
+            "plan_stored_fraction": 0.5177850709168106,
+            "plan_slots_8bit": 22.0,
+            "plan_slots_4bit": 7.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 0.0,
+            "calibration_passes": 96.0,
+            "calibration_s": 186.17926327697933,
+            "calibration_peak_allocated_bytes": 9719961600.0
+          },
+          "calibration_step_time_s": 192.72773788683116
+        }
+      ],
+      "final_val_loss_mean": 1.332914981803217,
+      "final_val_loss_std": 0.0002302832638221304,
+      "median_step_time_s": 3.130418051034212,
+      "max_train_peak_allocated_gib": 14.440850257873535,
+      "max_train_peak_reserved_gib": 19.41796875,
+      "final_val_loss_rel_change": 8.874278860004914e-05,
+      "per_seed_rel_change": [
+        9.882331990906934e-05,
+        0.00013373811703343286,
+        3.366839713470071e-05
+      ],
+      "train_peak_allocated_change_gib": -0.047242164611816406,
+      "step_time_rel_change": 0.02718322341797874
+    }
+  }
+}

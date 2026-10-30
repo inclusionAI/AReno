@@ -82,6 +82,16 @@ class RuntimeConfig:
     # checkpoint's MTP layer and verify them in one target forward. 0 = off.
     # Requires the flash attention backend and a model with MTP layers.
     speculative_draft_tokens: int = 0
+    # Opt-in compression of saved training activations (GACT): "adaptive"
+    # calibrates 8/4/2-bit or uncompressed storage per saved tensor so the
+    # relative L2 error of the parameter gradients stays within the budget.
+    # Validated on single-GPU full-parameter training of dense text models.
+    activation_compression: Literal["none", "adaptive"] = "none"
+    activation_compression_error_budget: float = 0.01
+    activation_compression_bits: tuple[int, ...] = (8, 4, 2)
+    # Every this many optimizer steps, measure the plan's gradient error and
+    # recalibrate when it exceeds the budget; 0 calibrates once.
+    activation_compression_check_interval: int = 50
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
@@ -104,6 +114,15 @@ class RuntimeConfig:
             raise ValueError("runtime.optimizer_state_offload_batch_size must be positive")
         if self.speculative_draft_tokens < 0:
             raise ValueError("runtime.speculative_draft_tokens must be non-negative")
+        if self.activation_compression not in {"none", "adaptive"}:
+            raise ValueError("runtime.activation_compression must be one of: none, adaptive")
+        if not self.activation_compression_error_budget > 0:
+            raise ValueError("runtime.activation_compression_error_budget must be positive")
+        self.activation_compression_bits = tuple(int(bits) for bits in self.activation_compression_bits)
+        if not self.activation_compression_bits or not set(self.activation_compression_bits) <= {2, 4, 8}:
+            raise ValueError("runtime.activation_compression_bits must be a non-empty subset of {8, 4, 2}")
+        if self.activation_compression_check_interval < 0:
+            raise ValueError("runtime.activation_compression_check_interval must be non-negative")
 
     def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Switch flash-attn unsupported hardware or model shapes to native attention."""
@@ -372,6 +391,13 @@ class EngineConfig:
             raise ValueError("dp_size must be >= 1")
         if self.policy_sync_bucket_mb < 1:
             raise ValueError("policy_sync_bucket_mb must be >= 1")
+        if self.runtime.activation_compression != "none" and self.role == "train":
+            if self.runtime.device_type != "cuda" or self.tp_size != 1 or self.dp_size != 1:
+                raise ValueError("runtime.activation_compression requires one CUDA training GPU (tp_size=1, dp_size=1)")
+            if self.lora is not None or self.runtime.decision_head is not None:
+                raise ValueError("runtime.activation_compression supports full-parameter policy training only")
+            if self.model.num_experts is not None:
+                raise ValueError("runtime.activation_compression supports dense models only")
         if self.runtime.kv_block_size < 1:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:

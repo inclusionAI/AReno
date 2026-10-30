@@ -1,0 +1,4129 @@
+{
+ "actc_s1": {
+  "config": {
+   "kind": "train",
+   "pid": 1829448,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "adaptive"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": "runs/rl/actc_s1/ckpt"
+       },
+       {
+        "key": "save_interval",
+        "value": 50
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/actc_s1/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_calibration_interval",
+        "value": 0
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        runs/rl/actc_s1/ckpt\n  save_interval    50\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/actc_s1/tb"
+  },
+  "plan_reuse_log": []
+ },
+ "actc_s1_resume": {
+  "config": {
+   "kind": "train",
+   "pid": 2089454,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "runs/rl/actc_s1/ckpt/step_000050"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 50
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "adaptive"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/actc_s1_resume/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "runs/rl/actc_s1/ckpt/step_000050"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_check_interval",
+        "value": 50
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            runs/rl/actc_s1/ckpt/step_000050\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           50\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/actc_s1_resume/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": [
+   "2026-10-30 14:57:46 INFO areno.engine.runtime.activation_compression activation_compression.py:701 - activation compression: reusing the plan in runs/rl/actc_s1/ckpt/step_000050/activation_compression.json"
+  ]
+ },
+ "actc_s2": {
+  "config": {
+   "kind": "train",
+   "pid": 1830499,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "adaptive"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/actc_s2/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_calibration_interval",
+        "value": 0
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/actc_s2/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ },
+ "actc_s3": {
+  "config": {
+   "kind": "train",
+   "pid": 1840088,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "adaptive"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/actc_s3/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_calibration_interval",
+        "value": 0
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/actc_s3/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ },
+ "actcfinal_s1": {
+  "config": {
+   "kind": "train",
+   "pid": 2115885,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "adaptive"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/actcfinal_s1/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_check_interval",
+        "value": 50
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/actcfinal_s1/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ },
+ "actcfinal_s2": {
+  "config": {
+   "kind": "train",
+   "pid": 2115922,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "adaptive"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/actcfinal_s2/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_check_interval",
+        "value": 50
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/actcfinal_s2/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ },
+ "actcfinal_s3": {
+  "config": {
+   "kind": "train",
+   "pid": 2115991,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "adaptive"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/actcfinal_s3/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_check_interval",
+        "value": 50
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/actcfinal_s3/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ },
+ "bf16_s1": {
+  "config": {
+   "kind": "train",
+   "pid": 1828845,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "none"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": "runs/rl/bf16_s1/ckpt"
+       },
+       {
+        "key": "save_interval",
+        "value": 50
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/bf16_s1/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_calibration_interval",
+        "value": 0
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        runs/rl/bf16_s1/ckpt\n  save_interval    50\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/bf16_s1/tb"
+  },
+  "plan_reuse_log": []
+ },
+ "bf16_s1_resume": {
+  "config": {
+   "kind": "train",
+   "pid": 2091515,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "runs/rl/bf16_s1/ckpt/step_000050"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 50
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "none"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/bf16_s1_resume/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "runs/rl/bf16_s1/ckpt/step_000050"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_check_interval",
+        "value": 50
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            runs/rl/bf16_s1/ckpt/step_000050\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           50\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/bf16_s1_resume/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ },
+ "bf16_s2": {
+  "config": {
+   "kind": "train",
+   "pid": 1829549,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "none"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/bf16_s2/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_calibration_interval",
+        "value": 0
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/bf16_s2/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ },
+ "bf16_s3": {
+  "config": {
+   "kind": "train",
+   "pid": 1840052,
+   "settings": {
+    "sections": [
+     {
+      "items": [
+       {
+        "key": "algo",
+        "value": "gspo"
+       },
+       {
+        "key": "ckpt",
+        "value": "$MODEL"
+       },
+       {
+        "key": "dataset_path",
+        "value": "$GSM8K_TRAIN"
+       },
+       {
+        "key": "model_hub",
+        "value": "modelscope"
+       },
+       {
+        "key": "dataset_loader_fn",
+        "value": "examples/math/dataset_loader.py"
+       },
+       {
+        "key": "epochs",
+        "value": 10
+       },
+       {
+        "key": "max_steps",
+        "value": 100
+       }
+      ],
+      "title": "Basic"
+     },
+     {
+      "items": [
+       {
+        "key": "world_size",
+        "value": 1
+       },
+       {
+        "key": "tp_size",
+        "value": 1
+       },
+       {
+        "key": "sequence_parallel",
+        "value": null
+       },
+       {
+        "key": "attn_backend",
+        "value": "flash"
+       },
+       {
+        "key": "eager_decode",
+        "value": false
+       },
+       {
+        "key": "speculative_draft_tokens",
+        "value": 0
+       },
+       {
+        "key": "mtp_loss_scale",
+        "value": null
+       },
+       {
+        "key": "activation_checkpointing",
+        "value": true
+       },
+       {
+        "key": "activation_compression",
+        "value": "none"
+       },
+       {
+        "key": "activation_compression_error_budget",
+        "value": 0.01
+       },
+       {
+        "key": "keep_rollout_state",
+        "value": true
+       },
+       {
+        "key": "optimizer_state_offload",
+        "value": "none"
+       },
+       {
+        "key": "optimizer_state_offload_dir",
+        "value": null
+       },
+       {
+        "key": "optimizer_state_offload_batch_size",
+        "value": 1
+       },
+       {
+        "key": "chat_template_enable_thinking",
+        "value": false
+       }
+      ],
+      "title": "Runtime"
+     },
+     {
+      "items": [
+       {
+        "key": "batch_size",
+        "value": 32
+       },
+       {
+        "key": "n_samples",
+        "value": 8
+       },
+       {
+        "key": "max_running_prompts",
+        "value": 128
+       },
+       {
+        "key": "max_prompt_tokens",
+        "value": 512
+       },
+       {
+        "key": "max_new_tokens",
+        "value": 1024
+       },
+       {
+        "key": "max_context_len",
+        "value": null
+       },
+       {
+        "key": "greedy",
+        "value": false
+       },
+       {
+        "key": "temperature",
+        "value": 1.0
+       },
+       {
+        "key": "top_k",
+        "value": -1
+       },
+       {
+        "key": "top_p",
+        "value": 1.0
+       },
+       {
+        "key": "agent_fn",
+        "value": null
+       },
+       {
+        "key": "train_tool_results",
+        "value": false
+       },
+       {
+        "key": "reward_fn_path",
+        "value": "examples/math/math_verify_reward.py"
+       },
+       {
+        "key": "resolved_max_running_prompts",
+        "value": 128
+       }
+      ],
+      "title": "Rollout"
+     },
+     {
+      "items": [
+       {
+        "key": "mini_bs",
+        "value": 16
+       },
+       {
+        "key": "score_micro_bs",
+        "value": 8
+       },
+       {
+        "key": "gradient_accumulation_steps",
+        "value": null
+       }
+      ],
+      "title": "Train"
+     },
+     {
+      "items": [
+       {
+        "key": "optimizer_lr",
+        "value": 1e-06
+       },
+       {
+        "key": "optimizer_min_lr",
+        "value": 1e-07
+       },
+       {
+        "key": "lr_decay_steps",
+        "value": 1000
+       },
+       {
+        "key": "lr_decay_style",
+        "value": "cosine"
+       },
+       {
+        "key": "optimizer_beta1",
+        "value": 0.9
+       },
+       {
+        "key": "optimizer_beta2",
+        "value": 0.999
+       },
+       {
+        "key": "weight_decay",
+        "value": 0.01
+       },
+       {
+        "key": "grad_clip_norm",
+        "value": 1.0
+       },
+       {
+        "key": "adam_8bit",
+        "value": false
+       },
+       {
+        "key": "adam_4bit",
+        "value": false
+       }
+      ],
+      "title": "Optimizer"
+     },
+     {
+      "items": [
+       {
+        "key": "gspo_clip_eps",
+        "value": 0.0003
+       },
+       {
+        "key": "grpo_clip_eps",
+        "value": 0.2
+       }
+      ],
+      "title": "Roles and loss"
+     },
+     {
+      "items": [
+       {
+        "key": "save_path",
+        "value": null
+       },
+       {
+        "key": "save_interval",
+        "value": 100
+       },
+       {
+        "key": "export_gguf_path",
+        "value": null
+       },
+       {
+        "key": "gguf_file_type",
+        "value": "f16"
+       }
+      ],
+      "title": "Checkpoint"
+     },
+     {
+      "items": [
+       {
+        "key": "metrics_log_dir",
+        "value": "runs/rl/bf16_s3/tb"
+       }
+      ],
+      "title": "Observability"
+     },
+     {
+      "items": [
+       {
+        "key": "backend",
+        "value": "cuda"
+       },
+       {
+        "key": "base_model_name_or_path",
+        "value": "$MODEL"
+       },
+       {
+        "key": "mlx_quantize_bits",
+        "value": null
+       },
+       {
+        "key": "mlx_quantize_group_size",
+        "value": 64
+       },
+       {
+        "key": "train_devices",
+        "value": [
+         0
+        ]
+       },
+       {
+        "key": "unfreeze_multimodal_tower",
+        "value": false
+       },
+       {
+        "key": "unfreeze_multimodal_projector",
+        "value": false
+       },
+       {
+        "key": "multimodal_tower_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_tower_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_min_lr",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_steps",
+        "value": null
+       },
+       {
+        "key": "multimodal_projector_lr_decay_style",
+        "value": null
+       },
+       {
+        "key": "activation_compression_bits",
+        "value": [
+         8,
+         4,
+         2
+        ]
+       },
+       {
+        "key": "activation_compression_calibration_interval",
+        "value": 0
+       },
+       {
+        "key": "lora",
+        "value": null
+       },
+       {
+        "key": "reference_mode",
+        "value": "independent"
+       },
+       {
+        "key": "rollout_tp_size",
+        "value": null
+       },
+       {
+        "key": "rollout_devices",
+        "value": null
+       },
+       {
+        "key": "policy_sync_bucket_mb",
+        "value": 64
+       }
+      ],
+      "title": "Other"
+     }
+    ]
+   },
+   "summary_text": "AReno training config\n\nAlgorithm\n---------\n  name              gspo\n  default_loss      gspo_loss_fn\n  requires_rollout  yes\n\nInputs\n------\n  ckpt            $MODEL\n  dataset_path    $GSM8K_TRAIN\n  model_hub       modelscope\n  dataset_loader  examples/math/dataset_loader.py\n  reward_fn       examples/math/math_verify_reward.py\n  reward_ckpt     none\n  agent_fn        none\n\nRuntime\n-------\n  world_size    1\n  tp_size       1\n  dp_size       1\n  devices       0\n  attn_backend  flash\n  thinking      False\n\nRollout\n-------\n  batch_size           32\n  max_prompt_tokens    512\n  max_new_tokens       1024\n  max_context_len      model limit\n  topology             shared with train engine\n  policy_sync          shared weights\n  n_samples            8\n  max_running_prompts  128\n  sampling             greedy=no, temperature=1.0, top_k=-1, top_p=1.0\n\nTraining\n--------\n  max_steps                           100\n  sequence_parallel                   model config (resolved at load)\n  mini_bs                             16\n  score_micro_bs                      8\n  gradient_accumulation_steps         auto\n  qlora                               no\n  lora_rank                           disabled\n  lora_alpha                          n/a\n  lora_dropout                        n/a\n  lora_target_modules                 n/a\n  lora_adapter_path                   n/a\n  optimizer                           lr=1e-06, min_lr=1e-07, decay=cosine/1000, betas=(0.9, 0.999),\n                                      weight_decay=0.01, adam_8bit=no, adam_4bit=no\n  optimizer_state_offload             none\n  optimizer_state_offload_dir         none\n  optimizer_state_offload_batch_size  1\n  grad_clip_norm                      1.0\n\nOutputs\n-------\n  save_path        none\n  save_interval    100\n  export_gguf      none\n  gguf_file_type   disabled\n  metrics_log_dir  runs/rl/bf16_s3/tb\nWARNING: no checkpoint output path configured (--save-path); checkpoints will not be saved."
+  },
+  "plan_reuse_log": []
+ }
+}
