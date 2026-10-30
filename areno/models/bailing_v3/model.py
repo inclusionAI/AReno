@@ -1159,7 +1159,7 @@ class BailingLinearAttention(nn.Module):
         if infer_meta.mode == "prefill":
             if infer_meta.cu_seqlens is None:
                 raise RuntimeError("linear attention prefill requires cu_seqlens")
-            return self._forward_prefill(q, k, v, slots, infer_meta.cu_seqlens)
+            return self._forward_prefill(q, k, v, slots, infer_meta.cu_seqlens, infer_meta.cache_seqlens)
         raise ValueError(f"unsupported inference mode: {infer_meta.mode}")
 
     def _forward_decode(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
@@ -1177,15 +1177,22 @@ class BailingLinearAttention(nn.Module):
         return out.view_as(q)
 
     def _forward_prefill(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, slots: torch.Tensor, cu_seqlens: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        slots: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        cached_prefix: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_flat = q.reshape(-1, self.local_heads, self.head_dim)
         k_flat = k.reshape(-1, self.local_heads, self.head_dim)
         v_flat = v.reshape(-1, self.local_heads, self.head_dim)
         log_once("seg_la_prefill", "using seg_la linear attention prefill kernel")
         batch = slots.numel()
-        # Prefill starts from zero state, so s_scales=False (no prior state).
-        s_scales = torch.zeros(batch, device=q.device, dtype=torch.bool)
+        s_scales = (
+            cached_prefix > 0 if cached_prefix is not None else torch.zeros(batch, device=q.device, dtype=torch.bool)
+        )
         return self._forward_seg_la(
             q_flat.contiguous(),
             k_flat.contiguous(),
@@ -1420,7 +1427,9 @@ class BailingKDAAttention(nn.Module):
         if infer_meta.mode == "prefill":
             if infer_meta.cu_seqlens is None:
                 raise RuntimeError("Bailing V3 KDA prefill requires cu_seqlens")
-            return self._causal_conv_infer_prefill(x, weight, cache_idx, infer_meta.cu_seqlens, slots)
+            return self._causal_conv_infer_prefill(
+                x, weight, cache_idx, infer_meta.cu_seqlens, slots, infer_meta.cache_seqlens
+            )
         raise ValueError(f"unsupported inference mode: {infer_meta.mode}")
 
     def _causal_conv_verify(
@@ -1454,14 +1463,21 @@ class BailingKDAAttention(nn.Module):
         cache_idx: int,
         cu_seqlens: torch.Tensor,
         slots: torch.Tensor,
+        cached_prefix: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out = torch.empty_like(x)
         cu = cu_seqlens.to(device=x.device, dtype=torch.long)
         for idx, slot in enumerate(slots):
             start, end = int(cu[idx].item()), int(cu[idx + 1].item())
             segment = x[:, start:end]
-            out[:, start:end] = _areno_depthwise_causal_conv1d_silu_no_compile(segment, weight)
-            tail = segment.reshape(-1, x.shape[-1])[-(self.conv_kernel_size - 1) :]
+            history_len = self.conv_kernel_size - 1
+            if cached_prefix is not None:
+                history = self.conv_cache[slot, cache_idx].T.unsqueeze(0).to(dtype=x.dtype)
+                history = history * (cached_prefix[idx] > 0).to(dtype=x.dtype)
+                segment = torch.cat((history, segment), dim=1)
+            convolved = _areno_depthwise_causal_conv1d_silu_no_compile(segment, weight)
+            out[:, start:end] = convolved[:, -(end - start) :]
+            tail = segment.reshape(-1, x.shape[-1])[-history_len:]
             cache = torch.zeros(x.shape[-1], self.conv_kernel_size - 1, device=x.device, dtype=self.conv_cache.dtype)
             cache[:, -tail.shape[0] :] = tail.transpose(0, 1).to(dtype=self.conv_cache.dtype)
             self.conv_cache[slot, cache_idx] = cache

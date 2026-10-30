@@ -291,3 +291,183 @@ def test_paged_native_attention_matches_sdpa_and_updates_cache(dtype: torch.dtyp
     _assert_close(native, reference)
     torch.testing.assert_close(k_cache, expected_k_cache, atol=0, rtol=0)
     torch.testing.assert_close(v_cache, expected_v_cache, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("backend", ["flash", "native"])
+@pytest.mark.parametrize("partitions", [[2, 2], [1, 1, 1, 1]])
+@torch.inference_mode()
+def test_zero_score_chunk_partitions_and_padded_values(backend, partitions):
+    from areno.engine.data.rollout_state import InferenceBatchState, payload_to_infer_meta
+    from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend
+
+    if backend == "flash":
+        pytest.importorskip("flash_attn")
+    state = InferenceBatchState([[1, 3, 5, 7]], 1, max_prefill_tokens=partitions[0], kv_block_size=256)
+    cache_k = torch.zeros(2, 256, 1, 32, dtype=torch.float16, device="cuda")
+    cache_v = torch.zeros_like(cache_k)
+    outputs = []
+    for count in partitions:
+        state.max_prefill_tokens = count
+        p = state.build_prefill_payload()
+        meta = payload_to_infer_meta(p, torch.device("cuda"))
+        q = torch.zeros(1, count, 2, 32, dtype=torch.float16, device="cuda")
+        k = q[:, :, :1]
+        v = p["input_ids"].cuda().half().view(1, count, 1, 1).expand(1, count, 1, 16)
+        outputs.append(FlashAttnInferBackend(backend)(q, k, v, cache_k, cache_v, meta))
+    actual = torch.cat(outputs, 1)
+    assert actual.shape == (1, 4, 2, 16)
+    torch.testing.assert_close(actual[0, :, 0, 0], torch.tensor([1.0, 2.0, 3.0, 4.0], device="cuda").half())
+
+
+@torch.inference_mode()
+def test_dense_model_chunked_logits_logprobs_and_graph_decode():
+    """Real CUDA Qwen3 adapter with small seeded weights, without downloading a checkpoint."""
+    from areno.engine.config import EngineConfig, ModelConfig, RuntimeConfig
+    from areno.engine.data.rollout_state import InferenceBatchState, payload_to_infer_meta
+    from areno.engine.modeling import build_model_on_device
+    from areno.engine.runtime.decode_graph import DecodeGraph
+    from areno.engine.runtime.metadata import InferMeta
+
+    pytest.importorskip("flash_attn")
+    torch.manual_seed(635)
+    device = torch.device("cuda", 0)
+    config = ModelConfig(
+        model_type="qwen3",
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        dtype=torch.float16,
+        max_position_embeddings=512,
+    )
+    model = build_model_on_device(
+        EngineConfig(config, devices=[0], role="rollout", runtime=RuntimeConfig(compile_model=False)), device
+    ).eval()
+    model.set_kv_caches(model.allocate_kv_caches(8, 256, device))
+    tokens = torch.randint(1, 128, (257,)).tolist()
+
+    def prefill(budget):
+        state = InferenceBatchState(
+            [tokens], 4, max_cache_len=512, max_prefill_tokens=budget, kv_block_size=256, num_cache_blocks=7
+        )
+        while state.has_pending_prompts:
+            p = state.build_prefill_payload()
+            meta = payload_to_infer_meta(p, device)
+            logits = model(
+                p["input_ids"].to(device)[None], p["position_ids"].to(device)[None], infer_meta=meta
+            ).logits_shard[0, -1]
+        return logits.clone(), state
+
+    def decode(state):
+        table = torch.tensor([state._seq_to_blocks[0]], device=device, dtype=torch.int32)
+        outputs = []
+        for step, token in enumerate([11, 17, 23, 29]):
+            meta = InferMeta(
+                mode="decode",
+                cache_seqlens=torch.tensor([len(tokens) + step], device=device, dtype=torch.int32),
+                block_table=table,
+                recurrent_slots=torch.tensor([state._seq_to_recurrent_slot[0]], device=device),
+            )
+            outputs.append(
+                model(
+                    torch.tensor([[token]], device=device),
+                    torch.tensor([[len(tokens) + step]], device=device),
+                    infer_meta=meta,
+                )
+                .logits_shard[0, -1]
+                .clone()
+            )
+        return torch.stack(outputs)
+
+    reference, reference_state = prefill(512)
+    reference_decode = decode(reference_state)
+    for budget in [128, 65, 1]:
+        actual, state = prefill(budget)
+        torch.testing.assert_close(actual, reference, atol=0.005, rtol=0.02)
+        torch.testing.assert_close(
+            torch.log_softmax(actual.float(), -1)[[11, 17, 23]],
+            torch.log_softmax(reference.float(), -1)[[11, 17, 23]],
+            atol=0.005,
+            rtol=0.005,
+        )
+        assert int(actual.argmax()) == int(reference.argmax())
+        torch.testing.assert_close(decode(state), reference_decode, atol=0.005, rtol=0.02)
+    table = torch.tensor([state._seq_to_blocks[0]], device=device, dtype=torch.int32)
+    graph = DecodeGraph(model, 1, 2, 7, 2, device)
+    graph.warmup(iterations=2)
+    graph.capture()
+    fixed_token = torch.tensor([[11]], device=device)
+    positions = torch.tensor([[len(tokens)]], device=device)
+    lengths = torch.tensor([len(tokens)], device=device, dtype=torch.int32)
+    slots = torch.tensor([0], device=device)
+    prefill(65)
+    meta = InferMeta(mode="decode", cache_seqlens=lengths, block_table=table, recurrent_slots=slots)
+    eager = model(fixed_token, positions, infer_meta=meta).logits_shard.clone()
+    prefill(65)
+    captured = graph.replay_tensors(fixed_token, positions, lengths, table, slots).clone()
+    torch.testing.assert_close(captured, eager, atol=0.005, rtol=0.02)
+
+
+@pytest.mark.parametrize("budget", [128, 65, 1])
+@torch.inference_mode()
+def test_ling_kda_chunked_outputs_and_recurrent_state(budget):
+    from areno.engine.config import ModelConfig
+    from areno.engine.runtime.metadata import InferMeta
+    from areno.models.bailing_v3.model import BailingKDAAttention
+
+    torch.manual_seed(635)
+    device = torch.device("cuda")
+    config = ModelConfig(
+        model_type="bailing_moe_v3",
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=32,
+        v_head_dim=32,
+        dtype=torch.bfloat16,
+        kda_safe_gate=True,
+        kda_lower_bound=-5,
+    )
+    with torch.device(device):
+        attn = BailingKDAAttention(config, 0).eval()
+    for param in attn.parameters():
+        torch.nn.init.normal_(param, std=0.1)
+    attn.set_state_cache(torch.zeros(2, 2, 32, 32, device=device), torch.zeros(2, 3, 64, 3, device=device))
+    hidden = torch.randn(1, 257, 64, device=device, dtype=torch.bfloat16)
+
+    def run(chunk):
+        attn.reset_kv_cache()
+        outputs = []
+        for start in range(0, 257, chunk):
+            count = min(chunk, 257 - start)
+            meta = InferMeta(
+                mode="prefill",
+                cu_seqlens=torch.tensor([0, count], device=device, dtype=torch.int32),
+                max_seqlen=count,
+                block_table=torch.tensor([[0]], device=device, dtype=torch.int32),
+                recurrent_slots=torch.tensor([1], device=device),
+                cache_seqlens=None if start == 0 else torch.tensor([start], device=device, dtype=torch.int32),
+            )
+            outputs.append(
+                attn(
+                    hidden[:, start : start + count],
+                    torch.arange(start, start + count, device=device)[None],
+                    None,
+                    meta,
+                )
+            )
+        return torch.cat(outputs, 1), attn.state_cache.clone(), attn.conv_cache.clone()
+
+    expected = run(257)
+    actual = run(budget)
+    # BF16 FLA chunk boundaries round local reductions differently. Compare
+    # attention outputs and FP32 continuation state separately from MoE logits.
+    for got, ref in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got, ref, atol=0.005, rtol=0.02)
+    assert torch.count_nonzero(attn.state_cache[0]) == 0
+    assert torch.count_nonzero(attn.conv_cache[0]) == 0

@@ -71,14 +71,12 @@ class FlashAttnInferBackend(nn.Module):
         if meta.mode == "prefill":
             if meta.cu_seqlens is None or meta.max_seqlen is None or meta.block_table is None:
                 raise ValueError("prefill inference requires cu_seqlens, max_seqlen, block_table")
+            if meta.cache_seqlens is not None and call.q.device.type == "npu":
+                raise ValueError("chunked prefill with a cached prefix is not supported on NPU")
             # Persist freshly computed K/V for the prompt into paged cache.
             if update_cache:
                 _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
-            # The cached-prefix path uses paged KV indexing that is currently
-            # implemented for CUDA.  NPU prefill still dispatches through its
-            # regular varlen/native selector; passing the cache metadata must
-            # not force CUDA-only indexing on an NPU tensor.
-            if meta.cache_seqlens is not None and call.q.device.type != "npu":
+            if meta.cache_seqlens is not None:
                 out = _prefill_with_cached_prefix(
                     call.q,
                     call.k,
@@ -268,23 +266,30 @@ def _prefill_with_cached_prefix(
     require_flash_attention_supported(
         build_attention_call(q, k, v, window_size, softmax_scale), mode="prefill attention"
     )
-    offsets = meta.cu_seqlens.cpu().tolist()
-    outputs = []
-    for row, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
-        outputs.append(
-            _flash_attn_with_kvcache_no_compile(
-                q[start:end].unsqueeze(0),
-                k_cache,
-                v_cache,
-                cache_seqlens=(meta.cache_seqlens[row : row + 1] + end - start).to(dtype=torch.int32),
-                block_table=meta.block_table[row : row + 1],
-                causal=True,
-                window_size=window_size,
-                softmax_scale=softmax_scale,
-                num_splits=1,
-            ).squeeze(0)
-        )
-    return torch.cat(outputs, dim=0)
+    # Build this once on the scheduler's CPU metadata path. A manual caller
+    # may omit it; only that compatibility path needs a device synchronization.
+    cu_k, max_k = meta.cu_seqlens_k, meta.max_seqlen_k
+    if cu_k is None or max_k is None:
+        kv_lengths = meta.cache_seqlens + lengths
+        cu_k = torch.cat((meta.cu_seqlens.new_zeros(1), kv_lengths.cumsum(0, dtype=torch.int32)))
+        max_k = int(kv_lengths.max().item())
+    # Paged varlen attention accepts different Q and KV lengths. Its causal
+    # mask is bottom-right aligned: query i sees prefix_length + i keys.
+    # One call handles mixed prefix/chunk lengths without copying cached KV
+    # or a CPU synchronization and separate launch for every sequence/layer.
+    return _flash_attn_varlen_no_compile(
+        q,
+        k_cache,
+        v_cache,
+        cu_seqlens_q=meta.cu_seqlens,
+        cu_seqlens_k=cu_k,
+        max_seqlen_q=meta.max_seqlen,
+        max_seqlen_k=max_k,
+        block_table=meta.block_table,
+        causal=True,
+        window_size=window_size,
+        softmax_scale=softmax_scale,
+    )
 
 
 @torch._dynamo.disable

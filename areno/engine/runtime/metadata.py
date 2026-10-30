@@ -55,6 +55,8 @@ class InferMeta:
     capture_routing: bool = False
     captured_routing: dict[int, torch.Tensor] | None = None
     sequence_lengths: torch.Tensor | None = None  # Full prefill lengths, including future chunks.
+    cu_seqlens_k: torch.Tensor | None = None  # Cached prefix + current chunk, for paged varlen attention.
+    max_seqlen_k: int | None = None
     # Decode only. Speculative verify feeds each active sequence this many
     # consecutive tokens (the sampled token plus its drafts), packed
     # sequence-major in the flat token axis, so `tokens == rows * tokens_per_seq`.

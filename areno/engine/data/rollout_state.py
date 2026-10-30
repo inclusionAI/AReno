@@ -102,7 +102,9 @@ class InferenceBatchState:
         include enough block metadata for the model to write each prompt token
         into its paged KV cache slot.
         """
-        if not self._free_blocks or self._pending_seq_id >= len(self.prompts):
+        if self._pending_seq_id >= len(self.prompts):
+            return None
+        if not self._free_blocks and self._pending_seq_id not in self._seq_to_blocks:
             return None
         # Packed prefill layout: `input_ids` and `position_ids` are flat 1-D
         # tensors of total tokens; `cu_seqlens` is the prefix sum boundary
@@ -764,12 +766,20 @@ def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
         # KV writer where each prompt token's KV should be stored.
         prefix_lengths = payload["position_ids"][payload["cu_seqlens"][:-1].long()].to(dtype=torch.int32)
         cached_prefix = prefix_lengths.to(device, non_blocking=True) if bool(prefix_lengths.any()) else None
+        kv_lengths = prefix_lengths + payload["cu_seqlens"].diff() if cached_prefix is not None else None
+        cu_seqlens_k = (
+            torch.cat((torch.zeros(1, dtype=torch.int32), kv_lengths.cumsum(0, dtype=torch.int32)))
+            if kv_lengths is not None
+            else None
+        )
         return InferMeta(
             mode="prefill",
             sample_indices=payload["sample_indices"].to(device, non_blocking=True),
             cu_seqlens=payload["cu_seqlens"].to(device, non_blocking=True),
             max_seqlen=int(payload["max_seqlen"]),
             cache_seqlens=cached_prefix,
+            cu_seqlens_k=cu_seqlens_k.to(device, non_blocking=True) if cu_seqlens_k is not None else None,
+            max_seqlen_k=int(kv_lengths.max()) if kv_lengths is not None else None,
             sequence_lengths=(
                 payload["sequence_lengths"].to(device, non_blocking=True)
                 if payload.get("sequence_lengths") is not None
