@@ -228,6 +228,22 @@ def test_sft_recompute_options_reach_the_engine_runtime(monkeypatch, flag, expec
     assert runtime["sft_output_recompute"] is expected
 
 
+def test_activation_compression_options_reach_the_engine_runtime():
+    compression = {"activation_compression": "adaptive", "activation_compression_error_budget": 0.02}
+    sft = {"algo": "sft", "reward_fn_path": None, "reward_ckpt": None}
+    configs = (
+        _trainer_config_from_options(**_options(algo="gspo", **compression)),
+        _trainer_config_from_options(**_options(**sft, **compression)),
+        # --shuffle selects SFTTrainerConfig, which copies the base config's fields.
+        _trainer_config_from_options(**_options(**sft, shuffle=True, **compression)),
+    )
+    assert type(configs[2]).__name__ == "SFTTrainerConfig"
+    for config in configs:
+        runtime = config.cuda_config().runtime
+        assert runtime["activation_compression"] == "adaptive"
+        assert runtime["activation_compression_error_budget"] == 0.02
+
+
 def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     cfg = _trainer_config_from_options(
         **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0, attn_backend="native")
@@ -1070,6 +1086,8 @@ def _options(**overrides):
         weight_decay=1e-2,
         grad_clip_norm=1.0,
         activation_checkpointing=True,
+        activation_compression="none",
+        activation_compression_error_budget=0.01,
         drop_rollout_state=False,
         eager_decode=False,
         speculative_draft_tokens=0,

@@ -1,0 +1,31 @@
+{
+  "tokens": 65536,
+  "hidden": 1024,
+  "gpu": "NVIDIA RTX PRO 5000 72GB Blackwell",
+  "rows": [
+    {
+      "bits": 8,
+      "pack_ms": 0.5737267303466796,
+      "unpack_ms": 0.3118284797668457,
+      "pack_gb_per_s": 233.940168551843,
+      "unpack_gb_per_s": 430.42164750427753,
+      "stored_fraction": 0.5781259536743164
+    },
+    {
+      "bits": 4,
+      "pack_ms": 0.5137612915039063,
+      "unpack_ms": 0.28221439361572265,
+      "pack_gb_per_s": 261.2453102628879,
+      "unpack_gb_per_s": 475.58781917678385,
+      "stored_fraction": 0.3281259536743164
+    },
+    {
+      "bits": 2,
+      "pack_ms": 0.49379329681396483,
+      "unpack_ms": 0.26296319961547854,
+      "pack_gb_per_s": 271.8095382541536,
+      "unpack_gb_per_s": 510.40498517002254,
+      "stored_fraction": 0.2031259536743164
+    }
+  ]
+}

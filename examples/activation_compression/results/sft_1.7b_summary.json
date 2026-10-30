@@ -1,0 +1,146 @@
+{
+  "warmup_steps": 2,
+  "sft": {
+    "bf16": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/sft/q17_bf16_s1",
+          "measured_steps": 298,
+          "median_step_time_s": 4.60546867409721,
+          "min_step_time_s": 3.736925275065005,
+          "max_step_time_s": 5.312641486525536,
+          "median_optimizer_step_time_s": 0.07347765099257231,
+          "max_train_peak_allocated_gib": 36.630300998687744,
+          "max_train_peak_reserved_gib": 38.462890625,
+          "max_optimizer_peak_allocated_gib": 31.66092586517334,
+          "max_optimizer_peak_reserved_gib": 38.462890625,
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.107818146082477,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.142346915593404
+            ],
+            [
+              100,
+              1.1263379163599296
+            ],
+            [
+              150,
+              1.117576735210785
+            ],
+            [
+              200,
+              1.1128345419319983
+            ],
+            [
+              250,
+              1.1094540824622945
+            ],
+            [
+              300,
+              1.107818146082477
+            ]
+          ]
+        }
+      ],
+      "final_val_loss_mean": 1.107818146082477,
+      "final_val_loss_std": null,
+      "median_step_time_s": 4.60546867409721,
+      "max_train_peak_allocated_gib": 36.630300998687744,
+      "max_train_peak_reserved_gib": 38.462890625
+    },
+    "adaptive": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/sft/q17_actc_s1",
+          "measured_steps": 298,
+          "median_step_time_s": 4.623538734391332,
+          "min_step_time_s": 3.813684182241559,
+          "max_step_time_s": 156.5286235427484,
+          "median_optimizer_step_time_s": 0.0734312110580504,
+          "max_train_peak_allocated_gib": 36.621495723724365,
+          "max_train_peak_reserved_gib": 43.03515625,
+          "max_optimizer_peak_allocated_gib": 31.653876781463623,
+          "max_optimizer_peak_reserved_gib": 43.03515625,
+          "initial_val_loss": 1.9133798290423465,
+          "final_val_loss": 1.1081520950991368,
+          "val_curve": [
+            [
+              0,
+              1.9133798290423465
+            ],
+            [
+              50,
+              1.1423099389703475
+            ],
+            [
+              100,
+              1.1265648663909105
+            ],
+            [
+              150,
+              1.1176459159605627
+            ],
+            [
+              200,
+              1.1128090398709123
+            ],
+            [
+              250,
+              1.109568410571307
+            ],
+            [
+              300,
+              1.1081520950991368
+            ]
+          ],
+          "saved_activations_gib": {
+            "saved_bytes": 1.2096424102783203,
+            "stored_bytes": 1.0393003225326538,
+            "packed_bytes": 0.1913595199584961,
+            "scale_bytes": 0.02391993999481201,
+            "outlier_bytes": 0.005982130765914917,
+            "kept_bytes": 0.824737548828125,
+            "workspace_bytes": 0.04171180725097656
+          },
+          "stored_fraction": 0.8690750249011091,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.0028280290314870097,
+            "noise_floor": 0.0003821140071806463,
+            "reference_drift": 0.00035894058022711763,
+            "calibration_error": 0.007961944019277464,
+            "held_out_error": 0.007445018690125949,
+            "predicted_error": 0.014888618886144667,
+            "plan_rounds": 2.0,
+            "plan_stored_fraction": 0.5522683376088772,
+            "plan_slots_8bit": 26.0,
+            "plan_slots_4bit": 3.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 0.0,
+            "calibration_passes": 85.0,
+            "calibration_s": 205.66098392382264,
+            "calibration_peak_allocated_bytes": 22431614976.0
+          },
+          "calibration_step_time_s": 215.61596863530576
+        }
+      ],
+      "final_val_loss_mean": 1.1081520950991368,
+      "final_val_loss_std": null,
+      "median_step_time_s": 4.623538734391332,
+      "max_train_peak_allocated_gib": 36.621495723724365,
+      "max_train_peak_reserved_gib": 43.03515625,
+      "final_val_loss_rel_change": 0.00030144750547811405,
+      "per_seed_rel_change": [
+        0.00030144750547811405
+      ],
+      "train_peak_allocated_change_gib": -0.008805274963378906,
+      "step_time_rel_change": 0.003923609424542063
+    }
+  }
+}
