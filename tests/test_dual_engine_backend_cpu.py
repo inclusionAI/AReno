@@ -136,6 +136,22 @@ def test_policy_plan_mismatch_fails_before_collectives() -> None:
     assert [op for op, _ in rollout.cluster.calls] == [Op.POLICY_SYNC_PLAN]
 
 
+def test_load_optimizer_state_resyncs_restored_weights_and_every_later_update() -> None:
+    backend, train, _ = _backend()
+    train.load_optimizer_state = lambda path: 7
+
+    assert backend.load_optimizer_state(None, "checkpoint") == 7
+    backend._sync_policy_if_needed()
+    # A LoRA update after the resume reports version 1 from a fresh adapter
+    # registry, which train() assigns as the train policy version.
+    backend._train_policy_version = 1
+    backend._sync_policy_if_needed()
+
+    published = [payload.version for op, payload in train.cluster.calls if op is Op.POLICY_SYNC_PUBLISH]
+    assert published == [0, 1]
+    assert backend._rollout_policy_version == 1
+
+
 def test_close_releases_both_engines() -> None:
     backend, train, rollout = _backend()
 
