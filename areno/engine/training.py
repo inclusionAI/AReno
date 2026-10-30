@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 import warnings
 
 import torch
@@ -10,6 +11,7 @@ import torch.distributed as dist
 
 from areno.engine.data import to_device
 from areno.engine.modeling import param_grad, unwrap_model
+from areno.engine.optim.galore import GaLoreAdamW
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.device import accelerator_module
@@ -72,12 +74,16 @@ class TrainingManager:
                     # step() keeps that bounded lookahead moving.
                     prefetch_state()
         worker.optimizer.zero_grad(set_to_none=True)
+        accelerator = accelerator_module(worker.device)
         results = []
         try:
             for index, data_pack_shards in enumerate(packs):
                 group_start = (index // accumulation_steps) * accumulation_steps
                 group_size = min(accumulation_steps, len(packs) - group_start)
                 allow_step = (index + 1) % accumulation_steps == 0 or index == len(packs) - 1
+                if index == group_start and accelerator is not None:
+                    # Peak memory metrics cover one optimizer step's microbatches.
+                    accelerator.reset_peak_memory_stats(worker.device)
                 results.append(
                     self._train_step(
                         data_pack_shards,
@@ -214,6 +220,7 @@ class TrainingManager:
         multimodal_grad_metrics = None
         clipped_grad_norm = None
         optimizer_state_metrics = None
+        step_memory_metrics = None
         if stepped:
             if not stream_gradient_shards:
                 self._sync_data_parallel_gradients()
@@ -251,14 +258,19 @@ class TrainingManager:
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
             multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
-            worker.optimizer.step()
+            step_memory_metrics = self._optimizer_step(accelerator)
             state_memory_metrics = getattr(worker.optimizer, "state_memory_metrics", None)
             state_quantizer = getattr(worker.optimizer, "state_quantizer", None)
             if callable(state_memory_metrics) and state_quantizer == "dynamic-tree-v1":
                 optimizer_state_metrics = {f"adam8_{name}": value for name, value in state_memory_metrics().items()}
             elif callable(state_memory_metrics) and str(state_quantizer).startswith("signed-de4/"):
                 optimizer_state_metrics = {f"adam4_{name}": value for name, value in state_memory_metrics().items()}
+            elif isinstance(worker.optimizer, GaLoreAdamW):
+                optimizer_state_metrics = {f"galore_{name}": value for name, value in state_memory_metrics().items()}
             worker.optimizer.zero_grad(set_to_none=True)
+            if step_memory_metrics is not None:
+                # Weights plus persistent optimizer state once gradients are released.
+                step_memory_metrics["allocated_bytes"] = float(accelerator.memory_allocated(worker.device))
             worker._global_step += 1
             if worker.adapter_registry is not None:
                 worker.adapter_registry.increment_version()
@@ -290,9 +302,37 @@ class TrainingManager:
                     multimodal_grad_metrics,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
                     optimizer_state_metrics,
+                    step_memory_metrics,
                 ),
             }
         return None
+
+    def _optimizer_step(self, accelerator) -> dict[str, float] | None:
+        """Step the optimizer, reporting time and allocator peaks around the update.
+
+        ``train_peak_*`` covers this step's forward/backward microbatches and
+        ``optimizer_peak_*`` the update alone, which includes transient
+        optimizer workspace such as GaLore projection refreshes.
+        """
+
+        worker = self.worker
+        if accelerator is None:
+            worker.optimizer.step()
+            return None
+        device = worker.device
+        accelerator.synchronize(device)
+        metrics = {
+            "train_peak_allocated_bytes": float(accelerator.max_memory_allocated(device)),
+            "train_peak_reserved_bytes": float(accelerator.max_memory_reserved(device)),
+        }
+        accelerator.reset_peak_memory_stats(device)
+        start = time.perf_counter()
+        worker.optimizer.step()
+        accelerator.synchronize(device)
+        metrics["optimizer_step_time_s"] = time.perf_counter() - start
+        metrics["optimizer_peak_allocated_bytes"] = float(accelerator.max_memory_allocated(device))
+        metrics["optimizer_peak_reserved_bytes"] = float(accelerator.max_memory_reserved(device))
+        return metrics
 
     def _lr_for_step(self, step: int) -> float:
         """Compute the actor learning rate for a given optimizer step."""

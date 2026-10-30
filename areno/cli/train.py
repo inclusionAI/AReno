@@ -152,6 +152,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "adam_beta2",
             "adam_8bit",
             "adam_4bit",
+            "galore_rank",
+            "galore_update_proj_gap",
+            "galore_scale",
             "optimizer_state_offload",
             "optimizer_state_offload_dir",
             "optimizer_state_offload_batch_size",
@@ -248,6 +251,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.galore_rank = getattr(args, "galore_rank", None)
+    args.galore_update_proj_gap = getattr(args, "galore_update_proj_gap", 200)
+    args.galore_scale = getattr(args, "galore_scale", 1.0)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
@@ -401,6 +407,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.weight_decay < 0:
         raise click.UsageError("--weight-decay must be non-negative")
     _require_positive_float(args.grad_clip_norm, "--grad-clip-norm")
+    if args.galore_rank is not None:
+        _validate_galore_options(args)
     if algorithm.requires_rollout:
         _require_positive_float(args.temperature, "--temperature")
         _require_positive_float(args.top_p, "--top-p")
@@ -433,6 +441,26 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     config.mlx_quantize_bits = bits
     config.mlx_quantize_group_size = 64
     return config
+
+
+def _validate_galore_options(args) -> None:
+    """Reject GaLore settings outside its single-GPU full-parameter scope."""
+
+    if args.galore_rank <= 0:
+        raise click.UsageError("--galore-rank must be positive")
+    if args.galore_update_proj_gap <= 0:
+        raise click.UsageError("--galore-update-proj-gap must be positive")
+    _require_positive_float(args.galore_scale, "--galore-scale")
+    if args.adam_8bit or args.adam_4bit:
+        raise click.UsageError("--galore-rank cannot be combined with --adam-8bit or --adam-4bit")
+    if args.backend != "cuda":
+        raise click.UsageError("--galore-rank requires --backend cuda")
+    if args.lora is not None:
+        raise click.UsageError("--galore-rank trains full parameters and cannot be combined with LoRA")
+    if args.world_size != 1 or args.tp_size != 1:
+        raise click.UsageError("--galore-rank supports single-GPU training only (--world-size 1 --tp-size 1)")
+    if args.optimizer_state_offload == "disk":
+        raise click.UsageError("--galore-rank supports --optimizer-state-offload none or cpu")
 
 
 def _require_positive_float(value: float, option_name: str) -> None:
@@ -580,6 +608,17 @@ def _format_training_config_summary(
                         f"betas=({config.optimizer_beta1}, {config.optimizer_beta2}), "
                         f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}, "
                         f"adam_4bit={_format_bool(config.adam_4bit)}"
+                    ),
+                ),
+                (
+                    "galore",
+                    (
+                        "disabled"
+                        if config.galore_rank is None
+                        else (
+                            f"rank={config.galore_rank}, update_proj_gap={config.galore_update_proj_gap}, "
+                            f"scale={config.galore_scale}"
+                        )
                     ),
                 ),
                 ("optimizer_state_offload", str(config.optimizer_state_offload)),
@@ -885,6 +924,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.galore_rank = getattr(args, "galore_rank", None)
+    args.galore_update_proj_gap = getattr(args, "galore_update_proj_gap", 200)
+    args.galore_scale = getattr(args, "galore_scale", 1.0)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -935,6 +977,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
             adam_4bit=args.adam_4bit,
+            galore_rank=args.galore_rank,
+            galore_update_proj_gap=args.galore_update_proj_gap,
+            galore_scale=args.galore_scale,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -998,6 +1043,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
             adam_4bit=args.adam_4bit,
+            galore_rank=args.galore_rank,
+            galore_update_proj_gap=args.galore_update_proj_gap,
+            galore_scale=args.galore_scale,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1074,6 +1122,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
             adam_4bit=args.adam_4bit,
+            galore_rank=args.galore_rank,
+            galore_update_proj_gap=args.galore_update_proj_gap,
+            galore_scale=args.galore_scale,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1147,6 +1198,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         grad_clip_norm=args.grad_clip_norm,
         adam_8bit=args.adam_8bit,
         adam_4bit=args.adam_4bit,
+        galore_rank=args.galore_rank,
+        galore_update_proj_gap=args.galore_update_proj_gap,
+        galore_scale=args.galore_scale,
         unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
         unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
         multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1770,6 +1824,26 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--adam-beta2", type=float, default=0.999, show_default=True, help="Policy optimizer Adam beta2.")
 @click.option("--adam-8bit", is_flag=True, help="Use 8-bit Adam moment states instead of FP32 Adam states.")
 @click.option("--adam-4bit", is_flag=True, help="Use packed block-wise 4-bit Adam moment states.")
+@click.option(
+    "--galore-rank",
+    type=int,
+    default=None,
+    help="Enable GaLore: keep Adam moments of linear weights in a rank-N gradient subspace (single GPU).",
+)
+@click.option(
+    "--galore-update-proj-gap",
+    type=int,
+    default=200,
+    show_default=True,
+    help="Optimizer steps between GaLore projection refreshes.",
+)
+@click.option(
+    "--galore-scale",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Scale applied to GaLore updates of projected weights.",
+)
 @click.option("--unfreeze-mm-tower", "unfreeze_multimodal_tower", is_flag=True, help="Train multimodal encoder towers.")
 @click.option(
     "--unfreeze-mm-projector",

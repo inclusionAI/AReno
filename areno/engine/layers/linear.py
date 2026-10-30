@@ -44,6 +44,16 @@ def mark_tensor_parallel_parameter(
         setattr(param, "tp_grad_allreduce", tp_grad_allreduce)
 
 
+def mark_linear_weight(param: nn.Parameter, rows: tuple[int, ...] | list[int]) -> None:
+    """Record the output rows of each logical matrix stacked in a linear weight.
+
+    Matrix-aware optimizers such as GaLore read this to treat fused weights
+    (QKV, gate/up) as their original projections. Model outputs are unchanged.
+    """
+
+    param._areno_linear_rows = tuple(int(row) for row in rows)
+
+
 def _shard_range(size: int, rank: int, world_size: int) -> tuple[int, int]:
     """Compute ``[start, end)`` of the local shard for an even partition."""
 
@@ -98,6 +108,7 @@ class ColumnParallelLinear(nn.Module):
         self.bias = nn.Parameter(torch.empty(self.local_out_features)) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
+        mark_linear_weight(self.weight, (self.local_out_features,))
         self.reset_parameters()
 
     def install_lora(self, slot: nn.Module) -> None:
@@ -160,6 +171,7 @@ class MergedColumnParallelLinear(nn.Module):
         self.bias = nn.Parameter(torch.empty(sum(self.local_out_features))) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
+        mark_linear_weight(self.weight, self.local_out_features)
         self.reset_parameters()
 
     def install_lora_component(self, component: str, component_index: int | tuple[int, ...], slot: nn.Module) -> None:
@@ -236,6 +248,7 @@ class QKVParallelLinear(MergedColumnParallelLinear):
         self.bias = nn.Parameter(torch.empty(sum(self.local_out_features))) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
+        mark_linear_weight(self.weight, self.local_out_features)
         self.reset_parameters()
 
 
@@ -263,6 +276,7 @@ class RowParallelLinear(nn.Module):
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, False, sequence_parallel=True)
+        mark_linear_weight(self.weight, (out_features,))
         self.reset_parameters()
 
     def install_lora(self, slot: nn.Module) -> None:

@@ -583,6 +583,17 @@ class CudaBackend(Backend):
         engine = self._require_train_engine()
         return save_checkpoint(engine, path)
 
+    def save_optimizer_state(self, ctx: Context, path: str) -> str:
+        del ctx
+        return self._require_train_engine().save_optimizer_state(path)
+
+    def load_optimizer_state(self, ctx: Context, path: str) -> int:
+        del ctx
+        step = self._require_train_engine().load_optimizer_state(path)
+        # The restored train weights must reach a separate rollout engine.
+        self._train_policy_version += 1
+        return step
+
     def export_adapter(self, ctx: Context, path: str) -> str:
         del ctx
         return self._require_train_engine().export_adapter(path)

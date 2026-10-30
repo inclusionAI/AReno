@@ -1,0 +1,213 @@
+{
+  "steps": {
+    "train/loss": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        3.8370490074157715e-07,
+        -1.3783574104309082e-07,
+        1.1175870895385742e-08,
+        -6.752088665962219e-08,
+        4.10713255405426e-07,
+        -2.644956111907959e-07,
+        1.1734664440155029e-07,
+        9.266659617424011e-08
+      ],
+      "resumed": [
+        3.8370490074157715e-07,
+        1.671724021434784e-07,
+        3.348104655742645e-07,
+        8.42846930027008e-08,
+        2.575106918811798e-07,
+        1.257285475730896e-08,
+        2.575106918811798e-07,
+        2.1187588572502136e-07
+      ],
+      "first_step_equal": true,
+      "max_abs_diff": 3.236345946788788e-07,
+      "control": [
+        -1.1920928955078125e-07,
+        5.122274160385132e-08,
+        1.1082738637924194e-07,
+        -1.6065314412117004e-07,
+        9.313225746154785e-09,
+        -5.9138983488082886e-08,
+        2.1420419216156006e-08,
+        1.685693860054016e-07
+      ],
+      "control_max_abs_diff": 5.029141902923584e-07
+    },
+    "rollout/rewards_mean": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        0.59375,
+        0.515625,
+        0.62109375,
+        0.53515625,
+        0.62890625,
+        0.48828125,
+        0.50390625,
+        0.63671875
+      ],
+      "resumed": [
+        0.59375,
+        0.52734375,
+        0.6171875,
+        0.51953125,
+        0.57421875,
+        0.48828125,
+        0.53125,
+        0.625
+      ],
+      "first_step_equal": true,
+      "max_abs_diff": 0.0546875,
+      "control": [
+        0.5703125,
+        0.50390625,
+        0.6171875,
+        0.52734375,
+        0.58203125,
+        0.48828125,
+        0.52734375,
+        0.65625
+      ],
+      "control_max_abs_diff": 0.046875
+    },
+    "train/logp_abs_diff_mean": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        0.011765857227146626,
+        0.011255680583417416,
+        0.011812766082584858,
+        0.011666660197079182,
+        0.010988923721015453,
+        0.011633628979325294,
+        0.012209937907755375,
+        0.01186501793563366
+      ],
+      "resumed": [
+        0.011765857227146626,
+        0.010859698057174683,
+        0.012154575437307358,
+        0.01154615543782711,
+        0.01111114863306284,
+        0.011597365140914917,
+        0.012280615046620369,
+        0.012247782200574875
+      ],
+      "first_step_equal": true,
+      "max_abs_diff": 0.000395982526242733,
+      "control": [
+        0.011807775124907494,
+        0.011036098934710026,
+        0.011671749874949455,
+        0.011768840253353119,
+        0.01097191870212555,
+        0.011819341219961643,
+        0.012087848968803883,
+        0.011368605308234692
+      ],
+      "control_max_abs_diff": 0.0004964126273989677
+    },
+    "train/grad_norm": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        0.8814917802810669,
+        0.7745503783226013,
+        0.7548825144767761,
+        0.7604769468307495,
+        0.8070917129516602,
+        0.8202895522117615,
+        0.6701077818870544,
+        0.7824223637580872
+      ],
+      "resumed": [
+        0.8811757564544678,
+        0.8234993815422058,
+        0.7594585418701172,
+        0.729929506778717,
+        0.7353653907775879,
+        0.7459335327148438,
+        0.7932168841362,
+        0.8371544480323792
+      ],
+      "first_step_equal": false,
+      "max_abs_diff": 0.12310910224914551,
+      "control": [
+        0.9004175066947937,
+        0.7604715824127197,
+        0.7260695695877075,
+        0.8323279619216919,
+        0.7171679139137268,
+        0.8112801909446716,
+        0.9273253083229065,
+        0.7268649935722351
+      ],
+      "control_max_abs_diff": 0.25721752643585205
+    }
+  },
+  "final_checkpoint": {
+    "compared_tensors": 711,
+    "only_in_first": [],
+    "only_in_second": [],
+    "bitwise_equal_tensors": 5,
+    "max_abs_diff": 0.007718156557530165,
+    "first_mismatches": [
+      "areno_optimizer_rank00000.pt/state/master_params/0",
+      "areno_optimizer_rank00000.pt/state/master_params/1",
+      "areno_optimizer_rank00000.pt/state/master_params/10",
+      "areno_optimizer_rank00000.pt/state/master_params/100",
+      "areno_optimizer_rank00000.pt/state/master_params/101",
+      "areno_optimizer_rank00000.pt/state/master_params/102",
+      "areno_optimizer_rank00000.pt/state/master_params/103",
+      "areno_optimizer_rank00000.pt/state/master_params/104",
+      "areno_optimizer_rank00000.pt/state/master_params/105",
+      "areno_optimizer_rank00000.pt/state/master_params/106",
+      "areno_optimizer_rank00000.pt/state/master_params/107",
+      "areno_optimizer_rank00000.pt/state/master_params/108",
+      "areno_optimizer_rank00000.pt/state/master_params/109",
+      "areno_optimizer_rank00000.pt/state/master_params/11",
+      "areno_optimizer_rank00000.pt/state/master_params/110",
+      "areno_optimizer_rank00000.pt/state/master_params/111",
+      "areno_optimizer_rank00000.pt/state/master_params/112",
+      "areno_optimizer_rank00000.pt/state/master_params/113",
+      "areno_optimizer_rank00000.pt/state/master_params/114",
+      "areno_optimizer_rank00000.pt/state/master_params/115"
+    ]
+  }
+}

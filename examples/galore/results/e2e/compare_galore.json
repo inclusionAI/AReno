@@ -1,0 +1,258 @@
+{
+  "steps": {
+    "train/loss": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        -2.50060111284256e-07,
+        5.587935447692871e-08,
+        1.578591763973236e-07,
+        3.832392394542694e-07,
+        4.7497451305389404e-08,
+        5.168840289115906e-08,
+        -9.685754776000977e-08,
+        3.25031578540802e-07
+      ],
+      "resumed": [
+        -2.50060111284256e-07,
+        -3.073364496231079e-08,
+        1.6298145055770874e-08,
+        -1.5832483768463135e-08,
+        2.1792948246002197e-07,
+        -3.157183527946472e-07,
+        -1.4295801520347595e-07,
+        9.12696123123169e-08
+      ],
+      "first_step_equal": true,
+      "max_abs_diff": 3.9907172322273254e-07,
+      "control": [
+        9.96515154838562e-08,
+        -3.166496753692627e-07,
+        -5.727633833885193e-08,
+        -1.541338860988617e-07,
+        1.9138678908348083e-07,
+        -2.477318048477173e-07,
+        1.5599653124809265e-07,
+        9.778887033462524e-09
+      ],
+      "control_max_abs_diff": 5.373731255531311e-07
+    },
+    "rollout/rewards_mean": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        0.6328125,
+        0.48046875,
+        0.61328125,
+        0.5234375,
+        0.6328125,
+        0.49609375,
+        0.54296875,
+        0.6328125
+      ],
+      "resumed": [
+        0.6328125,
+        0.49609375,
+        0.609375,
+        0.53125,
+        0.5859375,
+        0.5078125,
+        0.52734375,
+        0.671875
+      ],
+      "first_step_equal": true,
+      "max_abs_diff": 0.046875,
+      "control": [
+        0.578125,
+        0.48046875,
+        0.6171875,
+        0.53125,
+        0.59765625,
+        0.46484375,
+        0.5390625,
+        0.6484375
+      ],
+      "control_max_abs_diff": 0.0546875
+    },
+    "train/logp_abs_diff_mean": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        0.01177934743463993,
+        0.011006290093064308,
+        0.011827558279037476,
+        0.011643331497907639,
+        0.01079380139708519,
+        0.011891655623912811,
+        0.012464132159948349,
+        0.011583823710680008
+      ],
+      "resumed": [
+        0.01177934743463993,
+        0.011174159124493599,
+        0.011734680272638798,
+        0.011490778997540474,
+        0.011440441943705082,
+        0.011673340573906898,
+        0.012371474876999855,
+        0.011750693432986736
+      ],
+      "first_step_equal": true,
+      "max_abs_diff": 0.0006466405466198921,
+      "control": [
+        0.011970807798206806,
+        0.011070512235164642,
+        0.011513571254909039,
+        0.011747878044843674,
+        0.011010663583874702,
+        0.011886514723300934,
+        0.01271909847855568,
+        0.011668221093714237
+      ],
+      "control_max_abs_diff": 0.00031398702412843704
+    },
+    "train/grad_norm": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        0.9452037811279297,
+        0.7978296279907227,
+        0.7935758829116821,
+        0.819416880607605,
+        0.7799877524375916,
+        0.8142380714416504,
+        0.9075531959533691,
+        0.7830747961997986
+      ],
+      "resumed": [
+        0.9450898170471191,
+        0.929598331451416,
+        0.8986738324165344,
+        0.7451162934303284,
+        0.7841155529022217,
+        0.8201402425765991,
+        0.7698429226875305,
+        0.8453606367111206
+      ],
+      "first_step_equal": false,
+      "max_abs_diff": 0.13771027326583862,
+      "control": [
+        0.9389379024505615,
+        0.6934158802032471,
+        0.852111279964447,
+        0.8239849805831909,
+        0.8829295039176941,
+        0.8547292947769165,
+        0.8589140176773071,
+        0.7216476798057556
+      ],
+      "control_max_abs_diff": 0.10441374778747559
+    },
+    "train/galore_refreshed_matrices": {
+      "steps": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "continuous": [
+        196.0,
+        0.0,
+        0.0,
+        0.0,
+        196.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "resumed": [
+        196.0,
+        0.0,
+        0.0,
+        0.0,
+        196.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "first_step_equal": true,
+      "max_abs_diff": 0.0,
+      "control": [
+        196.0,
+        0.0,
+        0.0,
+        0.0,
+        196.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "control_max_abs_diff": 0.0
+    }
+  },
+  "final_checkpoint": {
+    "compared_tensors": 1075,
+    "only_in_first": [],
+    "only_in_second": [],
+    "bitwise_equal_tensors": 5,
+    "max_abs_diff": 1.0483357906341553,
+    "first_mismatches": [
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/0/basis",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/0/exp_avg",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/0/exp_avg_sq",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/1/basis",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/1/exp_avg",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/1/exp_avg_sq",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/2/basis",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/2/exp_avg",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/blocks/2/exp_avg_sq",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/0/master",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/1/blocks/0/basis",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/1/blocks/0/exp_avg",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/1/blocks/0/exp_avg_sq",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/1/master",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/10/blocks/0/basis",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/10/blocks/0/exp_avg",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/10/blocks/0/exp_avg_sq",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/10/blocks/1/basis",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/10/blocks/1/exp_avg",
+      "areno_optimizer_rank00000.pt/state/galore/matrices/10/blocks/1/exp_avg_sq"
+    ]
+  }
+}

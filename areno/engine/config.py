@@ -41,6 +41,10 @@ class OptimizerConfig:
     adam_4bit: bool = False
     paged: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
+    # GaLore low-rank Adam moments for linear weights; None keeps full-rank AdamW.
+    galore_rank: int | None = None
+    galore_update_proj_gap: int = 200
+    galore_scale: float = 1.0
     unfreeze_multimodal_tower: bool = False
     unfreeze_multimodal_projector: bool = False
     multimodal_tower_lr: float | None = None
@@ -55,6 +59,15 @@ class OptimizerConfig:
     def __post_init__(self) -> None:
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("optimizer.adam_4bit and optimizer.adam_8bit are mutually exclusive")
+        if self.galore_rank is not None:
+            if self.galore_rank < 1:
+                raise ValueError("optimizer.galore_rank must be positive")
+            if self.galore_update_proj_gap < 1:
+                raise ValueError("optimizer.galore_update_proj_gap must be positive")
+            if self.galore_scale <= 0.0:
+                raise ValueError("optimizer.galore_scale must be positive")
+            if self.adam_8bit or self.adam_4bit or self.paged:
+                raise ValueError("optimizer.galore_rank cannot be combined with adam_8bit, adam_4bit or paged")
 
 
 @dataclass(slots=True)

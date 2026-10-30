@@ -539,6 +539,29 @@ class Trainer:
 
         return self._backend.save_checkpoint(self._ctx, path)
 
+    def save_optimizer_state(self, path: str) -> str:
+        """Save the actor optimizer state and optimizer step for exact resume.
+
+        Writes one ``areno_optimizer_rank*.pt`` file per train rank under
+        ``path`` (usually the ``save_checkpoint`` directory). The files hold
+        FP32 master weights, optimizer moments and any optimizer-specific
+        state such as GaLore projection bases.
+        """
+
+        return self._backend.save_optimizer_state(self._ctx, path)
+
+    def load_optimizer_state(self, path: str) -> int:
+        """Restore ``save_optimizer_state`` output after ``init()``.
+
+        The FP32 masters overwrite the live weights, so training continues
+        exactly where the saved run stopped. Returns the restored optimizer
+        step and continues trainer step numbering after it.
+        """
+
+        step = self._backend.load_optimizer_state(self._ctx, path)
+        self._ctx.global_step = step - 1
+        return step
+
     def export_adapter(self, path: str) -> str:
         """Export the live native LoRA weights as a standard PEFT adapter."""
 

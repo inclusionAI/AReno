@@ -21,7 +21,11 @@ def __getattr__(name):
         from areno.engine.optim.adamw_fp32_master import AdamWFP32Master
 
         return AdamWFP32Master
+    if name == "GaLoreAdamW":
+        from areno.engine.optim.galore import GaLoreAdamW
+
+        return GaLoreAdamW
     raise AttributeError(name)
 
 
-__all__ = ["AdamW4bit", "AdamW8bit", "AdamWFP32Master", "set_optimizer_state_precision"]
+__all__ = ["AdamW4bit", "AdamW8bit", "AdamWFP32Master", "GaLoreAdamW", "set_optimizer_state_precision"]

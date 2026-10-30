@@ -62,6 +62,10 @@ class TrainerConfig:
     grad_clip_norm: float = 1.0
     adam_8bit: bool = False
     adam_4bit: bool = False
+    # Opt-in GaLore: rank of the projected Adam moments for linear weights.
+    galore_rank: int | None = None
+    galore_update_proj_gap: int = 200
+    galore_scale: float = 1.0
     unfreeze_multimodal_tower: bool = False
     unfreeze_multimodal_projector: bool = False
     multimodal_tower_lr: float | None = None
@@ -129,6 +133,8 @@ class TrainerConfig:
             raise ValueError("optimizer_state_offload_batch_size must be positive")
         if self.optimizer_state_offload != "none" and self.backend != "cuda":
             raise ValueError("optimizer_state_offload is only supported by the CUDA backend")
+        if self.galore_rank is not None:
+            self._validate_galore()
         self._validate_multimodal_optimizer_group(
             "tower",
             self.unfreeze_multimodal_tower,
@@ -147,6 +153,24 @@ class TrainerConfig:
         )
         if self.backend == "mlx" and self.reference_mode != "independent":
             raise ValueError("MLX currently supports only reference_mode='independent'")
+
+    def _validate_galore(self) -> None:
+        if self.galore_rank < 1:
+            raise ValueError("galore_rank must be positive")
+        if self.galore_update_proj_gap < 1:
+            raise ValueError("galore_update_proj_gap must be positive")
+        if self.galore_scale <= 0:
+            raise ValueError("galore_scale must be positive")
+        if self.adam_8bit or self.adam_4bit:
+            raise ValueError("galore_rank cannot be combined with adam_8bit or adam_4bit")
+        if self.backend != "cuda":
+            raise ValueError("GaLore is only supported by the CUDA backend")
+        if self.lora is not None:
+            raise ValueError("GaLore trains full parameters and cannot be combined with LoRA")
+        if self.world_size != 1 or self.tp_size != 1:
+            raise ValueError("GaLore supports single-GPU training only (world_size=1, tp_size=1)")
+        if self.optimizer_state_offload == "disk":
+            raise ValueError("GaLore supports optimizer_state_offload none or cpu")
 
     @staticmethod
     def _validate_multimodal_optimizer_group(
@@ -181,6 +205,9 @@ class TrainerConfig:
             "grad_clip_norm": self.grad_clip_norm,
             "adam_8bit": self.adam_8bit,
             "adam_4bit": self.adam_4bit,
+            "galore_rank": self.galore_rank,
+            "galore_update_proj_gap": self.galore_update_proj_gap,
+            "galore_scale": self.galore_scale,
             "unfreeze_multimodal_tower": self.unfreeze_multimodal_tower,
             "unfreeze_multimodal_projector": self.unfreeze_multimodal_projector,
             "multimodal_tower_lr": self.multimodal_tower_lr,

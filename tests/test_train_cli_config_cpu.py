@@ -1133,3 +1133,43 @@ def test_jev_cli_uses_offline_decision_config_and_joint_lora(tmp_path, q4):
     assert config.lora.rank == 32
 
     assert config.backend_config().quantization_bits == (4 if q4 else None)
+
+
+def test_train_config_threads_galore_options_into_optimizer_config():
+    config = _trainer_config_from_options(
+        **_options(galore_rank=64, galore_update_proj_gap=25, galore_scale=0.5, adam_4bit=False)
+    )
+
+    assert (config.galore_rank, config.galore_update_proj_gap, config.galore_scale) == (64, 25, 0.5)
+    optimizer = config.cuda_config().optimizer
+    assert (optimizer["galore_rank"], optimizer["galore_update_proj_gap"], optimizer["galore_scale"]) == (64, 25, 0.5)
+    summary = _format_training_config_summary(config)
+    assert re.search(r"(?m)^  galore\s+rank=64, update_proj_gap=25, scale=0.5$", summary)
+    assert _trainer_config_from_options(**_options()).galore_rank is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"galore_rank": 0}, "--galore-rank must be positive"),
+        ({"galore_rank": 8, "galore_update_proj_gap": 0}, "--galore-update-proj-gap must be positive"),
+        ({"galore_rank": 8, "galore_scale": 0.0}, "--galore-scale must be positive"),
+        ({"galore_rank": 8, "adam_8bit": True}, "cannot be combined with --adam-8bit or --adam-4bit"),
+        ({"galore_rank": 8, "world_size": 2}, r"single-GPU training only \(--world-size 1 --tp-size 1\)"),
+        ({"galore_rank": 8, "lora_rank": 4}, "cannot be combined with LoRA"),
+        (
+            {"galore_rank": 8, "optimizer_state_offload": "disk", "optimizer_state_offload_dir": "/tmp/x"},
+            "--optimizer-state-offload none or cpu",
+        ),
+    ],
+)
+def test_train_config_rejects_galore_outside_supported_scope(overrides, message):
+    with pytest.raises(UsageError, match=message):
+        _trainer_config_from_options(**_options(**overrides))
+
+
+def test_train_cli_exposes_galore_options():
+    output = _help_output()
+
+    for option in ("--galore-rank", "--galore-update-proj-gap", "--galore-scale"):
+        assert option in output

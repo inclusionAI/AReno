@@ -335,6 +335,35 @@ directly from Python.
 
          saved_path = trainer.save_checkpoint("/tmp/areno-step-10")
 
+   .. py:method:: save_optimizer_state(path)
+
+      Save the CUDA actor optimizer state for exact resume: one
+      ``areno_optimizer_rank*.pt`` file per train rank with FP32 master
+      weights, optimizer moments, the optimizer step and optimizer-specific
+      state such as GaLore projection bases. ``save_checkpoint`` writes weights
+      only.
+
+      :param str path: Output directory, usually the checkpoint directory.
+      :returns: saved directory as ``str``.
+
+   .. py:method:: load_optimizer_state(path)
+
+      Restore state written by ``save_optimizer_state`` after ``init()``. The
+      saved FP32 masters overwrite the live weights, the optimizer step drives
+      the learning-rate schedule, and trainer step numbering continues after
+      it. Loading fails for a different optimizer class, DP/TP layout or
+      GaLore setting.
+
+      :param str path: Directory written by ``save_optimizer_state``.
+      :returns: restored optimizer step as ``int``.
+
+      .. code-block:: python
+
+         trainer.save_checkpoint("/tmp/areno-step-10")
+         trainer.save_optimizer_state("/tmp/areno-step-10")
+         # In a new process, initialized from /tmp/areno-step-10:
+         step = trainer.load_optimizer_state("/tmp/areno-step-10")
+
    .. py:method:: close()
 
       Release local resources such as metric writers.

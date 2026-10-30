@@ -38,6 +38,7 @@ from areno.engine.protocol import (
     ExportAdapterPayload,
     ExportGGUFPayload,
     Op,
+    OptimizerStatePayload,
     PolicySyncPayload,
     RolloutCacheProbePayload,
     RolloutPayload,
@@ -218,6 +219,10 @@ class ArenoWorker:
             return self.train_values(cmd.payload)
         if cmd.op is Op.SAVE_CHECKPOINT:
             return self.save_checkpoint(cmd.payload)
+        if cmd.op is Op.SAVE_OPTIMIZER_STATE:
+            return self.save_optimizer_state(cmd.payload)
+        if cmd.op is Op.LOAD_OPTIMIZER_STATE:
+            return self.load_optimizer_state(cmd.payload)
         if cmd.op is Op.EXPORT_ADAPTER:
             return self.export_adapter(cmd.payload)
         if cmd.op is Op.EXPORT_GGUF:
@@ -724,6 +729,57 @@ class ArenoWorker:
             save_head(self, payload.path)
         return {"path": path} if path is not None else None
 
+    def save_optimizer_state(self, payload: OptimizerStatePayload) -> dict | None:
+        """Write this rank's actor optimizer state and step counter for exact resume."""
+
+        if self.optimizer is None:
+            raise RuntimeError("optimizer state is owned by train workers")
+        self._prepare_actor_onloaded()
+        ctx = get_tp_context()
+        directory = Path(payload.path)
+        directory.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "format_version": _OPTIMIZER_STATE_FORMAT_VERSION,
+                "optimizer": type(self.optimizer).__name__,
+                "global_step": self._global_step,
+                "dp_size": ctx.dp_size,
+                "tp_size": ctx.world_size,
+                "state": self.optimizer.state_dict(),
+            },
+            directory / _optimizer_state_filename(ctx.global_rank),
+        )
+        return {"path": str(directory)} if ctx.global_rank == 0 else None
+
+    def load_optimizer_state(self, payload: OptimizerStatePayload) -> dict | None:
+        """Restore state written by ``save_optimizer_state`` into the live actor."""
+
+        if self.optimizer is None:
+            raise RuntimeError("optimizer state is owned by train workers")
+        ctx = get_tp_context()
+        saved = torch.load(
+            Path(payload.path) / _optimizer_state_filename(ctx.global_rank),
+            map_location="cpu",
+            weights_only=True,
+        )
+        if saved.get("format_version") != _OPTIMIZER_STATE_FORMAT_VERSION:
+            raise ValueError(f"unsupported optimizer state format: {saved.get('format_version')}")
+        if saved["optimizer"] != type(self.optimizer).__name__:
+            raise ValueError(f"optimizer state was saved by {saved['optimizer']}, not {type(self.optimizer).__name__}")
+        if (saved["dp_size"], saved["tp_size"]) != (ctx.dp_size, ctx.world_size):
+            raise ValueError("optimizer state was saved with a different DP/TP layout")
+        self._prepare_for_train()
+        # Restoring the FP32 masters rewrites the live train weights; rollout
+        # weights are rebuilt from them before the next generation.
+        self.optimizer.load_state_dict(saved["state"])
+        self._global_step = int(saved["global_step"])
+        mode, directory, batch_size = self._optimizer_offload_options()
+        if mode == "none" and not self.config.runtime.keep_rollout_state:
+            mode = "cpu"
+        if mode != "none":
+            self.optimizer.offload_state(mode=mode, directory=directory, batch_size=batch_size)
+        return {"global_step": self._global_step} if ctx.global_rank == 0 else None
+
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
         """Write the native adapter in standard PEFT format."""
 
@@ -747,6 +803,15 @@ class ArenoWorker:
         self._prepare_actor_onloaded()
         path = export_worker(self, payload.output_dir, payload.file_type)
         return {"path": path} if path is not None else None
+
+
+_OPTIMIZER_STATE_FORMAT_VERSION = 1
+
+
+def _optimizer_state_filename(global_rank: int) -> str:
+    """Name one train rank's optimizer-state file inside a checkpoint directory."""
+
+    return f"areno_optimizer_rank{global_rank:05d}.pt"
 
 
 def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -> bool:

@@ -408,6 +408,24 @@ in its description; flags for other algorithms are ignored.
    ``--adam-8bit``. See
    :doc:`../concepts/adamw-4bit` for complete usage examples.
 
+``--galore-rank INTEGER``
+   Enable GaLore: keep the Adam moments of linear-layer weights in a rank-N
+   subspace of their gradient while training every parameter. Embeddings, the
+   LM head, norms, biases and expert banks keep FP32 AdamW. CUDA-only and
+   single-GPU (``--world-size 1 --tp-size 1``); cannot be combined with LoRA,
+   ``--adam-8bit`` or ``--adam-4bit``, and supports
+   ``--optimizer-state-offload`` ``none`` or ``cpu``. Training metrics expose
+   ``galore_projection_bytes``, ``galore_moment_bytes``,
+   ``galore_refreshed_matrices`` and related state sizes. See
+   :doc:`../concepts/galore`.
+
+``--galore-update-proj-gap INTEGER``
+   Optimizer steps between GaLore projection refreshes. Default: ``200``.
+
+``--galore-scale FLOAT``
+   Multiplier applied to GaLore updates of projected weights. Default:
+   ``1.0``.
+
 ``--unfreeze-mm-tower``
    Train recognized vision/audio encoder tower parameters. Towers are frozen
    by default.

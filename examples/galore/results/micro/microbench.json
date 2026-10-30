@@ -1,0 +1,169 @@
+{
+  "gpu": "NVIDIA RTX PRO 5000 72GB Blackwell",
+  "torch": "2.8.0+cu128",
+  "rank": 128,
+  "square_1024": {
+    "float32": {
+      "adamw": {
+        "persistent": {
+          "moment_bytes": 8388608,
+          "master_bytes": 0,
+          "state_bytes": 8388608
+        },
+        "steady_median_s": 3.114494029432535e-05,
+        "steady_max_step_peak_bytes": 0,
+        "refresh_median_s": null,
+        "refresh_max_step_peak_bytes": null
+      },
+      "galore": {
+        "persistent": {
+          "projection_bytes": 524288,
+          "moment_bytes": 1048576,
+          "master_bytes": 0,
+          "state_bytes": 1572864
+        },
+        "steady_median_s": 8.548982441425323e-05,
+        "steady_max_step_peak_bytes": 1572864,
+        "refresh_median_s": 0.008561229100450873,
+        "refresh_max_step_peak_bytes": 30017024
+      },
+      "state_ratio": 0.1875
+    },
+    "bfloat16": {
+      "adamw": {
+        "persistent": {
+          "moment_bytes": 8388608,
+          "master_bytes": 2228224,
+          "state_bytes": 10616832
+        },
+        "steady_median_s": 6.548501551151276e-05,
+        "steady_max_step_peak_bytes": 0,
+        "refresh_median_s": null,
+        "refresh_max_step_peak_bytes": null
+      },
+      "galore": {
+        "persistent": {
+          "projection_bytes": 524288,
+          "moment_bytes": 1048576,
+          "master_bytes": 2228224,
+          "state_bytes": 3801088
+        },
+        "steady_median_s": 0.00025060889311134815,
+        "steady_max_step_peak_bytes": 36700672,
+        "refresh_median_s": 0.00878723687492311,
+        "refresh_max_step_peak_bytes": 36700672
+      },
+      "state_ratio": 0.35802469135802467
+    }
+  },
+  "refresh_workspace": {
+    "Qwen3-0.6B q_proj": {
+      "shape": [
+        2048,
+        1024
+      ],
+      "side": "right",
+      "gradient_bytes": 8388608,
+      "galore_basis_median_s": 0.008474129950627685,
+      "galore_basis_workspace_bytes": 34211328,
+      "full_svd_median_s": 0.05434444500133395,
+      "full_svd_workspace_bytes": 38024704
+    },
+    "Qwen3-0.6B k_proj/v_proj": {
+      "shape": [
+        1024,
+        1024
+      ],
+      "side": "right",
+      "gradient_bytes": 4194304,
+      "galore_basis_median_s": 0.008460640208795667,
+      "galore_basis_workspace_bytes": 30017024,
+      "full_svd_median_s": 0.05417145509272814,
+      "full_svd_workspace_bytes": 21263360
+    },
+    "Qwen3-0.6B o_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "side": "left",
+      "gradient_bytes": 8388608,
+      "galore_basis_median_s": 0.008504929952323437,
+      "galore_basis_workspace_bytes": 34211328,
+      "full_svd_median_s": 0.05457798298448324,
+      "full_svd_workspace_bytes": 46413312
+    },
+    "Qwen3-0.6B gate_proj/up_proj": {
+      "shape": [
+        3072,
+        1024
+      ],
+      "side": "right",
+      "gradient_bytes": 12582912,
+      "galore_basis_median_s": 0.008551319828256965,
+      "galore_basis_workspace_bytes": 38405632,
+      "full_svd_median_s": 0.05646801018156111,
+      "full_svd_workspace_bytes": 51656192
+    },
+    "Qwen3-0.6B down_proj": {
+      "shape": [
+        1024,
+        3072
+      ],
+      "side": "left",
+      "gradient_bytes": 12582912,
+      "galore_basis_median_s": 0.008633967954665422,
+      "galore_basis_workspace_bytes": 38405632,
+      "full_svd_median_s": 0.056579177966341376,
+      "full_svd_workspace_bytes": 65016320
+    },
+    "Qwen3-1.7B q_proj/o_proj": {
+      "shape": [
+        2048,
+        2048
+      ],
+      "side": "right",
+      "gradient_bytes": 16777216,
+      "galore_basis_median_s": 0.022675439016893506,
+      "galore_basis_workspace_bytes": 119546368,
+      "full_svd_median_s": 0.20762507594190538,
+      "full_svd_workspace_bytes": 84497408
+    },
+    "Qwen3-1.7B k_proj/v_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "side": "left",
+      "gradient_bytes": 8388608,
+      "galore_basis_median_s": 0.008490378968417645,
+      "galore_basis_workspace_bytes": 34211328,
+      "full_svd_median_s": 0.05475618108175695,
+      "full_svd_workspace_bytes": 46413312
+    },
+    "Qwen3-1.7B gate_proj/up_proj": {
+      "shape": [
+        6144,
+        2048
+      ],
+      "side": "right",
+      "gradient_bytes": 50331648,
+      "galore_basis_median_s": 0.02340457309037447,
+      "galore_basis_workspace_bytes": 153100800,
+      "full_svd_median_s": 0.21285074902698398,
+      "full_svd_workspace_bytes": 195323392
+    },
+    "Qwen3-1.7B down_proj": {
+      "shape": [
+        2048,
+        6144
+      ],
+      "side": "left",
+      "gradient_bytes": 50331648,
+      "galore_basis_median_s": 0.02372781210578978,
+      "galore_basis_workspace_bytes": 153100800,
+      "full_svd_median_s": 0.21268544113263488,
+      "full_svd_workspace_bytes": 245655040
+    }
+  }
+}
