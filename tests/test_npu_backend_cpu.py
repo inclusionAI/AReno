@@ -379,6 +379,113 @@ def test_shared_training_probe_measures_each_microbatch(monkeypatch, device_type
     assert len(events) == 6
 
 
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
+def test_optimizer_step_metrics_keep_probe_peak_without_device_sync(monkeypatch, device_type):
+    from areno.engine import training
+
+    device = torch.device(device_type, 1)
+    events = []
+    # Allocator peaks in read order: probe step (before update, after it, probe read), then an ordinary step.
+    peaks = iter((90, 30, 30, 50, 20))
+    clock = iter((10.0, 35.0, 5.0, 9.0))
+
+    def _dummy_policy_loss():
+        pass
+
+    class Event:
+        def __init__(self, enable_timing=False):
+            assert enable_timing
+            self.time = None
+
+        def record(self, stream):
+            assert stream == ("stream", device)
+            self.time = next(clock)
+
+        def synchronize(self):
+            events.append("event-sync")
+
+        def elapsed_time(self, end):
+            return end.time - self.time
+
+    monkeypatch.setattr(
+        torch,
+        device_type,
+        SimpleNamespace(
+            synchronize=lambda d: events.append(("sync", d)),
+            reset_peak_memory_stats=lambda d: events.append(("reset", d)),
+            max_memory_allocated=lambda d: next(peaks),
+            max_memory_reserved=lambda d: 100,
+            memory_allocated=lambda d: 20,
+            empty_cache=lambda: None,
+            current_stream=lambda d: ("stream", d),
+            Event=Event,
+            get_device_properties=lambda d: SimpleNamespace(total_memory=100),
+        ),
+        raising=False,
+    )
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4))
+
+        def forward(self, input_ids, **kwargs):
+            return SimpleNamespace(logits_shard=self.weight.expand(input_ids.numel(), -1))
+
+    model = Model()
+    updates = []
+    worker = SimpleNamespace(
+        device=device,
+        model=model,
+        _train_state_ready=True,
+        _global_step=0,
+        adapter_registry=None,
+        multimodal_lr_schedules={},
+        grad_clip_norm=None,
+        config=SimpleNamespace(
+            runtime=SimpleNamespace(activation_checkpointing=False),
+            model=SimpleNamespace(model_type="qwen3"),
+            effective_sequence_parallel=False,
+        ),
+        optimizer=SimpleNamespace(
+            lr=0.001,
+            model_params=list(model.parameters()),
+            step=lambda: updates.append(True),
+            zero_grad=lambda set_to_none: None,
+        ),
+        loss_fn=lambda pack, logprobs: (logprobs.sum(), {}),
+    )
+    monkeypatch.setattr(training, "get_tp_context", lambda: SimpleNamespace(dp_rank=0, is_rank0=True, world_size=1))
+    monkeypatch.setattr(training, "_pack_train_data", lambda pack: pack)
+    monkeypatch.setattr(training, "to_device", lambda pack, device: pack)
+    monkeypatch.setattr(training, "_train_meta", lambda *a, **kw: SimpleNamespace(sequence_parallel=False))
+    monkeypatch.setattr(training, "packed_next_token_logprobs", lambda logits, *a: logits.sum(-1))
+    monkeypatch.setattr(training, "_grad_norms", lambda params, groups: {"global": 1.0})
+    manager = training.TrainingManager(worker)
+    for name in ("_sync_data_parallel_gradients", "_sync_tensor_parallel_replicated_gradients"):
+        monkeypatch.setattr(manager, name, lambda: None)
+    monkeypatch.setattr(manager, "_finalize_router_expert_bias", lambda: None)
+    monkeypatch.setattr(manager, "_lr_for_step", lambda step: 0.001)
+    monkeypatch.setattr(manager, "_set_multimodal_lrs", lambda step: {})
+    pack = {"input_ids": torch.tensor([1, 2]), "train_cu_seqlens": torch.tensor([0, 2])}
+
+    probe = manager._train_step([{**pack, "_loss_fn": _dummy_policy_loss}], allow_step=True, grad_scale=1)
+    metrics = probe["metrics"]
+    # The forward/backward peak (90) exceeds the update's (30) and survives the update's reset.
+    assert metrics["auto_tune_worker_peak_mem_frac"] == 0.9
+    assert (metrics["train_peak_allocated_bytes"], metrics["optimizer_peak_allocated_bytes"]) == (90.0, 30.0)
+    assert metrics["optimizer_step_time_s"] == pytest.approx(0.025)
+
+    events.clear()
+    step = manager._train_step([pack], allow_step=True, grad_scale=1)
+    assert step["metrics"]["train_peak_allocated_bytes"] == 50.0
+    assert step["metrics"]["optimizer_step_time_s"] == pytest.approx(0.004)
+    # An ordinary step never synchronizes the device: it resets peak tracking for
+    # the update and waits only on the update's end event before reading results.
+    assert events == [("reset", device), "event-sync"]
+    assert len(updates) == 2
+
+
 @pytest.mark.parametrize("device_type", ["cpu", "cuda", "npu"])
 def test_rollout_probe_and_session_sync_use_worker_device(monkeypatch, device_type):
     from areno.engine.protocol import RolloutCacheProbePayload
