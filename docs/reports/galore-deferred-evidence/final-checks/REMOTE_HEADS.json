@@ -1,0 +1,7 @@
+{
+  "checked_at": "2026-10-31",
+  "method": "git ls-remote public upstream; no fetch/write",
+  "oss-camp2026": "25f5fedd01cddbe34651a5da005ee3da4511b691",
+  "main": "9188ec10d04eefa27a7d3e7c401019d66fed6439",
+  "pr640_head": "539f6c4fa08ae3fcc6a4f5ebd712dda2841c34c4"
+}

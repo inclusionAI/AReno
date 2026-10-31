@@ -1,0 +1,35 @@
+{
+  "common.py": {
+    "encode": "5df0ebb4a62d1cf33b8405fa33debe907b72a1ff78f0eb052c5e406694d613cc",
+    "batch_indices": "eb48c0c2a61a69cfe7bb405078524ffd5af195e2f9712a6143dca74af7bc8bcc",
+    "evaluate": "36a9862c0448a1361db3b15ba620d109c403751a55af2b219d0940cbd166fc66",
+    "trainer": "7d99b3ed5e524fc69b67f6c9bb306d3a3d3965187c31b8589f44cdba18703f7b",
+    "_profile_update": "c4562ff29c29e1b2251afce8ca509c112dcf151e01fad2f1b6a079054afa99d9"
+  },
+  "train.py": {
+    "main": "284be1df5c303992d4f62ec791b52b87cc57421145cae6e72cc2b65de3763e49"
+  },
+  "eval.py": {
+    "main": "5b591f6297ab40e4f75ab68e37e4a6f022872c07d8e41cb544ba1b01dc602474"
+  },
+  "prepare_data.py": {
+    "normalize": "23e71342fe6e56e4a3bd2245a450674dbaa1964e13ba32efe3616da2406de468",
+    "sha": "a2d5938f828b9777bac63a144d517299c0c060d91b2fcc033fda3a3bd36568a3",
+    "canonical_example": "39b86eea9acfca0f5215f774b5a6aebbc406b4fe8c6a78915425390080877dc2",
+    "format_prompt": "4039f7eecb9bb31d208b2d5d437b45ce97cf6b8884eda42a58390b557288822e",
+    "split_for_group": "a384bdcc7a5a55b40f9d8a1dbd2483a093df024026130c746416a0ed41d75104",
+    "prepare_rows": "26b6844d12936654e421d2f768f68c4d2786bacfc700ad2ef1e77dc413485afc",
+    "stats": "a834c9b4da12805d3c5b40a2f45ca4481177d97d42c45977720ab0337000d334",
+    "write_jsonl": "aabfd3fa28b8a09fd5f776a735d252224f1e147f6d3c10e9581b3f1e5eb18cd8"
+  },
+  "_provenance": {
+    "contract": "frozen-harness-v2-native-forward",
+    "wrapper_sha256": {
+      "common.py": "3248d7a542c8358ce7c78a5c6e264cde44cca136ec3e2238a41ad3824b21e424",
+      "train.py": "93cf64d6a6a3edd9cca3fc1e0752f298f482ba5539090de9d37415d393c07e4b",
+      "eval.py": "20d6a7719980dd6db92bf9a19a2535a50c2998beb01a81172cb7a2ed02f4900d"
+    },
+    "preparation_sha256": "a8f46818bfe8a08cb6ff3887feea2f0f98a1c79ceb91d0cb38c2cd2b35ba751e",
+    "note": "AST hashes captured before portability edits; this package has CPU equivalence checks only, no formal GPU results attributed to its entrypoints."
+  }
+}

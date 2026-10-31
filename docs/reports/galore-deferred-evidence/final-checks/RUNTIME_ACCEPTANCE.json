@@ -1,0 +1,284 @@
+{
+  "status": "runtime_integration_verified",
+  "timestamp": "2026-10-31T05:23:44.740323+00:00",
+  "commit": "a63289ed0bc4758512a1477e9d5d5ca5e7251529",
+  "branch": "feat/galore-strict-deferred-delivery",
+  "runtime_sha256": "80a70ff0f855fd5ec742ee985a507bc8adcbfd0ee3dafc23cc51da9708981c79",
+  "native_sha256": "f2d49f7b8ffd2fccbfce0f6eeb3108088be7834627b88c9ad71a0eb486f4d226",
+  "checks": {
+    "runtime_python_exact_identity": {
+      "passed": true,
+      "source_sha256": "80a70ff0f855fd5ec742ee985a507bc8adcbfd0ee3dafc23cc51da9708981c79",
+      "files": 221
+    },
+    "default_off_floor_equivalence": {
+      "passed": true,
+      "cases": 24,
+      "model_optimizer_rng_snapshots": 192,
+      "flags": [
+        "unset",
+        "0"
+      ],
+      "device": "cpu"
+    },
+    "independent_reference_original_cpu": {
+      "passed": true,
+      "cases": 12,
+      "artifact": "CPU_INDEPENDENT_REFERENCE.json",
+      "max_normalized": 0.0025318930856883526
+    },
+    "independent_reference_original_cuda": {
+      "passed": true,
+      "cases": 12,
+      "artifact": "CUDA_INDEPENDENT_REFERENCE.json",
+      "max_normalized": 0.226967915892601
+    },
+    "cpu_selected_full_with_visible_driver": {
+      "passed": true,
+      "tests": 1838,
+      "skipped": 28,
+      "deselected": 2222,
+      "subtests": 12,
+      "elapsed_seconds": 93.45,
+      "log": "cpu-full-visible-driver.log",
+      "gpu_for_import_driver": 1,
+      "note": "No PYTEST_DISABLE_PLUGIN_AUTOLOAD override on this invocation; regular installed test plugins loaded"
+    },
+    "cpu_new_portable_reference": {
+      "passed": true,
+      "tests": 12,
+      "elapsed_seconds": 2.6,
+      "log": "cpu-reference-pytest.log",
+      "overlap_full_suite": false
+    },
+    "cuda_related": {
+      "passed": true,
+      "tests": 23,
+      "elapsed_seconds": 4.75,
+      "log": "cuda-related.log"
+    },
+    "cuda_portable_reference_and_native_tied_weights": {
+      "passed": true,
+      "tests": 18,
+      "elapsed_seconds": 4.98,
+      "log": "cuda-deferred-reference-and-native.log",
+      "breakdown": {
+        "new_independent_reference": 12,
+        "native_qwen3_tied_weight": 6
+      }
+    },
+    "ruff_changed_runtime_and_tests": {
+      "passed": true,
+      "version": "0.15.17",
+      "lint_log": "lint-runtime-final.log",
+      "format_log": "format-runtime-final.log",
+      "files": 6
+    },
+    "first_hidden_cuda_cpu_selected_attempt": {
+      "passed": false,
+      "tests_failed": 41,
+      "errors": 25,
+      "tests_passed": 1714,
+      "skipped": 86,
+      "subtests": 12,
+      "log": "cpu-full.log",
+      "reason": "installed FLA/Triton autotune imports require an active CUDA driver; all66 failure/error messages show 0 active drivers; original failure retained",
+      "source_change_to_fix": false
+    },
+    "cuda-independent_monitor": {
+      "passed": true,
+      "samples": 6,
+      "foreign_pid_samples": 0,
+      "minimum_free_bytes": 35431092224,
+      "command": [
+        "python",
+        "/home/lws/ling/final_round_20261031/delivery/check_reference.py",
+        "--device",
+        "cuda",
+        "--output",
+        "/home/lws/ling/final_round_20261031/delivery/CUDA_INDEPENDENT_REFERENCE.json"
+      ]
+    },
+    "cuda-related_monitor": {
+      "passed": true,
+      "samples": 6,
+      "foreign_pid_samples": 0,
+      "minimum_free_bytes": 35399847936,
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_galore_cuda.py",
+        "tests/test_galore_streamed_cuda.py",
+        "tests/test_fp32_master_optimizer_cuda.py",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ]
+    },
+    "cuda-deferred-reference-and-native_monitor": {
+      "passed": true,
+      "samples": 6,
+      "foreign_pid_samples": 0,
+      "minimum_free_bytes": 35362496512,
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_deferred_projection_reference_cuda.py",
+        "tests/test_qwen3_tied_weights_cuda.py",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ]
+    },
+    "cpu-full-visible-driver_monitor": {
+      "passed": true,
+      "samples": 91,
+      "foreign_pid_samples": 0,
+      "minimum_free_bytes": 35363000320,
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/",
+        "-k",
+        "cpu",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ]
+    }
+  },
+  "proofs": {
+    "CHANGES.md": {
+      "bytes": 4493,
+      "sha256": "28fa9d7c343d66eab88a00cb05597f214dabf88fc9234912373dda4c1e9314b2"
+    },
+    "CPU_INDEPENDENT_REFERENCE.json": {
+      "bytes": 102157,
+      "sha256": "8c5c8ec081527d91fc0b9c43deb52b9c294d305b0377c3cd1e2607fbc255f5b6"
+    },
+    "CUDA_INDEPENDENT_REFERENCE.json": {
+      "bytes": 103292,
+      "sha256": "46efc5791d4147f467f9ed464576b7fea0ea17d78cc557845cd77f948d6a8405"
+    },
+    "DEFAULT_OFF_FLOOR.json": {
+      "bytes": 18574,
+      "sha256": "700518092681e72877fc3c627c55836dcbb964ffcc2c0ad11c6b65e50385a8b6"
+    },
+    "DEFAULT_OFF_INTEGRATED.json": {
+      "bytes": 18574,
+      "sha256": "700518092681e72877fc3c627c55836dcbb964ffcc2c0ad11c6b65e50385a8b6"
+    },
+    "SOURCE_IDENTITY.json": {
+      "bytes": 24522,
+      "sha256": "020627c3e45c9231712e980d1a9dde5e899eee95119806f5a8f99c4f0ecc9694"
+    },
+    "check_default_off.py": {
+      "bytes": 2810,
+      "sha256": "599773e1b20f1f85a781569be4d238b047bd8addc7cea2259b04bde53eadef42"
+    },
+    "check_reference.py": {
+      "bytes": 10827,
+      "sha256": "113f1fe7ad213a86b74666c21599a0b996d31bb03962a8b39128bc9e45b5c704"
+    },
+    "cpu-full-visible-driver.log": {
+      "bytes": 5472,
+      "sha256": "be0fe782c3bca2313ec85c0232d7ab81da0a1fa4e533e83a175a65afd589df4c"
+    },
+    "cpu-full-visible-driver.monitor.jsonl": {
+      "bytes": 12329,
+      "sha256": "bb95ba41e99e6ceae9ab7bb60581090cb4cc2ab644f17ff7e4face024694aa5d"
+    },
+    "cpu-full-visible-driver.status.json": {
+      "bytes": 400,
+      "sha256": "5d4e4622b1dd2d84d8f772644f1a2a885ed901b43d23aa2d36f3b176e1089c24"
+    },
+    "cpu-full.log": {
+      "bytes": 300224,
+      "sha256": "91a881139ce3820c6faadcadbff55d843172d5cb1740be6e675a94ede21ac936"
+    },
+    "cpu-independent.log": {
+      "bytes": 75,
+      "sha256": "6d792a34604d08c1e5b1cc957a5324d2aef301b45156e4a87329caf58bff43e6"
+    },
+    "cpu-reference-pytest.log": {
+      "bytes": 99,
+      "sha256": "ef43b915ef2c67f7a97cb9a758357bd62d258e003960b56d9ae392002d6ac91f"
+    },
+    "cuda-deferred-reference-and-native.log": {
+      "bytes": 99,
+      "sha256": "ad9692993c75ef8cc5679f35b5e1a0a690a1439cb815356d74758fb84a8b20a8"
+    },
+    "cuda-deferred-reference-and-native.monitor.jsonl": {
+      "bytes": 546,
+      "sha256": "2956019a3184bcae39d536b38fd7c7e6b6fab5dedde4cb8b08132070ca3f371c"
+    },
+    "cuda-deferred-reference-and-native.status.json": {
+      "bytes": 467,
+      "sha256": "b704ea5adad738721fd7e773752a67f446a12a20fae647726cec8e0402b507fd"
+    },
+    "cuda-independent.log": {
+      "bytes": 71,
+      "sha256": "b4d2890126a76ca5dd48827f061448f6d55934d0c1a13b71a5b1446039dd82ba"
+    },
+    "cuda-independent.monitor.jsonl": {
+      "bytes": 544,
+      "sha256": "9f9a3f0868807feb047ac1c0e92f40c47a9ae883ec59d513723eaf560a3dd9a8"
+    },
+    "cuda-independent.status.json": {
+      "bytes": 496,
+      "sha256": "453909b38fc897dcd2d3ff0ec5cd51353d3c8195fdd4ed390f8fed66824f3d32"
+    },
+    "cuda-related.log": {
+      "bytes": 99,
+      "sha256": "6a809c7ad76d64d83008c3a12a146cadb86dbb8e6c191d2d4c066023c7cd6e2a"
+    },
+    "cuda-related.monitor.jsonl": {
+      "bytes": 545,
+      "sha256": "5b36647ffb564e92a9ddbd50735be1d8ace9b7ce488f0684821657bad639734a"
+    },
+    "cuda-related.status.json": {
+      "bytes": 489,
+      "sha256": "14c19978265be9a6bdb916440eef13bacca8c64765df4c7e132255727f3e9611"
+    },
+    "default-off-floor.log": {
+      "bytes": 52,
+      "sha256": "2a2667822d42e1b32993413b6e87d535bff91442e34c30dce4b0bf716621e7d6"
+    },
+    "default-off-integrated.log": {
+      "bytes": 52,
+      "sha256": "2a2667822d42e1b32993413b6e87d535bff91442e34c30dce4b0bf716621e7d6"
+    },
+    "format-runtime-final.log": {
+      "bytes": 26,
+      "sha256": "ef7d13d02214e98ca902b05257cdbe6a8e84f3b4714508efdc19766460b54209"
+    },
+    "format-runtime.log": {
+      "bytes": 26,
+      "sha256": "177f260a5645724013185e4b140c7045cc39e56c0c97b120f5cb23599f85f0de"
+    },
+    "lint-runtime-final.log": {
+      "bytes": 19,
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    "lint-runtime.log": {
+      "bytes": 19,
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    "run_cuda_checks.py": {
+      "bytes": 3507,
+      "sha256": "13ec3aa2e6cbf0b1a9f9d6e58464f7335ff20f238442e5ec6d275ed7cead86c5"
+    }
+  },
+  "limits": [
+    "No push/PR/comment",
+    "Not full remote CI matrix",
+    "Old performance and quality endpoints retain original frozen protocol identities",
+    "Private default-off restricted single-microbatch singleGPU Qwen3 only",
+    "No new native large-model training endpoint in this integration task",
+    "CPU-hidden full-suite attempt failed and is retained separately",
+    "New portable reference tests overlap the independent original reference in scientific cases; do not sum as independent replications"
+  ]
+}

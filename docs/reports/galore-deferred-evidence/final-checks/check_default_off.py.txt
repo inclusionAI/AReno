@@ -1,0 +1,74 @@
+"""Portable byte-level trajectory snapshots for default-off integration review."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+
+import torch
+
+from areno.engine.optim.galore import GaLoreAdamW
+
+
+def digest(value):
+    h = hashlib.sha256()
+
+    def visit(v):
+        if isinstance(v, torch.Tensor):
+            h.update(str((str(v.dtype), tuple(v.shape))).encode())
+            h.update(v.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+        elif isinstance(v, dict):
+            for key, item in v.items():
+                h.update(repr(key).encode())
+                visit(item)
+        elif isinstance(v, (tuple, list)):
+            h.update(type(v).__name__.encode())
+            for item in v:
+                visit(item)
+        else:
+            h.update(repr(v).encode())
+
+    visit(value)
+    return h.hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    rows = []
+    for flag in (None, "0"):
+        if flag is None:
+            os.environ.pop("ARENO_EXPERIMENT_DEFERRED_PROJECTION", None)
+        else:
+            os.environ["ARENO_EXPERIMENT_DEFERRED_PROJECTION"] = flag
+        for shape in ((13, 9), (9, 13), (9, 9)):
+            for dtype in (torch.float32, torch.bfloat16):
+                for compact in (False, True):
+                    torch.manual_seed(593)
+                    p = torch.nn.Parameter(torch.randn(shape).to(dtype))
+                    v = torch.nn.Parameter(torch.randn(5))
+                    opt = GaLoreAdamW(
+                        [p, v], lr=1e-5, rank=2, update_proj_gap=3,
+                        projector_backend="recycled", projector_seed=17,
+                        compact_master=compact, tile_rows=8,
+                        release_gradients=True, fused_writeback=True,
+                        transport_moments=True,
+                    )
+                    hashes = []
+                    for step in range(8):
+                        p.main_grad = torch.randn(shape)
+                        v.main_grad = torch.randn(5)
+                        opt.step()
+                        opt.zero_grad()
+                        hashes.append(digest({"state": opt.state_dict(), "p": p, "v": v,
+                                              "rng": torch.get_rng_state()}))
+                    rows.append({"flag": flag, "shape": shape, "dtype": str(dtype),
+                                 "compact": compact, "snapshots": hashes})
+    args.output.write_text(json.dumps({"status": "passed", "cases": rows}, indent=2) + "\n")
+    print(json.dumps({"status": "passed", "cases": len(rows), "snapshots": sum(len(r["snapshots"]) for r in rows)}))
+
+
+if __name__ == "__main__":
+    main()

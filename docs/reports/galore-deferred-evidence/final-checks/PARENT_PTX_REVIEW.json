@@ -1,0 +1,43 @@
+{
+  "status": "passed",
+  "checks": [
+    {
+      "signature": "ptx_original",
+      "scale_name": "1_0",
+      "executable_ptx_equal": true,
+      "normalized_sha256": "10882d04900ed0dac4b93d1b759724de420b3d005fb9b44d00af1abb3c9a53dc"
+    },
+    {
+      "signature": "ptx_original",
+      "scale_name": "1_3",
+      "executable_ptx_equal": true,
+      "normalized_sha256": "d995620f194fa9735b27fa8687c0d57ce4a389c9efef2dcea9025f22bf397d19"
+    },
+    {
+      "signature": "ptx_original",
+      "scale_name": "0_1",
+      "executable_ptx_equal": true,
+      "normalized_sha256": "63816a56606f21acabb497d9ee69f2ac68e18994b27457db8585c3305b5dc81a"
+    },
+    {
+      "signature": "ptx_original_aligned",
+      "scale_name": "1_0",
+      "executable_ptx_equal": true,
+      "normalized_sha256": "452b5b0cc96d454037eaf2440fc18ef7237e7909c60ece4f60113ff8221e5c51"
+    },
+    {
+      "signature": "ptx_original_aligned",
+      "scale_name": "1_3",
+      "executable_ptx_equal": true,
+      "normalized_sha256": "b49fa8ed07e687de6cc92be9d14e69a841dcf2eaf2f7e84c94ebd5913b55a0ba"
+    },
+    {
+      "signature": "ptx_original_aligned",
+      "scale_name": "0_1",
+      "executable_ptx_equal": true,
+      "normalized_sha256": "e99d0973cc65c6448f5380698cd8ec80ca62d26ccd1c6978a1a09a8237070e36"
+    }
+  ],
+  "normalization": "Stop only at trailing .section .debug_info; remove .file/.loc across whitespace separators, //comments and whitespace; retain all other instructions/declarations/targets.",
+  "first_parser_attempt": "Failed to remove tab-separated .file directives, exposing only the two source paths; corrected whitespace recognition. No instruction mismatches were removed."
+}

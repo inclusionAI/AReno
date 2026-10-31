@@ -1,0 +1,40 @@
+{
+  "status": "portable_runner_cpu_qualified_only",
+  "actual_training_launched": false,
+  "cpu_tests": {
+    "passed": 13,
+    "seconds": 0.31,
+    "command": "CUDA_VISIBLE_DEVICES='' taskset -c 60-63 python -m pytest tests/test_galore_deferred_repro_cpu.py -q -p no:cacheprovider"
+  },
+  "ruff": "pinned0.15.17 check and format--check passed for both Python files",
+  "help_smoke": "passed withCUDAhidden",
+  "helper_functions_AST_equal_to_formal_80a": {
+    "encode": true,
+    "batch_indices": true,
+    "evaluate": true,
+    "trainer": true
+  },
+  "scope": "NoGPUrun;notoriginalformalharness;mockcontracttestsonly",
+  "files": {
+    "scripts/galore_deferred/model-manifest.json": {
+      "bytes": 1928,
+      "sha256": "9eb85034e1a09a9399f28e312be7bc9ab4da711b56433f805c533fd71698ac2c"
+    },
+    "scripts/galore_deferred/run.py": {
+      "bytes": 14631,
+      "sha256": "817b085c5ed9aed88d3d1603118ec8c19f5eb246f66d107ee6146bc0337c5452"
+    },
+    "scripts/galore_deferred/README.md": {
+      "bytes": 4713,
+      "sha256": "4d4c0da2b1ff1433ef71069526365f975728d50a2e7fb193c66ab2a8435f030c"
+    },
+    "scripts/galore_deferred/input-prefix.json": {
+      "bytes": 938,
+      "sha256": "bc4c1a27a308832f5438534491909f729e892983b3bdb0a737a73d71a48ab070"
+    },
+    "tests/test_galore_deferred_repro_cpu.py": {
+      "bytes": 7163,
+      "sha256": "cb51e71b8a09acac5ca54292b56ff09487cc36a89280e19e969ecb4912a1946a"
+    }
+  }
+}

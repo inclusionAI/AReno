@@ -1,0 +1,93 @@
+{
+  "runtime_sha256": "65b3dd64133770266a5a3f1f05f5bef64db359ead45810f0ae4a557719e0710c",
+  "cpu_keyword": {
+    "passed": 1815,
+    "skipped": 28,
+    "subtests_passed": 12,
+    "deselected": 2222,
+    "elapsed_s": 96.24,
+    "log": "cpu-suite.log"
+  },
+  "cuda_related": {
+    "passed": 59,
+    "log": "semantic-review/final-gpu-reference.log"
+  },
+  "independent_reference": {
+    "cpu_cases": 6,
+    "cuda_cases": 6,
+    "atol": 1e-06,
+    "rtol": 0.0001,
+    "artifact": "semantic-review/AUDIT.json"
+  },
+  "offline_data_replay": {
+    "passed": 18,
+    "elapsed_s": 8.95,
+    "log": "offline-replay.log",
+    "overlaps_cpu_suite": true
+  },
+  "lint": {
+    "ruff_version": "0.15.17",
+    "whole_repository_lint": "passed",
+    "whole_repository_format": "passed",
+    "python_files": 450
+  },
+  "limits": [
+    "Local Python3.12 Linux/CUDA environment, not full GitHub CI matrix",
+    "No universal native BF16 future-trajectory bitwise equality claim"
+  ],
+  "status": "local_acceptance_passed",
+  "remote_ci": "not_run",
+  "file_hooks": {
+    "EOF": "passed",
+    "trailing_whitespace": "passed",
+    "private_keys": "passed",
+    "max_file_KB": 1000,
+    "large_files": "passed",
+    "yaml": "no changed YAML files"
+  },
+  "evidence": {
+    "archives": 17,
+    "members": 640,
+    "manifest_sha256": "688c16041cc974cbe4c9f0d18b7ed1d3bece5dbd182b2b8c714f4be99ec9684d",
+    "verification": "passed",
+    "independent_corrupted_copy_rejected": true
+  },
+  "public_trainer": {
+    "prefix_updates": 200,
+    "resumed_updates": [
+      200,
+      201
+    ],
+    "gap": 200,
+    "canonical_tensors_bitexact": 906,
+    "probe_exact": true,
+    "next_batch_exact": true,
+    "native_logp_abs_diff_max": 0,
+    "engineering_scope": "separate from formal quality runs; no native future-trajectory equality claim"
+  },
+  "quality": {
+    "validation_seeds": [
+      0,
+      1,
+      2
+    ],
+    "budget_updates": 1024,
+    "galore_validation_mean": 2.177309157073246,
+    "adamw_validation_mean": 2.228046480124991,
+    "adam8_validation_mean": 2.183357238361361,
+    "official_relative_increase_limit_percent": 2,
+    "gate_passed": true,
+    "training_runtime_sha256": "7da069e9aba272313b2e7b3f5325923b4779adf5afb50f9b98098aae9127faf2",
+    "final_runtime_equivalence": "6 dynamic cases/1152 tensors, bidirectional cross-loading; finite-case evidence, not universal proof"
+  },
+  "test": {
+    "means": {
+      "adamw": 2.209215081350399,
+      "adam8": 2.160363903883036,
+      "galore": 2.1548188214179453
+    },
+    "not_untouched": true,
+    "used_for_selection_this_round": false
+  },
+  "scope": "Local Python3.12 Linux/CUDA acceptance. Original recorded logs/config/commands are in the partition archives. Git commit/patch and file inventory are bound by the external final readiness record; no remote PR or message sent."
+}

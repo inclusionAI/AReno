@@ -1,0 +1,21 @@
+{
+  "status": "TEMPLATE_NOT_A_RESULT",
+  "optimizer": "galore",
+  "seed": 0,
+  "budget_updates": 1024,
+  "comparison_contract": "native-backward",
+  "input_manifest": "scripts/galore_sft/input-manifest.example.json",
+  "train_metadata": "artifacts/galore-sft/native/seed0/galore/train/metadata.json",
+  "train_raw_steps": "artifacts/galore-sft/native/seed0/galore/train/steps.jsonl",
+  "train_summary": "artifacts/galore-sft/native/seed0/galore/train/summary.json",
+  "eval_summary": "artifacts/galore-sft/native/seed0/galore/eval/summary.json",
+  "checkpoint": "artifacts/checkpoints/seed0/galore/final",
+  "launch_command_file": "artifacts/galore-sft/native/seed0/galore/command.sh",
+  "occupancy_audit": "artifacts/galore-sft/native/seed0/galore/gpu-occupancy.jsonl",
+  "source_sha256": "COPY_ACTUAL_METADATA_VALUE",
+  "wrapper_sha256": "COPY_ACTUAL_METADATA_VALUES",
+  "native_extension_sha256": "COPY_ACTUAL_METADATA_VALUE",
+  "data_sha256": "COPY_ACTUAL_METADATA_VALUES",
+  "quality_gate": "PREDECLARE_BEFORE_TRAINING",
+  "result": null
+}

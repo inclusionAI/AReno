@@ -1,0 +1,37 @@
+{
+  "contract": "native-backward",
+  "model": "assets/Qwen3-0.6B",
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "optimizers": [
+    "adamw",
+    "adam8",
+    "galore"
+  ],
+  "steps": 1024,
+  "context": 512,
+  "batch": 4,
+  "micro_batch": 2,
+  "eval_every": 256,
+  "monitor_examples": 128,
+  "checkpoint_every": 0,
+  "full_eval_splits": [
+    "validation",
+    "test"
+  ],
+  "rank": 128,
+  "gap": 200,
+  "scale": 2,
+  "retained": false,
+  "extra_config_json": {
+    "optimizer": {
+      "galore_exclude_vocab": false
+    },
+    "runtime": {}
+  },
+  "note": "Historical scale2 comparison, superseded by selected-scale1-all; retain for reproduction of the earlier report.",
+  "condition": "selected-scale2-all"
+}

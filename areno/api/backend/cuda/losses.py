@@ -99,11 +99,24 @@ def sft_loss_fn(data_pack, logprobs):
     valid_count = response_mask.sum().clamp_min(1)
     logprob_sum = logprobs[response_mask].sum()
     loss = _sft_token_mean_loss(data_pack, logprob_sum, valid_count, logprobs)
-    return loss, {
+    metrics = {
         "sft_loss": loss.detach(),
         "sft_target_tokens": valid_count.detach(),
         "sft_logprob_mean": (-loss).detach(),
     }
+    if data_pack.get("_sft_logprob_diagnostics", False):
+        layout = response_layout(data_pack, logprobs, need_old_logprobs=True)
+        difference = layout.old_logprobs - logprobs.detach()
+        metrics.update(
+            {
+                LOGP_METRIC_WEIGHT: layout.valid_count.detach(),
+                TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(layout.old_logprobs, layout).detach(),
+                TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(logprobs.detach(), layout).detach(),
+                TrainMetric.LOGP_DIFF_MEAN: masked_mean(difference, layout).detach(),
+                TrainMetric.LOGP_ABS_DIFF_MEAN: masked_mean(difference.abs(), layout).detach(),
+            }
+        )
+    return loss, metrics
 
 
 def _sft_token_mean_loss(data_pack, logprob_sum, valid_count, logprobs):

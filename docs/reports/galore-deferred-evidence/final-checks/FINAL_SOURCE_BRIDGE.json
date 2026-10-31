@@ -1,0 +1,21 @@
+{
+  "historical_runtime_sha256": "80a70ff0f855fd5ec742ee985a507bc8adcbfd0ee3dafc23cc51da9708981c79",
+  "frozen_performance_runtime_sha256": "5d96474a50da9ce90ddad4e52e14725b76c2fa78a536ca7911216cb7e273e4c7",
+  "final_runtime_sha256": "337c7612282e8fc5254d890ac7659c88c2f38a8e8430d5b3cdc84f6dc96b28b8",
+  "changed_runtime_files": {
+    "areno/engine/optim/compact_writeback.py": {
+      "historical_sha256": "25b3c0e50bcb001031fbc39dec3ca01b4550b5fc116fac661876b6293532a676",
+      "final_sha256": "ff52a305d723ab35c9fd4b770c76b4baa142ebb06ff6c182c51f4ed7cb19bb4c"
+    },
+    "areno/engine/optim/deferred_projection.py": {
+      "historical_sha256": "fdc4b26d476a1a300f1467f720d3228393a77d74d24c4968a345867eb7ebd437",
+      "final_sha256": "643cad6b79f4368e869d953ff09341ae7143db7344f408a1f747781be0b5c19b"
+    }
+  },
+  "unchanged_runtime_files": 219,
+  "quality_scope": "historical strict80a endpoints; no new final-source quality endpoint",
+  "performance_scope": "frozen5d ordinary Pythonfloat1.0 ABBA; finalsource target executable PTX identity across6specializations, ctor-only scalar guard outside measured update window; not a new native run",
+  "correctness_scope": "repaired scalar types/default-off/independent reference/full pipeline/cross-flag serialization; finite tested cases not a universal proof",
+  "scalarfix_acceptance_sha256": "a195ebbae1b4526afca76acff92322b78a34faad712f599131472b7da8d3bb25",
+  "ptx_identity_sha256": "8ebb06142b11b68e4ea25f75855bdc7879b0cacb92fdc8f6d1caa1e7396cb100"
+}

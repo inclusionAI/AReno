@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "return_code": 0,
+  "error": null,
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_galore_cuda.py",
+    "tests/test_galore_streamed_cuda.py",
+    "tests/test_fp32_master_optimizer_cuda.py",
+    "-q",
+    "-p",
+    "no:cacheprovider"
+  ],
+  "gpu": 1,
+  "uuid": "GPU-d78c0eae-9ae7-3849-fa3d-f092f7502900",
+  "cpu_affinity": [
+    40,
+    41,
+    42,
+    43
+  ],
+  "pid": 3526719,
+  "birth": 1793424019.76,
+  "wall_seconds": 6.349800389027223
+}
