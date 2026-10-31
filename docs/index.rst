@@ -34,6 +34,7 @@ AReno documentation
    4-bit AdamW <concepts/adamw-4bit>
    GaLore AdamW <concepts/galore>
    GaLore deferred Qwen3-1.7B measurements <reports/galore-deferred-qwen3>
+   GaLore Qwen3-1.7B capacity boundaries <reports/galore-capacity-qwen3>
    GaLore selected Qwen3 measurements <reports/galore-sft-frontier>
    GaLore historical measurements <reports/galore-sft-qwen3>
    Reward Functions <concepts/reward-functions>

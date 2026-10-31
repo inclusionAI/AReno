@@ -7,6 +7,11 @@ This opt-in, single-GPU recipe reduces observed training allocated peak by
 mean validation NLL is 0.46% higher than 8-bit AdamW and 7.20% lower than full
 AdamW. It is a memory/quality/time tradeoff, not three-metric dominance.
 
+See :doc:`the complete-training capacity supplement <galore-capacity-qwen3>`
+for final-runtime, full-length packed-text measurements on three 40 GiB cards.
+It confirms larger registered-grid sizes than full AdamW, capacity parity
+with 8-bit, and a smaller memory advantage at large input sizes.
+
 The historical three-card and quality results retain the original frozen runtime identity
 ``80a70ff0f855fd5ec742ee985a507bc8adcbfd0ee3dafc23cc51da9708981c79``.
 The initial strict integration (commit ``a63289e``) preserves all 221 Python
