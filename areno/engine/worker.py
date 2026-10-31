@@ -218,6 +218,18 @@ class ArenoWorker:
             return self.train_values(cmd.payload)
         if cmd.op is Op.SAVE_CHECKPOINT:
             return self.save_checkpoint(cmd.payload)
+        if cmd.op is Op.SAVE_TRAINING_STATE:
+            from areno.engine.checkpoints.training_state import save_worker_state
+
+            self._prepare_for_train()
+            save_worker_state(self, cmd.payload.path)
+            return None
+        if cmd.op is Op.LOAD_TRAINING_STATE:
+            from areno.engine.checkpoints.training_state import load_worker_state
+
+            self._prepare_for_train()
+            load_worker_state(self, cmd.payload.path)
+            return None
         if cmd.op is Op.EXPORT_ADAPTER:
             return self.export_adapter(cmd.payload)
         if cmd.op is Op.EXPORT_GGUF:

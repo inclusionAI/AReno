@@ -280,6 +280,8 @@ class SFTTrainerConfig(TrainerConfig):
     eval_batches: int | None = field(default=None, kw_only=True)
     eval_before_step: bool = field(default=False, kw_only=True)
     shuffle: bool = field(default=False, kw_only=True)
+    save_training_state: bool = field(default=False, kw_only=True)
+    resume_from: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         TrainerConfig.__post_init__(self)
@@ -289,6 +291,13 @@ class SFTTrainerConfig(TrainerConfig):
             raise ValueError("eval_batches must be positive or None")
         if self.validation_dataset_loader_fn and not self.validation_dataset_path:
             raise ValueError("validation_dataset_loader_fn requires validation_dataset_path")
+        if self.save_training_state and self.save_path is None:
+            raise ValueError("save_training_state requires save_path")
+        if self.save_training_state or self.resume_from:
+            if self.algo != "sft" or self.backend != "cuda" or self.world_size != 1 or self.tp_size != 1:
+                raise ValueError("SFT training state currently requires CUDA and one worker")
+            if self.adam_4bit or self.adam_8bit or (self.lora is not None and self.lora.qlora):
+                raise ValueError("SFT training state currently requires the standard AdamW optimizer")
 
 
 @dataclass(slots=True)

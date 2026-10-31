@@ -712,6 +712,20 @@ class ArenoEngine:
         results = self.cluster.call(Op.SAVE_CHECKPOINT, SaveCheckpointPayload(path=path))
         return results[0]["path"]
 
+    def save_training_state(self, path: str) -> None:
+        """Save a single-worker training state; distributed restore is not yet supported."""
+
+        if self.config.tp_size != 1 or self.config.dp_size != 1:
+            raise ValueError("training state currently requires a single worker")
+        self.cluster.call(Op.SAVE_TRAINING_STATE, SaveCheckpointPayload(path=path))
+
+    def load_training_state(self, path: str) -> None:
+        """Restore a single-worker training state."""
+
+        if self.config.tp_size != 1 or self.config.dp_size != 1:
+            raise ValueError("training state currently requires a single worker")
+        self.cluster.call(Op.LOAD_TRAINING_STATE, SaveCheckpointPayload(path=path))
+
     def export_adapter(self, path: str) -> str:
         """Export the live native LoRA weights as a standard PEFT adapter."""
 

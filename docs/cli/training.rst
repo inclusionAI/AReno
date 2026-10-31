@@ -535,6 +535,37 @@ Checkpoint
 ``--save-interval INTEGER``
    Save checkpoint every N train steps. Default: ``100``.
 
+``--save-training-state``
+   In addition to the usual model or adapter export, save a complete SFT
+   training snapshot at each save interval. The snapshot is a separate
+   directory named ``step_000100.training-state``. Requires ``--save-path``.
+
+``--resume-from DIRECTORY``
+   Restore a complete SFT snapshot. Model weights alone cannot restore the
+   optimizer or data cursor. Keep the training configuration, model files,
+   loader source, tokenizer, AReno runtime source and extension, relevant
+   dependency versions, and dataset content and order unchanged. The output
+   directory may differ. ``--epochs`` and ``--max-steps`` remain the total
+   limits for the original task. Add ``--save-training-state`` when subsequent
+   snapshots should also be saved.
+
+   Training snapshots currently support one CUDA worker, standard FP32-master
+   AdamW, the built-in SFT loss, and JSON-serializable text rows in a list or
+   Hugging Face Dataset.
+   Multimodal data, QLoRA, quantized optimizers, NPU, MLX and multi-worker
+   training are not supported. Snapshot checks read the model files and data
+   to fingerprint them, which can take time. Output must be outside the base
+   model directory. A failed training call must restart from a complete earlier
+   snapshot; it is not rolled back in the current process. LoRA snapshots
+   currently include the full model state and can require substantial storage.
+   Snapshots are complete only when their final directory contains a valid
+   ``manifest.json``; a crash during publication may leave an incomplete
+   directory that cannot be resumed. If that directory blocks a later save at
+   the same step, resume into a new ``--save-path`` or remove the incomplete
+   directory after inspecting it. Publication uses same-filesystem rename and
+   file/directory synchronization; durability depends on filesystem and storage
+   behavior.
+
 ``--export-gguf DIRECTORY``
    Export the final live policy directly to a new GGUF/Ollama package after
    successful training, including a normal stop at ``--max-steps``. Currently

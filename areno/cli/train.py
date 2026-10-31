@@ -197,7 +197,10 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lam",
         ),
     ),
-    ("Checkpoint", ("save_path", "save_interval", "export_gguf_path", "gguf_file_type")),
+    (
+        "Checkpoint",
+        ("save_path", "save_interval", "save_training_state", "resume_from", "export_gguf_path", "gguf_file_type"),
+    ),
     ("Observability", ("metrics_log_dir",)),
 )
 
@@ -321,6 +324,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.model_hub not in {"hf", "modelscope"}:
         raise click.UsageError("--model-hub must be one of: hf, modelscope")
     algorithm = _algorithm_for_cli(args.algo)
+    if algorithm.name != "sft" and (getattr(args, "save_training_state", False) or getattr(args, "resume_from", None)):
+        raise click.UsageError("--save-training-state and --resume-from currently require --algo sft")
     validation_path = getattr(args, "validation_dataset_path", None)
     validation_loader = getattr(args, "validation_dataset_loader_fn", None)
     if algorithm.name != "sft" and (
@@ -650,6 +655,16 @@ def _format_training_config_summary(
             ],
         ),
     ]
+    if getattr(config, "save_training_state", False) or getattr(config, "resume_from", None):
+        sections.append(
+            (
+                "Training state",
+                [
+                    ("save_training_state", _format_bool(getattr(config, "save_training_state", False))),
+                    ("resume_from", _format_optional(getattr(config, "resume_from", None))),
+                ],
+            )
+        )
     lines = [_style("AReno training config", fg="bright_white", bold=True, color=color)]
     if attn_warning is not None:
         lines.append(_style("WARNING", fg="yellow", bold=True, color=color) + f": {attn_warning}")
@@ -1099,6 +1114,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
                 getattr(args, "eval_batches", None) is not None,
                 getattr(args, "eval_before_step", False),
                 getattr(args, "shuffle", False),
+                getattr(args, "save_training_state", False),
+                getattr(args, "resume_from", None),
             )
         ):
             return config
@@ -1110,6 +1127,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eval_batches=getattr(args, "eval_batches", None),
             eval_before_step=getattr(args, "eval_before_step", False),
             shuffle=getattr(args, "shuffle", False),
+            save_training_state=getattr(args, "save_training_state", False),
+            resume_from=getattr(args, "resume_from", None),
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -1457,7 +1476,10 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "lam",
             ],
         ),
-        section("Checkpoint", ["save_path", "save_interval", "export_gguf_path", "gguf_file_type"]),
+        section(
+            "Checkpoint",
+            ["save_path", "save_interval", "save_training_state", "resume_from", "export_gguf_path", "gguf_file_type"],
+        ),
         section("Observability", ["metrics_log_dir"]),
     ]
     extras = []
@@ -1748,6 +1770,8 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
 @click.option("--save-path", default=None, help="Optional checkpoint output directory.")
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
+@click.option("--save-training-state", is_flag=True, help="Save complete single-worker CUDA SFT training state.")
+@click.option("--resume-from", default=None, help="Resume SFT from a complete training-state directory.")
 @click.option(
     "--export-gguf",
     "export_gguf_path",

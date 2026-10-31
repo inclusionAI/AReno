@@ -583,6 +583,12 @@ class CudaBackend(Backend):
         engine = self._require_train_engine()
         return save_checkpoint(engine, path)
 
+    def save_training_state(self, ctx: Context, path: str) -> None:
+        self._require_train_engine().save_training_state(path)
+
+    def load_training_state(self, ctx: Context, path: str) -> None:
+        self._require_train_engine().load_training_state(path)
+
     def export_adapter(self, ctx: Context, path: str) -> str:
         del ctx
         return self._require_train_engine().export_adapter(path)

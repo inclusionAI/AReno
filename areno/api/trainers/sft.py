@@ -36,6 +36,7 @@ from areno.api.multimodal import (
 )
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.trainers.export import export_gguf_if_configured
+from areno.api.trainers.sft_iterator import SFTBatchIterator
 
 
 class SFTTrainer:
@@ -55,6 +56,10 @@ class SFTTrainer:
         self.validation_dataset = validation_dataset
         self._rng = np.random.RandomState(getattr(config, "seed", None))
         self.loss_fn = loss_fn
+        self._train_iterator = None
+        self._resume_iterator_state = None
+        self._snapshot_fingerprint = None
+        self._supervised_tokens = 0
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
 
     def fit(self) -> None:
@@ -71,7 +76,52 @@ class SFTTrainer:
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         configure_chat_template_enable_thinking(processor, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
-        for epoch in range(self.config.epochs):
+        start_epoch = 0
+        if getattr(self.config, "save_training_state", False) or getattr(self.config, "resume_from", None):
+            from areno.api.backend.cuda.training import is_sft_loss_fn
+            from areno.api.trainers.sft_snapshot import (
+                fingerprint_inputs,
+                load_snapshot,
+                restore_driver_rng,
+                validate_driver_rng,
+            )
+
+            if not is_sft_loss_fn(self.loss_fn):
+                raise ValueError("SFT training state currently requires the built-in SFT loss")
+            self._snapshot_fingerprint = fingerprint_inputs(
+                self.config, self.dataset, self.validation_dataset, tokenizer, processor
+            )
+            if self.config.resume_from:
+
+                def validate_driver(state):
+                    if (
+                        not isinstance(state["epoch"], int)
+                        or not 0 <= state["epoch"] < self.config.epochs
+                        or not isinstance(state["completed_batches"], int)
+                        or state["completed_batches"] < 0
+                        or not isinstance(state["supervised_tokens"], int)
+                        or state["supervised_tokens"] < 0
+                    ):
+                        raise ValueError("invalid SFT snapshot progress")
+                    SFTBatchIterator(
+                        self.dataset,
+                        lambda row: row,
+                        self.config.batch_size,
+                        np.random.RandomState(),
+                        shuffle=False,
+                        state=state["iterator"],
+                    )
+                    validate_driver_rng(state["rng"])
+
+                state = load_snapshot(self.config.resume_from, self.areno, self._snapshot_fingerprint, validate_driver)
+                step = state["completed_batches"]
+                start_epoch = state["epoch"]
+                self._supervised_tokens = state["supervised_tokens"]
+                self._resume_iterator_state = state["iterator"]
+                restore_driver_rng(state["rng"], self._rng)
+        if getattr(self.config, "max_steps", None) is not None and step >= self.config.max_steps:
+            return
+        for epoch in range(start_epoch, self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
             for train_batch in self._iter_train_batches(
@@ -104,6 +154,10 @@ class SFTTrainer:
                 self.logger.info("epoch=%d step=%d role=policy stage=train_end rows=%d", epoch, step, len(train_batch))
                 record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy")
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
+                if self._snapshot_fingerprint is not None:
+                    from areno.api.backend.cuda.training import sft_target_token_count
+
+                    self._supervised_tokens += sft_target_token_count(train_batch)
                 if not getattr(self.config, "eval_before_step", False):
                     self._maybe_validate(epoch, step + 1, tokenizer, processor, before_step=False)
                 self._maybe_save(epoch, step)
@@ -116,6 +170,24 @@ class SFTTrainer:
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role="policy")
 
     def _iter_train_batches(self, tokenizer, processor, *, max_prompt_tokens: int, max_new_tokens: int):
+        if self._snapshot_fingerprint is not None:
+
+            def convert(row):
+                return _record_to_train_sequence(
+                    row, tokenizer, processor, max_prompt_tokens=max_prompt_tokens, max_new_tokens=max_new_tokens
+                )
+
+            self._train_iterator = SFTBatchIterator(
+                self.dataset,
+                convert,
+                self.config.batch_size,
+                self._rng,
+                shuffle=getattr(self.config, "shuffle", False),
+                state=self._resume_iterator_state,
+            )
+            self._resume_iterator_state = None
+            yield from self._train_iterator
+            return
         yield from self._iter_batches(
             self.dataset,
             tokenizer,
@@ -218,9 +290,26 @@ class SFTTrainer:
         if self.config.save_path is None or (step + 1) % self.config.save_interval != 0:
             return
         ckpt_path = str(Path(self.config.save_path) / f"step_{step + 1:06d}")
+        if getattr(self.config, "save_training_state", False) and Path(ckpt_path + ".training-state").exists():
+            raise FileExistsError(f"training snapshot already exists: {ckpt_path}.training-state")
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_start path=%s", epoch, step, ckpt_path)
         record_dashboard_state(self.areno, stage="save_checkpoint_start", epoch=epoch, step=step, role="policy")
         saved_path = self.areno.save_checkpoint(ckpt_path)
+        if getattr(self.config, "save_training_state", False):
+            from areno.api.trainers.sft_snapshot import capture_driver_rng, save_snapshot
+
+            save_snapshot(
+                ckpt_path + ".training-state",
+                self.areno,
+                {
+                    "epoch": epoch,
+                    "completed_batches": step + 1,
+                    "supervised_tokens": self._supervised_tokens,
+                    "iterator": self._train_iterator.state_dict(),
+                    "rng": capture_driver_rng(self._rng),
+                },
+                self._snapshot_fingerprint,
+            )
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_end path=%s", epoch, step, saved_path)
         record_dashboard_state(self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role="policy")
 
