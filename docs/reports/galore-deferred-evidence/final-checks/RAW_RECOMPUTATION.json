@@ -1,0 +1,173 @@
+{
+  "status": "passed",
+  "verified_evidence": {
+    "status": "passed",
+    "files": 748,
+    "archives": 15,
+    "raw_bytes": 119062386,
+    "manifest_sha256": "7c3bf6cdb9bb2e3e9162a76a0f47ace3d9308c2f9b766fbd89cc77fc91a00248"
+  },
+  "source_sha256": "80a70ff0f855fd5ec742ee985a507bc8adcbfd0ee3dafc23cc51da9708981c79",
+  "final_runtime_checked": true,
+  "quality": {
+    "1024": {
+      "per_seed_nll": {
+        "adamw": [
+          1.9310335373609362,
+          1.941863991356543,
+          1.9375798692416493
+        ],
+        "adam8": [
+          1.9186337623925895,
+          1.9175253958552314,
+          1.9171631233819326
+        ],
+        "deferred": [
+          1.9027047288419872,
+          1.905633788679868,
+          1.9049748928631296
+        ]
+      },
+      "means": {
+        "adamw": 1.9368257993197096,
+        "adam8": 1.9177740938765846,
+        "deferred": 1.9044378034616616
+      },
+      "relative_to_8bit_percent": -0.6954046598869779,
+      "relative_to_full_adamw_percent": -1.6722203860266571,
+      "all_seeds_within_full_adamw_plus2percent": true,
+      "all_seeds_below_8bit": true,
+      "validation_replay_limit": "loss totals/counts verified; original scalar streams unavailable"
+    },
+    "4096": {
+      "per_seed_nll": {
+        "adamw": [
+          2.05441863947,
+          2.058397621533762,
+          2.056341307422899
+        ],
+        "adam8": [
+          1.9005549245105382,
+          1.8986903262054753,
+          1.8998230070241813
+        ],
+        "deferred": [
+          1.9110592021332808,
+          1.9076775073667016,
+          1.906322312842561
+        ]
+      },
+      "means": {
+        "adamw": 2.0563858561422204,
+        "adam8": 1.8996894192467315,
+        "deferred": 1.9083530074475146
+      },
+      "relative_to_8bit_percent": 0.456052874380819,
+      "relative_to_full_adamw_percent": -7.198690277534558,
+      "all_seeds_within_full_adamw_plus2percent": true,
+      "all_seeds_below_8bit": false,
+      "validation_replay_limit": "loss totals/counts verified; original scalar streams unavailable"
+    }
+  },
+  "performance": {
+    "0": {
+      "methods": {
+        "adam8": {
+          "full_wall_ms": 504.03956865455257,
+          "allocated_gib": 16.28550624847412,
+          "reserved_gib": 17.306640625,
+          "refresh_indices": []
+        },
+        "original": {
+          "full_wall_ms": 548.9928989927284,
+          "allocated_gib": 15.78841495513916,
+          "reserved_gib": 16.603515625,
+          "refresh_indices": [
+            200,
+            400
+          ]
+        },
+        "deferred": {
+          "full_wall_ms": 518.9440036655287,
+          "allocated_gib": 11.347550868988037,
+          "reserved_gib": 14.462890625,
+          "refresh_indices": [
+            200,
+            400
+          ]
+        }
+      },
+      "wall_change_percent": 2.956997017270102,
+      "allocated_reduction_percent": 30.321165975105924,
+      "original_primary_passed": true,
+      "original_tradeoff_passed": true
+    },
+    "1": {
+      "methods": {
+        "adam8": {
+          "full_wall_ms": 502.12928032007767,
+          "allocated_gib": 16.28550624847412,
+          "reserved_gib": 17.306640625,
+          "refresh_indices": []
+        },
+        "original": {
+          "full_wall_ms": 559.3356730230153,
+          "allocated_gib": 15.78841495513916,
+          "reserved_gib": 16.603515625,
+          "refresh_indices": [
+            200,
+            400
+          ]
+        },
+        "deferred": {
+          "full_wall_ms": 514.1304771430441,
+          "allocated_gib": 11.347550868988037,
+          "reserved_gib": 14.462890625,
+          "refresh_indices": [
+            200,
+            400
+          ]
+        }
+      },
+      "wall_change_percent": 2.3900611442767117,
+      "allocated_reduction_percent": 30.321165975105924,
+      "original_primary_passed": true,
+      "original_tradeoff_passed": true
+    },
+    "2": {
+      "methods": {
+        "adam8": {
+          "full_wall_ms": 500.5558195064077,
+          "allocated_gib": 16.28550624847412,
+          "reserved_gib": 17.306640625,
+          "refresh_indices": []
+        },
+        "original": {
+          "full_wall_ms": 561.49348763749,
+          "allocated_gib": 15.78841495513916,
+          "reserved_gib": 16.603515625,
+          "refresh_indices": [
+            200,
+            400
+          ]
+        },
+        "deferred": {
+          "full_wall_ms": 517.9358891482116,
+          "allocated_gib": 11.347550868988037,
+          "reserved_gib": 14.462890625,
+          "refresh_indices": [
+            200,
+            400
+          ]
+        }
+      },
+      "wall_change_percent": 3.472154146353179,
+      "allocated_reduction_percent": 30.321165975105924,
+      "original_primary_passed": false,
+      "original_tradeoff_passed": true
+    }
+  },
+  "quality_raw_updates": 46080,
+  "performance_raw_updates": 3618,
+  "scope": "raw training guards and paired inputs; validation arithmetic, not missing scalar replay"
+}

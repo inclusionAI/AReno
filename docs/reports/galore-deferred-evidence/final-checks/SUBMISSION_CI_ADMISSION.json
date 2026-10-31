@@ -1,0 +1,17 @@
+{
+  "scope": "submission-time CPU-only CI import compatibility; runtime337 unchanged",
+  "change": "Move Triton-backed compact_writeback import inside CUDA-only test function",
+  "cpu_cuda_hidden_and_triton_blocked": {
+    "skipped": 67,
+    "log": "submission-cpu-no-triton-collection.log"
+  },
+  "cpu_repro": {
+    "passed": 20,
+    "log": "submission-cpu-repro.log"
+  },
+  "cuda_regression_repeat": {
+    "passed": 67,
+    "scientific_cases_overlap_prior108": true
+  },
+  "test_sha256": "3380f565610510315f80463947e3f78751d095e43c0154bc93c131a1795ec44a"
+}

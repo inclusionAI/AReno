@@ -97,6 +97,31 @@ def canonical_model_path(path: str | None) -> str | None:
 def build_optimizer(params, optimizer_config, ctx, *, lr: float | None = None):
     """Construct the configured DP-sharded optimizer implementation."""
 
+    if optimizer_config.galore_rank is not None:
+        from areno.engine.optim.galore import GaLoreAdamW
+
+        if ctx.world_size != 1 or ctx.dp_size != 1:
+            raise ValueError("GaLore currently supports single-GPU training only")
+        return GaLoreAdamW(
+            params,
+            lr=optimizer_config.lr if lr is None else float(lr),
+            betas=optimizer_config.betas,
+            weight_decay=optimizer_config.weight_decay,
+            rank=optimizer_config.galore_rank,
+            update_proj_gap=optimizer_config.galore_update_proj_gap,
+            scale=optimizer_config.galore_scale,
+            projector_backend=optimizer_config.galore_projector_backend,
+            projector_oversampling=optimizer_config.galore_projector_oversampling,
+            projector_iterations=optimizer_config.galore_projector_iterations,
+            projector_seed=optimizer_config.galore_projector_seed,
+            projector_final_qr=optimizer_config.galore_projector_final_qr,
+            compact_master=optimizer_config.galore_compact_master,
+            tile_rows=optimizer_config.galore_tile_rows,
+            release_gradients=optimizer_config.galore_release_gradients,
+            fused_writeback=optimizer_config.galore_fused_writeback,
+            transport_moments=optimizer_config.galore_transport_moments,
+            exclude_vocab=optimizer_config.galore_exclude_vocab,
+        )
     if optimizer_config.adam_4bit:
         optimizer_cls = AdamW4bit
     elif optimizer_config.adam_8bit:
@@ -119,6 +144,15 @@ def build_optimizer(params, optimizer_config, ctx, *, lr: float | None = None):
         dp_size=ctx.dp_size,
         dp_group=ctx.dp_group,
     )
+
+
+def mark_galore_vocabulary_parameters(model: torch.nn.Module) -> None:
+    """Mark actual input/output vocabulary owners without names or shape guesses."""
+    from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
+
+    for module in model.modules():
+        if isinstance(module, (VocabParallelEmbedding, VocabParallelLMHead)):
+            module.weight._areno_galore_vocab = True
 
 
 def configure_multimodal_training(model: torch.nn.Module, optimizer_config, *, trainable: bool) -> None:

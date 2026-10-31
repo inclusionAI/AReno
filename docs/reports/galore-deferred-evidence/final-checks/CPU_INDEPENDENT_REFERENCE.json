@@ -1,0 +1,3897 @@
+{
+  "status": "passed",
+  "criterion": {
+    "atol": 1e-06,
+    "rtol": 0.0001
+  },
+  "cases": [
+    {
+      "shape": [
+        9,
+        9
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "stress": false,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 9.00482177734375,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 9.165478706359863,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006729054730385542
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 8.927881240844727,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0009802556596696377
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 9.625137329101562,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0010709253838285804
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019451099797151983
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 7.661566257476807,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0009003784507513046
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00018904621538240463
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 8.84547233581543,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0010265823220834136
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001849617256084457
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 8.600011825561523,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0006280381348915398
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019329303177073598
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 8.824947357177734,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006793187349103391
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019453464483376592
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 9.280261039733887,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0013597090728580952
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019563859677873552
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 9.553777694702148,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006192818400450051
+          },
+          "variance": {
+            "max_abs": 1.1641532182693481e-10,
+            "max_normalized": 0.00010796607239171863
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        9,
+        9
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "stress": true,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 9.00482177734375,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0008233866537921131
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 9.165478706359863,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006729054730385542
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.001554339425638318
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 8.927881240844727,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0009802556596696377
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.001591527950949967
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 9.625137329101562,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0010709253838285804
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019451099797151983
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0015911748632788658
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 7.661566257476807,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0009003784507513046
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00018904621538240463
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0015568352537229657
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 8.84547233581543,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004946478293277323
+          },
+          "model": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004946478293277323
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0010265823220834136
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001849617256084457
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0015226600226014853
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 8.600011825561523,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004900787025690079
+          },
+          "model": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004900787025690079
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0006280381348915398
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019329303177073598
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0015084577025845647
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 8.824947357177734,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004848989483434707
+          },
+          "model": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004848989483434707
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006793187349103391
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019453464483376592
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0015144068747758865
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 9.280261039733887,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004768846556544304
+          },
+          "model": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0004768846556544304
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0013597090728580952
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019563859677873552
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0015150017570704222
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 9.553777694702148,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.00047535059275105596
+          },
+          "model": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.00047535059275105596
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006192818400450051
+          },
+          "variance": {
+            "max_abs": 1.1641532182693481e-10,
+            "max_normalized": 0.00010796607239171863
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.9802322387695312e-08,
+            "max_normalized": 0.0015008950140327215
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        9,
+        9
+      ],
+      "dtype": "torch.bfloat16",
+      "device": "cpu",
+      "stress": false,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 9.000415802001953,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 9.164732933044434,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006295220227912068
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 8.924915313720703,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0008898907690308988
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 9.619864463806152,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0005282380152493715
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019451824482530355
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 7.662971496582031,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0010098533239215612
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001890885760076344
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 8.84809684753418,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0017460309900343418
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00018502243619877845
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 8.602004051208496,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.3969838619232178e-09,
+            "max_normalized": 0.0009459173306822777
+          },
+          "variance": {
+            "max_abs": 2.9103830456733704e-11,
+            "max_normalized": 2.8154670872027054e-05
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 8.827905654907227,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.000706623715814203
+          },
+          "variance": {
+            "max_abs": 5.820766091346741e-11,
+            "max_normalized": 5.3278639825293794e-05
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 9.277963638305664,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0009177377796731889
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 9.554581642150879,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0008395648328587413
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.00030539362342096865
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        9,
+        9
+      ],
+      "dtype": "torch.bfloat16",
+      "device": "cpu",
+      "stress": true,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 9.000415802001953,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 9.164732933044434,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007213760400190949
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006295220227912068
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 8.924915313720703,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007200459949672222
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0008898907690308988
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 9.619864463806152,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007220045081339777
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0005282380152493715
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019451824482530355
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 7.662971496582031,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007209971081465483
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0010098533239215612
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001890885760076344
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 8.84809684753418,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.000721340999007225
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0017460309900343418
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00018502243619877845
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 8.602004051208496,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007216688827611506
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.3969838619232178e-09,
+            "max_normalized": 0.0009459173306822777
+          },
+          "variance": {
+            "max_abs": 2.9103830456733704e-11,
+            "max_normalized": 2.8154670872027054e-05
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 8.827905654907227,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007216230151243508
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.000706623715814203
+          },
+          "variance": {
+            "max_abs": 5.820766091346741e-11,
+            "max_normalized": 5.3278639825293794e-05
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 9.277963638305664,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007212557829916477
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0009177377796731889
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 9.554581642150879,
+          "master": {
+            "max_abs": 1.4901161193847656e-08,
+            "max_normalized": 0.0007226310553960502
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0008395648328587413
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.00030539362342096865
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        13,
+        9
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "stress": false,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.102022171020508,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0004914749879390001
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020925446006003767
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.497058868408203,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0012354773934930563
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0003114629362244159
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.930110931396484,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0015925297047942877
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.00031185493571683764
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.782169342041016,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.001246910309419036
+          },
+          "variance": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005924055585637689
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.081151008605957,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0010311749065294862
+          },
+          "variance": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005801155348308384
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.632707595825195,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.001427405164577067
+          },
+          "variance": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005751295248046517
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.429800033569336,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0018640392227098346
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002941451093647629
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.7855224609375,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0023172262590378523
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002950314956251532
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.142520904541016,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.001810815534554422
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002968860790133476
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.74145221710205,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0014692592667415738
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00039574273978359997
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        13,
+        9
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "stress": true,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.102022171020508,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0004914749879390001
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020925446006003767
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.497058868408203,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0012354773934930563
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0003114629362244159
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.930110931396484,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0015925297047942877
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.00031185493571683764
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.782169342041016,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.001246910309419036
+          },
+          "variance": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005924055585637689
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.081151008605957,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0010311749065294862
+          },
+          "variance": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005801155348308384
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.632707595825195,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.000583722663577646
+          },
+          "model": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.000583722663577646
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.001427405164577067
+          },
+          "variance": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005751295248046517
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.429800033569336,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0005776621401309967
+          },
+          "model": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0005776621401309967
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0018640392227098346
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002941451093647629
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00017305935034528375
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.7855224609375,
+          "master": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_normalized": 0.0007207023445516825
+          },
+          "model": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_normalized": 0.0007207023445516825
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0023172262590378523
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002950314956251532
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.0003503458865452558
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.142520904541016,
+          "master": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_normalized": 0.0007475041784346104
+          },
+          "model": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_normalized": 0.0007475041784346104
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.001810815534554422
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002968860790133476
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005337617476470768
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.74145221710205,
+          "master": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_normalized": 0.0007481785723939538
+          },
+          "model": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_normalized": 0.0007481785723939538
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0014692592667415738
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00039574273978359997
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0007198856328614056
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        13,
+        9
+      ],
+      "dtype": "torch.bfloat16",
+      "device": "cpu",
+      "stress": false,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.104312896728516,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.000994462170638144
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00021328525326680392
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.49489688873291,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.001254208735190332
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020506624423433095
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.925996780395508,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.001095603802241385
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0003108200035057962
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.784472465515137,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0016562966629862785
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019899176550097764
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.083207130432129,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.001597113092429936
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019912650168407708
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.639341354370117,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.026798367500305e-09,
+            "max_normalized": 0.00234878808259964
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019755220273509622
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.430986404418945,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.002422782126814127
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00038167648017406464
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.789435386657715,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.0018359555397182703
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00038613504148088396
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.14203929901123,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.0018422857392579317
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.0003778608806896955
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.746129035949707,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0017717088339850307
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00039602359174750745
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        13,
+        9
+      ],
+      "dtype": "torch.bfloat16",
+      "device": "cpu",
+      "stress": true,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.104312896728516,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006002230220474303
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.000994462170638144
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00021328525326680392
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0004974612966179848
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.49489688873291,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.000615293625742197
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.001254208735190332
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020506624423433095
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.00048813610919751227
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.925996780395508,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006338944076560438
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.001095603802241385
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0003108200035057962
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0004991561290808022
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.784472465515137,
+          "master": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0006160341436043382
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0016562966629862785
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019899176550097764
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0005278275348246098
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.083207130432129,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.000733777997083962
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.001597113092429936
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019912650168407708
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 1.3969838619232178e-09,
+            "max_normalized": 0.000880769977811724
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.639341354370117,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007087208796292543
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.026798367500305e-09,
+            "max_normalized": 0.00234878808259964
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019755220273509622
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0013125472469255328
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.430986404418945,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0006967697408981621
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.002422782126814127
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00038167648017406464
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.0954757928848267e-09,
+            "max_normalized": 0.001557361101731658
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.789435386657715,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0006984345382079482
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.0018359555397182703
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00038613504148088396
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.0954757928848267e-09,
+            "max_normalized": 0.0015763778937980533
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.14203929901123,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007004860672168434
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.0018422857392579317
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.0003778608806896955
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0017790012061595917
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.746129035949707,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007061159703880548
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0017717088339850307
+          },
+          "variance": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.00039602359174750745
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0017995063681155443
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        9,
+        13
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "stress": false,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.102022171020508,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.497058868408203,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0003929420781787485
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.930110931396484,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0012291608145460486
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.782169342041016,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.0013348315842449665
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001941961672855541
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.081151008605957,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0023292661644518375
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019570371659938246
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.632707595825195,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0011968582402914762
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001963901740964502
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.429800033569336,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0024839146062731743
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002997242845594883
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.7855224609375,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0021651489660143852
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0002053083007922396
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.142520904541016,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.002307485556229949
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020408655109349638
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.74145221710205,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.0019292900105938315
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001844373473431915
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        9,
+        13
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "stress": true,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.102022171020508,
+          "master": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007673487416468561
+          },
+          "model": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007673487416468561
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.497058868408203,
+          "master": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007970770238898695
+          },
+          "model": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007970770238898695
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0003929420781787485
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.930110931396484,
+          "master": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007926762336865067
+          },
+          "model": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007926762336865067
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0012291608145460486
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.782169342041016,
+          "master": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007944572134874761
+          },
+          "model": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0007944572134874761
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.0013348315842449665
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001941961672855541
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.081151008605957,
+          "master": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009005856700241566
+          },
+          "model": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009005856700241566
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0023292661644518375
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00019570371659938246
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.632707595825195,
+          "master": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009009764180518687
+          },
+          "model": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009009764180518687
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0011968582402914762
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001963901740964502
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.429800033569336,
+          "master": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009011882357299328
+          },
+          "model": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009011882357299328
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0024839146062731743
+          },
+          "variance": {
+            "max_abs": 3.4924596548080444e-10,
+            "max_normalized": 0.0002997242845594883
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00017305935034528375
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.7855224609375,
+          "master": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009014412062242627
+          },
+          "model": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009014412062242627
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0021651489660143852
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0002053083007922396
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 4.656612873077393e-10,
+            "max_normalized": 0.0003503458865452558
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.142520904541016,
+          "master": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009017439442686737
+          },
+          "model": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009017439442686737
+          },
+          "mean": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.002307485556229949
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020408655109349638
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 6.984919309616089e-10,
+            "max_normalized": 0.0005337617476470768
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.74145221710205,
+          "master": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009023835300467908
+          },
+          "model": {
+            "max_abs": 2.384185791015625e-07,
+            "max_normalized": 0.0009023835300467908
+          },
+          "mean": {
+            "max_abs": 5.587935447692871e-09,
+            "max_normalized": 0.0019292900105938315
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0001844373473431915
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0007198856328614056
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        9,
+        13
+      ],
+      "dtype": "torch.bfloat16",
+      "device": "cpu",
+      "stress": false,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.104312896728516,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.49489688873291,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0005213057738728821
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.925996780395508,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0007877249154262245
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.784472465515137,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0013687675818800926
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00021053328237030655
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.083207130432129,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.00133610051125288
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0002085144369630143
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.639341354370117,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0010886871023103595
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0002094363298965618
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.430986404418945,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.0025318930856883526
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020781582861673087
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.789435386657715,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0013550043804571033
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020541306002996862
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.14203929901123,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0017111341003328562
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020415752078406513
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.746129035949707,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.001422251807525754
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00018938678840640932
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    },
+    {
+      "shape": [
+        9,
+        13
+      ],
+      "dtype": "torch.bfloat16",
+      "device": "cpu",
+      "stress": true,
+      "refresh_indices": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "rows": [
+        {
+          "step": 0,
+          "norm": 11.104312896728516,
+          "master": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0004974612966179848
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 1,
+          "norm": 11.49489688873291,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.000750753388274461
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0005213057738728821
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.00048813610919751227
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 2,
+          "norm": 10.925996780395508,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007467983523383737
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0007877249154262245
+          },
+          "variance": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0004991561290808022
+          },
+          "owners": 2,
+          "barrier": true
+        },
+        {
+          "step": 3,
+          "norm": 10.784472465515137,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007525969995185733
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0013687675818800926
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00021053328237030655
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 9.313225746154785e-10,
+            "max_normalized": 0.0005278275348246098
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 4,
+          "norm": 11.083207130432129,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007588097359985113
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.00133610051125288
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0002085144369630143
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 1.3969838619232178e-09,
+            "max_normalized": 0.000880769977811724
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 5,
+          "norm": 11.639341354370117,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007618374074809253
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0010886871023103595
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.0002094363298965618
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 1.862645149230957e-09,
+            "max_normalized": 0.0013125472469255328
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 6,
+          "norm": 10.430986404418945,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007657312671653926
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.7939677238464355e-09,
+            "max_normalized": 0.0025318930856883526
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020781582861673087
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.0954757928848267e-09,
+            "max_normalized": 0.001557361101731658
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 7,
+          "norm": 10.789435386657715,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007644626311957836
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0013550043804571033
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020541306002996862
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.0954757928848267e-09,
+            "max_normalized": 0.0015763778937980533
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 8,
+          "norm": 12.14203929901123,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007667102036066353
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.0017111341003328562
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00020415752078406513
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0017790012061595917
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        },
+        {
+          "step": 9,
+          "norm": 11.746129035949707,
+          "master": {
+            "max_abs": 7.450580596923828e-09,
+            "max_normalized": 0.0007636660593561828
+          },
+          "model": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "mean": {
+            "max_abs": 3.725290298461914e-09,
+            "max_normalized": 0.001422251807525754
+          },
+          "variance": {
+            "max_abs": 2.3283064365386963e-10,
+            "max_normalized": 0.00018938678840640932
+          },
+          "basis": {
+            "max_abs": 0.0,
+            "max_normalized": 0.0
+          },
+          "vector": {
+            "max_abs": 2.3283064365386963e-09,
+            "max_normalized": 0.0017995063681155443
+          },
+          "owners": 2,
+          "barrier": true,
+          "resumed_exact": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "status": "passed",
+  "return_code": 0,
+  "error": null,
+  "command": [
+    "python",
+    "/home/lws/ling/final_round_20261031/delivery/check_reference.py",
+    "--device",
+    "cuda",
+    "--output",
+    "/home/lws/ling/final_round_20261031/delivery/CUDA_INDEPENDENT_REFERENCE.json"
+  ],
+  "gpu": 1,
+  "uuid": "GPU-d78c0eae-9ae7-3849-fa3d-f092f7502900",
+  "cpu_affinity": [
+    40,
+    41,
+    42,
+    43
+  ],
+  "pid": 3522785,
+  "birth": 1793424003.7,
+  "wall_seconds": 6.385898779029958
+}

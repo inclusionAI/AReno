@@ -1,0 +1,74 @@
+"""Run one bounded numerical check under the shared assigned-device contract."""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+import psutil
+
+
+def main():
+    parser = argparse.ArgumentParser(__doc__)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--seconds", type=int, default=600)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parent
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    assert command
+    lock = open("/mnt2/ling/areno-galore/runs/gpu1.lock", "a")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    uuid = subprocess.check_output(["nvidia-smi", "-i", "1", "--query-gpu=uuid", "--format=csv,noheader"], text=True).strip()
+
+    def pids():
+        result = subprocess.check_output(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader,nounits"], text=True)
+        return {int(line.split(",")[1]) for line in result.splitlines() if line.split(",")[0].strip() == uuid}
+
+    assert not pids(), "foreign PID before admission"
+    assert os.statvfs(root).f_bavail * os.statvfs(root).f_frsize >= 9 * 1024**3
+    env = os.environ.copy()
+    env.update(CUDA_VISIBLE_DEVICES="1", PYTHONPATH=str(root / "repo"))
+    started = time.monotonic()
+    with (root / (args.name + ".log")).open("w") as log, (root / (args.name + ".monitor.jsonl")).open("w") as monitor:
+        proc = subprocess.Popen(command, cwd=root / "repo", env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        birth = psutil.Process(proc.pid).create_time()
+        failure = None
+        try:
+            while proc.poll() is None:
+                process = psutil.Process(proc.pid)
+                assert process.create_time() == birth
+                owned = {proc.pid} | {p.pid for p in process.children(recursive=True)}
+                foreign = pids() - owned
+                free = os.statvfs(root).f_bavail * os.statvfs(root).f_frsize
+                monitor.write(json.dumps({"time": time.time(), "foreign": sorted(foreign), "free_bytes": free, "owned": sorted(owned)}) + "\n")
+                monitor.flush()
+                if foreign or free < 8 * 1024**3 or time.monotonic() - started > args.seconds:
+                    raise RuntimeError("foreign PID, disk guard, or bounded deadline")
+                time.sleep(1)
+        except BaseException as exc:
+            failure = repr(exc)
+            if proc.poll() is None and psutil.Process(proc.pid).create_time() == birth:
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+        result = {"status": "passed" if proc.returncode == 0 and failure is None else "failed",
+                  "return_code": proc.returncode, "error": failure, "command": command,
+                  "gpu": 1, "uuid": uuid, "cpu_affinity": sorted(os.sched_getaffinity(0)),
+                  "pid": proc.pid, "birth": birth, "wall_seconds": time.monotonic() - started}
+        (root / (args.name + ".status.json")).write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result), flush=True)
+        if result["status"] != "passed":
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -24,11 +24,18 @@ from areno import _configure_torch_runtime
 from areno.adapters import initialize_lora
 from areno.adapters.peft import export_peft_adapter, load_peft_adapter
 from areno.api.backend.cuda.roles import RoleManager, WorkerRole
+from areno.engine.checkpoints.training_state import load_training_state, save_training_state
 from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
 from areno.engine.data.sampling import _truncate_generated
 from areno.engine.inference import InferCacheSpec, InferenceManager
-from areno.engine.modeling import build_model_on_device, build_optimizer, configure_multimodal_training, param_grad
+from areno.engine.modeling import (
+    build_model_on_device,
+    build_optimizer,
+    configure_multimodal_training,
+    mark_galore_vocabulary_parameters,
+    param_grad,
+)
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weights
 from areno.engine.protocol import (
@@ -83,6 +90,8 @@ class ArenoWorker:
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
             load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
         opt = config.optimizer
+        if opt.galore_rank is not None and opt.galore_exclude_vocab:
+            mark_galore_vocabulary_parameters(self.model)
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
         )
@@ -153,6 +162,10 @@ class ArenoWorker:
         self.inference = InferenceManager(self)
         self.roles = RoleManager(self)
         self.training = TrainingManager(self) if config.role == "train" else None
+        if config.role == "train" and opt.resume_training_state:
+            if config.model_path is None:
+                raise ValueError("resume_training_state requires a checkpoint model_path")
+            load_training_state(self, config.model_path)
         if config.role == "train" and config.train_loss_fn is None:
             raise ValueError("ArenoEngine requires train_loss_fn")
         self.loss_fn = config.train_loss_fn
@@ -669,6 +682,10 @@ class ArenoWorker:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""
         self._prepare_actor_onloaded()
         path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
+        if path is not None and (
+            self.config.optimizer.galore_rank is not None or self.config.optimizer.save_training_state
+        ):
+            save_training_state(self, path)
         return {"path": path} if path is not None else None
 
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
