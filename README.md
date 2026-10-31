@@ -44,7 +44,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 AReno supports Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled
 PyTorch 2.6 or newer, plus Apple Silicon macOS through MLX. Windows users can
-use WSL2 for the CUDA path. Ascend NPU integration uses CANN and ``torch_npu``.
+use WSL2 for the CUDA path. Huawei Ascend NPU integration uses CANN and ``torch_npu``.
 The CLI selects NPU on Linux when
 ``torch_npu`` is installed, otherwise CUDA, and MLX on native ``arm64`` macOS.
 
