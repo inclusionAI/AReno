@@ -52,10 +52,10 @@ def read_tar(raw, compressed=False):
     return files
 
 
-def load_bundle(directory):
+def load_bundle(directory, *, schema="areno-capacity-evidence-v1"):
     directory = Path(directory)
     manifest = json.loads((directory / "manifest.json").read_text())
-    check(manifest["schema"] == "areno-capacity-evidence-v1", "unsupported schema")
+    check(manifest["schema"] == schema, "unsupported schema")
     check(manifest["chunk_bytes"] == 512 * 1024 and manifest["max_archive_bytes"] == 900_000, "unexpected size policy")
     chunks, files, part_names = {}, {}, set()
     for part in manifest["parts"]:

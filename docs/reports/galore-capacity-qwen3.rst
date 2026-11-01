@@ -213,3 +213,7 @@ cannot reconstruct token values from hashes alone; original full-stream and
 per-update token replay checks are preserved as audit evidence, not claimed
 as a fresh offline token replay. Source/model/data and packaging identities
 are recorded separately from numerical and quality conclusions.
+
+Final-source response-only quality is measured separately in
+:doc:`galore-final-quality-qwen3`. Those context-512/batch-4 results do not
+change the packed-input capacity boundaries or counter scopes above.

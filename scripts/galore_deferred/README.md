@@ -36,3 +36,5 @@ CUDA_VISIBLE_DEVICES='' python -m pytest tests/test_galore_deferred_repro_cpu.py
 ```
 
 The smoke exercises exact budgets, warmup exclusion/refresh coverage, final-only validation using the actual shared NLL function, deterministic original input-index prefixes, and native-guard rejection. It does not establish GPU correctness or reproduce the archived learning/performance results.
+
+The final repaired runtime has now been exercised directly in a separate nine-job, three-seed, 4096-update study using this public entry with fused scaling enabled for the candidate. See `../../docs/reports/galore-final-quality-qwen3.rst` for source attribution, results, raw response-logprob evidence and limits. The historical timing/quality statements above retain their original source; this new study does not establish an 8-bit speed or quality win.

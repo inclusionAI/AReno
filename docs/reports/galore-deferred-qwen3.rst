@@ -272,3 +272,11 @@ bounded strict writeback. A port preserving640's geometry/API needs its own
 qualification. The issue requests agreement on overlapping scopes before
 separate PRs. This local package records evidence; it does not imply maintainer
 approval, remote CI success, a resolved API choice or an award outcome.
+
+Final-source quality supplement
+-------------------------------
+
+:doc:`galore-final-quality-qwen3` directly measures the final repaired runtime
+for three methods, three seeds and 4096 updates, retaining every response
+logprob. It closes the historical source-to-quality evidence gap without
+relabeling the historical measurements above.
