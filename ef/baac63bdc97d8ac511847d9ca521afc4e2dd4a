@@ -1,0 +1,21 @@
+scripts/sft/v4/run_areno_sft_fp32-v4-v1-3-refined-2-2epoch.md
+  s_ecc2da37de66a2::t_baa8dba1aa5a7b 1-19
+scripts/sft/v4/run_areno_sft_fp32-v4-v1-3-refined-2-2epoch.sh
+  s_ecc2da37de66a2::t_baa8dba1aa5a7b 1-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "efbaac63bdc97d8ac511847d9ca521afc4e2dd4a",
+  "prompts": {},
+  "sessions": {
+    "s_ecc2da37de66a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a4bf-8ebe-7a52-8a1c-ef7703c0ee86",
+        "model": "gpt-6.1-terra"
+      },
+      "human_author": "成闲 <kyrie.wc@antgroup.com>"
+    }
+  }
+}
