@@ -1,0 +1,41 @@
+{
+  "source": "deferred_scale_confirm_20261030/outputs/gpu0/deferred/steps.jsonl",
+  "source_runtime": "80a70ff0f855fd5ec742ee985a507bc8adcbfd0ee3dafc23cc51da9708981c79",
+  "seed": 0,
+  "train_rows": 13544,
+  "rows": [
+    {
+      "step": 0,
+      "sample_indices": [
+        1506,
+        10582,
+        2641,
+        1527
+      ],
+      "batch_sha256": "b23ebe13098a965be912979db3f9f5f161f6ed5bcbfe1e0344d0797e9e4c68c1",
+      "target_tokens": 112
+    },
+    {
+      "step": 1,
+      "sample_indices": [
+        9945,
+        8544,
+        1549,
+        11066
+      ],
+      "batch_sha256": "db3ffb8cb7575b9100b60a323fe7c684a7b3ddd5c03bdd044c2d757dbb780275",
+      "target_tokens": 89
+    },
+    {
+      "step": 2,
+      "sample_indices": [
+        11108,
+        12793,
+        3124,
+        6112
+      ],
+      "batch_sha256": "b8d48cfd1faf0454c07fc09fd44a9405c845c8f118c98ecfc84dfdf13ff77aa9",
+      "target_tokens": 178
+    }
+  ]
+}

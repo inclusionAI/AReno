@@ -1,0 +1,104 @@
+{
+  "status": "CPU_VALIDATED_NO_FORMAL_GPU_RUN",
+  "distribution_files": {
+    "scripts/galore_sft/DATASET-LICENSE.md": {
+      "sha256": "d12d56207749fe17f3481f8c87afdda7f88caa133c0aa9628d407b2ed134ee25",
+      "bytes": 1571
+    },
+    "scripts/galore_sft/EVIDENCE.md": {
+      "sha256": "15d7725e1e4b0c63cbcace58fe206f0b8b41fb41bc85de4907b3dbd09c5d0bf1",
+      "bytes": 2566
+    },
+    "scripts/galore_sft/README.md": {
+      "sha256": "014f919cc7079e1c626bd05ec745c84b1de0f05297851ccf42e2569c24ce2fd6",
+      "bytes": 13235
+    },
+    "scripts/galore_sft/common.py": {
+      "sha256": "29ccd4fec4cf5b363b28ab95edca3e3f9e18e5ff052364e4309b9387ec85a2d4",
+      "bytes": 10025
+    },
+    "scripts/galore_sft/config.example.json": {
+      "sha256": "92bef245532beb2a2552d63c9682e810b8a3712a9c8e0f2df926676c2e519e65",
+      "bytes": 640
+    },
+    "scripts/galore_sft/config.scale2-all.example.json": {
+      "sha256": "7c421e3d9fcd64f44270657057b2c1635331cf66bd3486862141f91b7c6e281b",
+      "bytes": 705
+    },
+    "scripts/galore_sft/data-manifest.json": {
+      "sha256": "0998712c5a49f8fd5ae936324829461156f403e1a51e32cfb56c076aafa4178d",
+      "bytes": 1707
+    },
+    "scripts/galore_sft/eval.py": {
+      "sha256": "20d6a7719980dd6db92bf9a19a2535a50c2998beb01a81172cb7a2ed02f4900d",
+      "bytes": 990
+    },
+    "scripts/galore_sft/expected-summary.json": {
+      "sha256": "d136ea383395138b2c58650083aaabed14e293627a8502ff33ced2178fc25bc2",
+      "bytes": 9955
+    },
+    "scripts/galore_sft/frozen-ast-manifest.json": {
+      "sha256": "c722f8f8ea866bba6fbac3139db6a9916687834e1a08d8ff315666c8a0cc1bab",
+      "bytes": 1989
+    },
+    "scripts/galore_sft/input-manifest.example.json": {
+      "sha256": "b5230d1f0a7df03cdbe4082a8855afdcdca361e99f81ce994b6a8d3b252cda1f",
+      "bytes": 961
+    },
+    "scripts/galore_sft/prepare_data.py": {
+      "sha256": "afb4510dd6160e25f02322b7ad49d1bbad7a0961c71f5ef79a8632d01c431a39",
+      "bytes": 11448
+    },
+    "scripts/galore_sft/run-manifest.example.json": {
+      "sha256": "1c46df75fe760996ffc6113456716f961b0d30fc2453ba54c74d1a06299f7597",
+      "bytes": 1045
+    },
+    "scripts/galore_sft/train.py": {
+      "sha256": "1c33642207837f7d9ba16fbd3f554a2516143809a83467b5c930629dea83be69",
+      "bytes": 8834
+    },
+    "scripts/galore_sft/validation/README.md": {
+      "sha256": "f73f0304391d912183bef090989ede649a0bc7baafcbd20dca16ec40729bde0e",
+      "bytes": 283
+    },
+    "scripts/galore_sft/validation/cpu-tests.log": {
+      "sha256": "9ddacfc8f4c882e176fb18127bc604617042d926ee7fb9b7f38912c88ed565fa",
+      "bytes": 99
+    },
+    "scripts/galore_sft/validation/lint.log": {
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "bytes": 19
+    },
+    "scripts/galore_sft/validation/mathematical-ast-proof.json": {
+      "sha256": "3a4303f7e529d5f562f32e2efe268b98abc1991081b2669e830dae297587fc0f",
+      "bytes": 4566
+    },
+    "scripts/galore_sft/validation/offline-rebuild-proof.json": {
+      "sha256": "7c04c0daa981a25cc51762227335c130946af4a0341254c2f9633f6b7b567204",
+      "bytes": 2660
+    },
+    "tests/test_galore_sft_repro_cpu.py": {
+      "sha256": "4f4c8e3b6b641d466ca30c2144c0dfacc61b0066e78e3ef8d8eb1b708afb39ea",
+      "bytes": 11803
+    },
+    "scripts/galore_sft/config.scale1-all.example.json": {
+      "sha256": "3ddac6cddd1b0f0a6919cf7b83adcdedc0e60ef0e45fc1a06f3b49fb3c817eeb",
+      "bytes": 757
+    }
+  },
+  "total_uncompressed_bytes": 83107,
+  "raw_dataset_included": false,
+  "model_weights_included": false,
+  "runtime_source_changed": false,
+  "frozen_wrapper_lineage": {
+    "contract": "frozen-harness-v2-native-forward",
+    "wrapper_sha256": {
+      "common.py": "3248d7a542c8358ce7c78a5c6e264cde44cca136ec3e2238a41ad3824b21e424",
+      "train.py": "93cf64d6a6a3edd9cca3fc1e0752f298f482ba5539090de9d37415d393c07e4b",
+      "eval.py": "20d6a7719980dd6db92bf9a19a2535a50c2998beb01a81172cb7a2ed02f4900d"
+    },
+    "preparation_sha256": "a8f46818bfe8a08cb6ff3887feea2f0f98a1c79ceb91d0cb38c2cd2b35ba751e",
+    "note": "AST hashes captured before portability edits; this package has CPU equivalence checks only, no formal GPU results attributed to its entrypoints."
+  },
+  "notes": "Updated usage/examples for explicit selected scale1; training/evaluation mathematics unchanged. Original validation/source lineage remains recorded separately."
+}

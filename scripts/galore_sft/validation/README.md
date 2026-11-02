@@ -1,0 +1,1 @@
+CPU-only validation of portable entrypoints. All 18 tests passed, including the full pinned offline data replay and mocked three-update entrypoint smoke. These are not formal GPU training measurements. Original GPU wrapper lineage is recorded separately in frozen-ast-manifest.json.

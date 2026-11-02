@@ -1,0 +1,14 @@
+{
+  "status": "passed",
+  "timestamp_utc": "2026-11-02T01:05:31.602383+00:00",
+  "cpu_verifier_tests": 16,
+  "cpu_test_log": "cpu-tests.txt",
+  "cpu_test_log_sha256": "8cb22dbec18866b716aa62e619e7f738062667805e51e8eac0abb777061880a2",
+  "raw_sixcase_portable_audit": "passed",
+  "archive_repack": "all43 parts and manifest byte-identical",
+  "isolated_new_report_sphinx": "strict nitpicky HTML build zero warnings; historical doc reference is a stub",
+  "full_tree_sphinx_built": false,
+  "new_upstream_CI_claimed": false,
+  "runtime_changed": false,
+  "scope": "documentation and offline evidence tooling only"
+}

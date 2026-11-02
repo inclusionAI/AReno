@@ -167,6 +167,7 @@ class ConfigAndDataTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "linear_num_key_heads"):
             cfg.validate_tp(2)
 
+    @patch("areno.engine.config.torch.cuda.is_available", lambda: False)
     def test_engine_config_validates_devices_and_kv_block(self):
         """EngineConfig should reject invalid device layouts and KV block sizes."""
         model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
@@ -176,6 +177,7 @@ class ConfigAndDataTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "kv_block_size"):
             EngineConfig(model=model, tp_size=1, devices=[0], runtime=RuntimeConfig(kv_block_size=128))
 
+    @patch("areno.engine.config.torch.cuda.is_available", lambda: False)
     def test_engine_config_infers_dp_size(self):
         """DP size is inferred from device count divided by TP size."""
         model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
@@ -202,6 +204,7 @@ class ConfigAndDataTest(unittest.TestCase):
         EngineConfig(model=moe, devices=[0], runtime=moe_runtime)
         self.assertTrue(moe_runtime.rollout_routing_replay)
 
+    @patch("areno.engine.config.torch.cuda.is_available", lambda: False)
     def test_engine_config_resolves_sequence_parallel_override_before_model_config(self):
         model = ModelConfig(
             num_attention_heads=4,
@@ -221,6 +224,7 @@ class ConfigAndDataTest(unittest.TestCase):
         tp1 = EngineConfig(model=model, tp_size=1, devices=[0], sequence_parallel=True)
         self.assertFalse(tp1.effective_sequence_parallel)
 
+    @patch("areno.engine.config.torch.cuda.is_available", lambda: False)
     def test_engine_config_allows_replicated_kv_lora_targets(self):
         """Range-aware LoRA supports Qwen3 KV replication across wider TP."""
         model = ModelConfig(

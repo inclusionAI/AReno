@@ -444,7 +444,10 @@ def save_checkpoint_weights(
     saved_path = writer.finish()
     if copy_passthrough and saved_path is not None and source_path is not None:
         copy_source_passthrough_weights(
-            source_path, saved_path, protected_prefix=_protected_prefix_from_top_level(spec.top_level)
+            source_path,
+            saved_path,
+            protected_prefix=_protected_prefix_from_top_level(spec.top_level),
+            excluded_keys={spec.top_level.lm_head_key},
         )
     return saved_path
 
@@ -474,6 +477,7 @@ def copy_source_passthrough_weights(
     protected_prefix: str,
     *,
     allowed_keys: set[str] | None = None,
+    excluded_keys: set[str] | None = None,
 ) -> None:
     """Copy source checkpoint tensors outside the runtime trunk into output.
 
@@ -493,11 +497,19 @@ def copy_source_passthrough_weights(
     source_weight_map = _read_weight_map(source)
     output_index = json.loads(output_index_path.read_text())
     output_weight_map = dict(output_index["weight_map"])
+    # The runtime owns the LM head even when a tied alias is intentionally
+    # omitted from output. It must not be resurrected from stale source values.
+    excluded_keys = excluded_keys or set()
     if allowed_keys is None:
         passthrough_keys = [
-            key for key in source_weight_map if not key.startswith(protected_prefix) and key not in output_weight_map
+            key
+            for key in source_weight_map
+            if not key.startswith(protected_prefix) and key not in output_weight_map and key not in excluded_keys
         ]
     else:
+        excluded_overlap = sorted(allowed_keys & excluded_keys)
+        if excluded_overlap:
+            raise ValueError(f"approved passthrough tensor is runtime-owned: {excluded_overlap[0]}")
         missing = sorted(allowed_keys - set(source_weight_map))
         if missing:
             raise ValueError(f"source checkpoint is missing approved passthrough tensor {missing[0]}")

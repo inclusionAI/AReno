@@ -1,0 +1,26 @@
+{
+  "status": "passed",
+  "return_code": 0,
+  "error": null,
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_deferred_projection_reference_cuda.py",
+    "tests/test_qwen3_tied_weights_cuda.py",
+    "-q",
+    "-p",
+    "no:cacheprovider"
+  ],
+  "gpu": 1,
+  "uuid": "GPU-d78c0eae-9ae7-3849-fa3d-f092f7502900",
+  "cpu_affinity": [
+    40,
+    41,
+    42,
+    43
+  ],
+  "pid": 3566894,
+  "birth": 1793424174.45,
+  "wall_seconds": 6.346387850004248
+}

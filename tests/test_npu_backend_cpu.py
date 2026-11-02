@@ -172,7 +172,9 @@ def test_npu_initializes_shared_engine_with_tp_dp_and_optimizer(monkeypatch, opt
 
 
 @pytest.mark.parametrize("device_type,worker_cls", [("cuda", ArenoWorker), ("npu", NpuWorker)])
-def test_shared_engine_selects_device_worker_without_starting_processes(device_type, worker_cls):
+def test_shared_engine_selects_device_worker_without_starting_processes(monkeypatch, device_type, worker_cls):
+    # Worker-class selection is independent of the host's visible CUDA devices.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     config = EngineConfig(
         model=ModelConfig(),
         runtime=RuntimeConfig(device_type=device_type),

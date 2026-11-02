@@ -1,0 +1,36 @@
+{
+  "status": "portable_fusion_optin_cpu_qualified_only",
+  "timestamp": "2026-10-31T05:42:15.855366+00:00",
+  "cpu_test_count": 20,
+  "gpu_training_launched": false,
+  "runtime_modified": false,
+  "git_commit_created": false,
+  "checks": [
+    "CUDAhidden20CPUtests passed",
+    "pinnedRuff0.15.17 lintpassed",
+    "pinnedRuff0.15.17 formatcheckpassed"
+  ],
+  "new_contracts": [
+    "explicitCLIdefaultfalse",
+    "onlydeferredmethodallowed",
+    "registeredflagsetbeforehelperimports",
+    "workeractualpolicycheckedbeforenativeupdate",
+    "actualpolicyrecordedandcheckedoneveryupdate",
+    "existing402performancebudgetunchanged"
+  ],
+  "scientific_scope": "Runner option only. Frozen5d scale1.0 performance provenance and later explicitFP32cast/PTX bridge are documented dependencies; no new8bit orqualityclaim.",
+  "files": {
+    "scripts/galore_deferred/run.py": {
+      "sha256": "69ceb8ca6b11740298d2dbcca529919fea850d53d97dc4bbc0f3973ffd9f8a50",
+      "bytes": 15739
+    },
+    "scripts/galore_deferred/README.md": {
+      "sha256": "80a23d8ce9333768d2429a59be3dfb20489879cd68d2ec04d05766ef00b3dff7",
+      "bytes": 5595
+    },
+    "tests/test_galore_deferred_repro_cpu.py": {
+      "sha256": "ca9b71bef2c65ddb617bb480e08cf6ae5b10c9901e5b7a96187bf1281cbde8d6",
+      "bytes": 9884
+    }
+  }
+}

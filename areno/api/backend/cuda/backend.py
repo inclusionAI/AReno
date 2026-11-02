@@ -15,6 +15,7 @@ the thin glue that:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
@@ -174,6 +175,10 @@ class CudaBackend(Backend):
                 reference_mode=cfg.reference_mode,
                 base_model_name_or_path=cfg.base_model_name_or_path,
             )
+            if cfg.optimizer.get("resume_training_state", False):
+                metadata_path = Path(cfg.model_path or ctx.model_path) / "training_state.json"
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                ctx.global_step = int(metadata["global_step"]) - 1
             return
         self._policy_sync_bucket_bytes = cfg.policy_sync_bucket_mb * 1024 * 1024
 

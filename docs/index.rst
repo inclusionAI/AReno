@@ -32,6 +32,13 @@ AReno documentation
    Native LoRA <concepts/native-lora>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
+   GaLore AdamW <concepts/galore>
+   GaLore deferred Qwen3-1.7B measurements <reports/galore-deferred-qwen3>
+   GaLore Qwen3-1.7B capacity boundaries <reports/galore-capacity-qwen3>
+   GaLore final-source three-seed quality <reports/galore-final-quality-qwen3>
+   GaLore common-runtime paired quality <reports/galore-p1-controlled-quality>
+   GaLore selected Qwen3 measurements <reports/galore-sft-frontier>
+   GaLore historical measurements <reports/galore-sft-qwen3>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::

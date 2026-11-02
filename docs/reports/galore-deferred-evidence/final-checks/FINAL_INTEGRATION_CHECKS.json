@@ -1,0 +1,33 @@
+{
+  "status": "final_repaired_runtime_checks_passed",
+  "runtime_sha256": "337c7612282e8fc5254d890ac7659c88c2f38a8e8430d5b3cdc84f6dc96b28b8",
+  "cpu": {
+    "passed": 1870,
+    "skipped": 28,
+    "subtests": 12
+  },
+  "cuda": {
+    "passed": 108,
+    "includes_fused_regressions": 67
+  },
+  "cuda_independent_fused_flag": {
+    "passed": 12,
+    "actually_fused_bf16_cases": 6,
+    "fp32_fallback_cases": 6,
+    "scientific_cases_overlap_default_flag_reference": true
+  },
+  "source_bridge": "FINAL_SOURCE_BRIDGE.json",
+  "PTX_parent_review": "PARENT_PTX_REVIEW.json",
+  "native": "f2d49f7b8ffd2fccbfce0f6eeb3108088be7834627b88c9ad71a0eb486f4d226",
+  "large_model_training": "no additional final-source native quality/timing; frozenABBA unchanged",
+  "final_test_format_bridge": "TEST_FORMAT_BRIDGE.json",
+  "postformat_cuda_rerun": {
+    "passed": 67,
+    "overlaps_initial108": true
+  },
+  "ruff": {
+    "check": "passed",
+    "format": "461 files already formatted",
+    "version": "0.15.17"
+  }
+}

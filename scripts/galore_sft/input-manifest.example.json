@@ -1,0 +1,21 @@
+{
+  "repo_git_commit": "RECORD_YOUR_EXACT_COMMIT",
+  "model": {
+    "path": "assets/Qwen3-0.6B",
+    "identity": "Qwen3-0.6B; tied596049920-parameters; BF16-with-FP32-norms",
+    "files_sha256": {
+      "config.json": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+      "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+      "model.safetensors": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+    }
+  },
+  "dataset": {
+    "source": "ModelScope",
+    "repo_id": "AI-ModelScope/databricks-dolly-15k",
+    "revision": "40789acc12fc986e9145f87d159f19e2f1d75c6a",
+    "raw_path": "artifacts/raw/dolly/databricks-dolly-15k.jsonl",
+    "raw_sha256": "2df9083338b4abd6bceb5635764dab5d833b393b55759dffb0959b6fcbf794ec",
+    "prepared_manifest": "scripts/galore_sft/data-manifest.json"
+  }
+}

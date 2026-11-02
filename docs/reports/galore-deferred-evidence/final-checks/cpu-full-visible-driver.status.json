@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "return_code": 0,
+  "error": null,
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/",
+    "-k",
+    "cpu",
+    "-q",
+    "-p",
+    "no:cacheprovider"
+  ],
+  "gpu": 1,
+  "uuid": "GPU-d78c0eae-9ae7-3849-fa3d-f092f7502900",
+  "cpu_affinity": [
+    40,
+    41,
+    42,
+    43
+  ],
+  "pid": 3538399,
+  "birth": 1793424066.8,
+  "wall_seconds": 96.42301510809921
+}

@@ -1,0 +1,25 @@
+{
+  "status": "passed",
+  "return_code": 0,
+  "error": null,
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_fused_scale_writeback_cuda.py",
+    "-q",
+    "-p",
+    "no:cacheprovider"
+  ],
+  "gpu": 3,
+  "uuid": "GPU-3afb1149-27c9-9142-da5b-9738e1520649",
+  "cpu_affinity": [
+    52,
+    53,
+    54,
+    55
+  ],
+  "pid": 421795,
+  "birth": 1793428292.81,
+  "wall_seconds": 5.310203442000784
+}

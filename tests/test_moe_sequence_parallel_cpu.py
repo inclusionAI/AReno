@@ -42,6 +42,7 @@ def test_qwen3_moe_gathers_before_routing_and_scatters_complete_expert_output(mo
         ),
     )
     mlp = SimpleNamespace(
+        routing_layer_slot=0,
         gate=torch.zeros((2, 2)),
         top_k=1,
         norm_topk_prob=True,
@@ -79,6 +80,7 @@ def test_qwen35_moe_gathers_once_and_scatters_complete_output(monkeypatch):
         return states * 3
 
     mlp = SimpleNamespace(
+        routing_layer_slot=0,
         gate=torch.zeros((2, 2)),
         top_k=1,
         norm_topk_prob=True,
@@ -143,6 +145,7 @@ def test_bailing_router_load_ignores_alignment_tokens(monkeypatch):
     for module in (bailing, bailing_v3):
         monkeypatch.setattr(module, "_areno_linear_no_compile", lambda x, weight: x)
         gate = SimpleNamespace(
+            routing_layer_slot=0,
             weight=torch.zeros((2, 2)),
             num_experts=2,
             local_tokens_per_expert=torch.zeros(2),

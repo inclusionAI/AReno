@@ -1,0 +1,30 @@
+{
+  "status": "passed",
+  "return_code": 0,
+  "error": null,
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/test_galore_cuda.py",
+    "tests/test_galore_streamed_cuda.py",
+    "tests/test_fp32_master_optimizer_cuda.py",
+    "tests/test_deferred_projection_reference_cuda.py",
+    "tests/test_qwen3_tied_weights_cuda.py",
+    "tests/test_fused_scale_writeback_cuda.py",
+    "-q",
+    "-p",
+    "no:cacheprovider"
+  ],
+  "gpu": 3,
+  "uuid": "GPU-3afb1149-27c9-9142-da5b-9738e1520649",
+  "cpu_affinity": [
+    52,
+    53,
+    54,
+    55
+  ],
+  "pid": 3906235,
+  "birth": 1793425485.29,
+  "wall_seconds": 7.382178324973211
+}

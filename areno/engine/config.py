@@ -9,6 +9,7 @@ groups consumed by the worker cluster.
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -39,6 +40,22 @@ class OptimizerConfig:
     grad_clip_norm: float | None = None
     adam_8bit: bool = False
     adam_4bit: bool = False
+    galore_rank: int | None = None
+    galore_update_proj_gap: int = 200
+    galore_scale: float = 1.0
+    galore_projector_backend: Literal["svd", "recycled"] = "svd"
+    galore_projector_oversampling: int = 16
+    galore_projector_iterations: int = 1
+    galore_projector_seed: int = 0
+    galore_projector_final_qr: bool = True
+    galore_compact_master: bool = False
+    galore_tile_rows: int = 0
+    galore_release_gradients: bool = False
+    galore_fused_writeback: bool = False
+    galore_transport_moments: bool = False
+    galore_exclude_vocab: bool = False
+    resume_training_state: bool = False
+    save_training_state: bool = False
     paged: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
     unfreeze_multimodal_tower: bool = False
@@ -55,6 +72,44 @@ class OptimizerConfig:
     def __post_init__(self) -> None:
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("optimizer.adam_4bit and optimizer.adam_8bit are mutually exclusive")
+        if self.galore_rank is not None:
+            if isinstance(self.galore_rank, bool) or not isinstance(self.galore_rank, int) or self.galore_rank < 1:
+                raise ValueError("optimizer.galore_rank must be a positive integer")
+            if self.adam_4bit or self.adam_8bit or self.paged:
+                raise ValueError("GaLore cannot combine with low-bit or paged AdamW")
+        for name in (
+            "projector_final_qr",
+            "compact_master",
+            "release_gradients",
+            "fused_writeback",
+            "transport_moments",
+            "exclude_vocab",
+        ):
+            if not isinstance(getattr(self, f"galore_{name}"), bool):
+                raise ValueError(f"optimizer.galore_{name} must be a boolean")
+        if (
+            isinstance(self.galore_tile_rows, bool)
+            or not isinstance(self.galore_tile_rows, int)
+            or self.galore_tile_rows < 0
+        ):
+            raise ValueError("optimizer.galore_tile_rows must be a nonnegative integer")
+        if self.galore_projector_backend not in {"svd", "recycled"}:
+            raise ValueError("invalid GaLore projector backend")
+        for name, value, minimum in (
+            ("oversampling", self.galore_projector_oversampling, 0),
+            ("iterations", self.galore_projector_iterations, 1),
+            ("seed", self.galore_projector_seed, 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"invalid GaLore projector {name}")
+        if (
+            isinstance(self.galore_update_proj_gap, bool)
+            or not isinstance(self.galore_update_proj_gap, int)
+            or self.galore_update_proj_gap < 1
+            or not math.isfinite(self.galore_scale)
+            or self.galore_scale <= 0
+        ):
+            raise ValueError("GaLore refresh interval and scale must be positive")
 
 
 @dataclass(slots=True)
@@ -70,6 +125,7 @@ class RuntimeConfig:
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
+    profile_training: bool = False
     rollout_routing_replay: bool = False
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
@@ -351,6 +407,17 @@ class EngineConfig:
             raise ValueError("dp_size must equal len(devices) // tp_size")
         if self.dp_size < 1:
             raise ValueError("dp_size must be >= 1")
+        if self.optimizer.galore_rank is not None:
+            if self.tp_size != 1 or self.dp_size != 1 or self.runtime.device_type != "cuda":
+                raise ValueError("GaLore currently requires single-GPU CUDA training")
+            if self.lora is not None or self.model.num_experts is not None:
+                raise ValueError("GaLore currently supports dense full-parameter training only")
+            if self.runtime.optimizer_state_offload != "none" or not self.runtime.keep_rollout_state:
+                raise ValueError("GaLore currently requires resident optimizer state and keep_rollout_state=True")
+        if (self.optimizer.resume_training_state or self.optimizer.save_training_state) and (
+            self.tp_size != 1 or self.dp_size != 1 or self.lora is not None
+        ):
+            raise ValueError("training-state resume currently requires single-GPU full-parameter training")
         if self.policy_sync_bucket_mb < 1:
             raise ValueError("policy_sync_bucket_mb must be >= 1")
         if self.runtime.kv_block_size < 1:

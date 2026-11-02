@@ -14,6 +14,8 @@ def _run_offset_tp_broadcast(global_rank: int, port: int, output_queue) -> None:
     role = "train" if global_rank < 2 else "rollout"
     local_rank = global_rank if role == "train" else global_rank - 2
     context.init_process_group(
+        device=torch.device("cpu"),
+        backend="gloo",
         rank=local_rank,
         world_size=2,
         master_addr="127.0.0.1",

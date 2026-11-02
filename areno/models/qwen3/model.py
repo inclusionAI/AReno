@@ -368,10 +368,19 @@ class Qwen3ForCausalLM(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
         self.layers = nn.ModuleList([QwenDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        # Optional weight tying with embed_tokens is wired up by the runtime
-        # based on config.tie_word_embeddings; LM head allocates its own weight
-        # otherwise.
         self.lm_head = VocabParallelLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
+        if config.tie_word_embeddings:
+            embedding, head = self.embed_tokens, self.lm_head
+            if (
+                embedding.weight.shape != head.weight.shape
+                or embedding.weight.dtype != head.weight.dtype
+                or embedding.weight.device != head.weight.device
+                or (embedding.vocab_start, embedding.vocab_end) != (head.vocab_start, head.vocab_end)
+            ):
+                raise ValueError("Qwen3 tied embedding and LM head must have identical local vocabulary layouts")
+            # Share the Parameter, not just its initial values: autograd sums
+            # both uses and model.parameters() exposes one optimizer owner.
+            self.lm_head.weight = self.embed_tokens.weight
 
     def forward(
         self,

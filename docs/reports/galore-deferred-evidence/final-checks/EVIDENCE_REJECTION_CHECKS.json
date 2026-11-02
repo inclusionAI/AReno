@@ -1,0 +1,25 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "case": "independent_directory",
+      "passed": true
+    },
+    {
+      "case": "archive_tamper_rejected",
+      "passed": true,
+      "reason": "Archive identity mismatch: part-001.tar.xz"
+    },
+    {
+      "case": "final_check_tamper_rejected",
+      "passed": true,
+      "reason": "Final check identity mismatch: DEFAULT_OFF_INTEGRATED.json"
+    },
+    {
+      "case": "duplicate_chunk_rejected",
+      "passed": true,
+      "reason": "Duplicate chunk reference"
+    }
+  ],
+  "original_manifest_sha256": "7c3bf6cdb9bb2e3e9162a76a0f47ace3d9308c2f9b766fbd89cc77fc91a00248"
+}

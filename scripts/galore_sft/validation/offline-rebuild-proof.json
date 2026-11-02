@@ -1,0 +1,62 @@
+{
+  "status": "passed",
+  "files": {
+    "orders/seed0.json": {
+      "bytes": 70156,
+      "expected_sha256": "83bf7b85acbbb5e67611549aad6eba24b92812940886c1a04c3d50e485d75c57",
+      "actual_sha256": "83bf7b85acbbb5e67611549aad6eba24b92812940886c1a04c3d50e485d75c57",
+      "byte_identical": true
+    },
+    "orders/seed1.json": {
+      "bytes": 70156,
+      "expected_sha256": "f046c6413c5d35fbb0989f8d70384e20f0705384ed2df7f22bdfa5dc8fb2c2fc",
+      "actual_sha256": "f046c6413c5d35fbb0989f8d70384e20f0705384ed2df7f22bdfa5dc8fb2c2fc",
+      "byte_identical": true
+    },
+    "orders/seed2.json": {
+      "bytes": 70156,
+      "expected_sha256": "b760932900669af07ebacbdce1019a69e01aafc7f38fdd44705ce7ac4468b53f",
+      "actual_sha256": "b760932900669af07ebacbdce1019a69e01aafc7f38fdd44705ce7ac4468b53f",
+      "byte_identical": true
+    },
+    "test.jsonl": {
+      "bytes": 668982,
+      "expected_sha256": "cd19652bd5247d029a3a0489574578dc444dbeefd005f744d92d839167e4465f",
+      "actual_sha256": "cd19652bd5247d029a3a0489574578dc444dbeefd005f744d92d839167e4465f",
+      "byte_identical": true
+    },
+    "test.manifest.jsonl": {
+      "bytes": 309883,
+      "expected_sha256": "69059d1745e2d15d6ddda2a35ab377afb46ff43d4414655238aafea62287589a",
+      "actual_sha256": "69059d1745e2d15d6ddda2a35ab377afb46ff43d4414655238aafea62287589a",
+      "byte_identical": true
+    },
+    "train.jsonl": {
+      "bytes": 11599138,
+      "expected_sha256": "41765eb786b76354f4a7630d5101d46ba1ae08a2eabc35724db462f2d6d93447",
+      "actual_sha256": "41765eb786b76354f4a7630d5101d46ba1ae08a2eabc35724db462f2d6d93447",
+      "byte_identical": true
+    },
+    "train.manifest.jsonl": {
+      "bytes": 5661026,
+      "expected_sha256": "a181fd2ebf63c98712457ee2a6cd4cc8a0d5478b8f94efe53874ba20113d2a8a",
+      "actual_sha256": "a181fd2ebf63c98712457ee2a6cd4cc8a0d5478b8f94efe53874ba20113d2a8a",
+      "byte_identical": true
+    },
+    "validation.jsonl": {
+      "bytes": 605038,
+      "expected_sha256": "eb4b9a0ba0c1343c4fba7c2700f57f0f3a830d9e4df92e333064dad615edd53e",
+      "actual_sha256": "eb4b9a0ba0c1343c4fba7c2700f57f0f3a830d9e4df92e333064dad615edd53e",
+      "byte_identical": true
+    },
+    "validation.manifest.jsonl": {
+      "bytes": 295041,
+      "expected_sha256": "6ea2ea7f286bd8608c27d2b03aee019e2fcbc2ce885b356d94c398535ef913d4",
+      "actual_sha256": "6ea2ea7f286bd8608c27d2b03aee019e2fcbc2ce885b356d94c398535ef913d4",
+      "byte_identical": true
+    }
+  },
+  "stable_summary_identical": true,
+  "raw_sha256": "2df9083338b4abd6bceb5635764dab5d833b393b55759dffb0959b6fcbf794ec",
+  "modelscope_revision": "40789acc12fc986e9145f87d159f19e2f1d75c6a"
+}

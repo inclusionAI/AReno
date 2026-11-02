@@ -32,6 +32,11 @@ def make_train_pack(seqs: list[TrainSequence], *, include_routing_replay: bool =
         "logprobs": pad_rows([seq.logprobs for seq in seqs], dtype=torch.float32, width=max_len),
         "advantages": _make_advantages(seqs, prompt_mask, loss_mask, max_len),
     }
+    # Full values opt into diagnostics, including explicitly supplied zeros.
+    # Their provenance remains the caller's responsibility; padded defaults
+    # and partially populated batches must not look like scored logprobs.
+    if all(isinstance(seq.logprobs, list) and len(seq.logprobs) == len(seq.tokens) for seq in seqs):
+        pack["_sft_logprob_diagnostics"] = True
     if loss_mask is not None:
         pack["loss_mask"] = loss_mask
     for key, values in (

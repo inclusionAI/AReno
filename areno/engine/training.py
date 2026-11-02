@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import torch
 import torch.distributed as dist
@@ -68,22 +69,51 @@ class TrainingManager:
                     # Prime a two-bucket window while forward/backward runs;
                     # step() keeps that bounded lookahead moving.
                     prefetch_state()
+        deferred = bool(getattr(worker.optimizer, "_deferred_projection", False))
+        if deferred:
+            ctx = get_tp_context()
+            if len(packs) != 1 or accumulation_steps != 1:
+                raise ValueError("deferred projection requires one microbatch before training starts")
+            if ctx.world_size != 1 or ctx.dp_size != 1 or worker.config.model.model_type != "qwen3":
+                raise ValueError("deferred prototype supports single-GPU dense Qwen3 only")
+            active_multimodal = any(
+                getattr(parameter, "_areno_lr_group", None) in worker.multimodal_lr_schedules
+                for parameter in worker.model.parameters()
+            )
+            if worker.config.runtime.compile_model or active_multimodal or offload_mode != "none":
+                raise ValueError("deferred prototype rejects compilation, multimodal groups and offload")
         worker.optimizer.zero_grad(set_to_none=True)
+        if deferred:
+            worker.optimizer.begin_deferred_projection(micro_batches=len(packs), reentrant=False)
         results = []
         try:
             for index, data_pack_shards in enumerate(packs):
                 group_start = (index // accumulation_steps) * accumulation_steps
                 group_size = min(accumulation_steps, len(packs) - group_start)
                 allow_step = (index + 1) % accumulation_steps == 0 or index == len(packs) - 1
-                results.append(
-                    self._train_step(
-                        data_pack_shards,
-                        allow_step=allow_step,
-                        grad_scale=group_size,
-                    )
+                profile = bool(getattr(worker.config.runtime, "profile_training", False))
+                if profile:
+                    torch.cuda.synchronize(worker.device)
+                    torch.cuda.reset_peak_memory_stats(worker.device)
+                    started = time.perf_counter()
+                result = self._train_step(
+                    data_pack_shards,
+                    allow_step=allow_step,
+                    grad_scale=group_size,
                 )
+                if profile:
+                    torch.cuda.synchronize(worker.device)
+                    if result is not None:
+                        result["metrics"].update(
+                            cuda_peak_allocated_bytes=torch.cuda.max_memory_allocated(worker.device),
+                            cuda_peak_reserved_bytes=torch.cuda.max_memory_reserved(worker.device),
+                            cuda_step_time_s=time.perf_counter() - started,
+                        )
+                results.append(result)
             return results
         finally:
+            if deferred:
+                worker.optimizer.abort_deferred_projection()
             if offload_mode != "none":
                 worker.optimizer.offload_state(
                     mode=offload_mode,
@@ -104,6 +134,9 @@ class TrainingManager:
         """Run a single actor forward + backward microbatch."""
 
         worker = self.worker
+        deferred = bool(getattr(worker.optimizer, "_deferred_projection", False))
+        if deferred and (not allow_step or grad_scale != 1 or not worker.optimizer._deferred_active):
+            raise ValueError("deferred projection requires one complete supported backward")
         ctx = get_tp_context()
         if not worker._train_state_ready:
             worker._prepare_for_train()
@@ -160,7 +193,9 @@ class TrainingManager:
             raise TypeError("train_loss_fn must return a torch.Tensor")
         (loss / max(grad_scale, 1)).backward()
         stream_gradient_shards = bool(getattr(worker.optimizer, "stream_gradient_shards", False))
-        if stream_gradient_shards:
+        if deferred:
+            worker.optimizer.finish_deferred_backward()
+        elif stream_gradient_shards:
             # AdamW4bit consumes each microbatch directly into compact BF16 DP
             # shards. This avoids materializing the full-model FP32 main_grad
             # copy that otherwise dominates optimizer-step peak memory.
@@ -176,7 +211,7 @@ class TrainingManager:
         clipped_grad_norm = None
         optimizer_state_metrics = None
         if stepped:
-            if not stream_gradient_shards:
+            if not stream_gradient_shards and not deferred:
                 self._sync_data_parallel_gradients()
                 self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
@@ -185,7 +220,9 @@ class TrainingManager:
                 for group in worker.multimodal_lr_schedules
                 if any(getattr(param, "_areno_lr_group", None) == group for param in worker.model.parameters())
             )
-            if stream_gradient_shards:
+            if deferred:
+                grad_norms = worker.optimizer.deferred_grad_norms(multimodal_groups)
+            elif stream_gradient_shards:
                 grad_norms = _grad_norms_from_shards(worker.optimizer.grad_shards(), multimodal_groups)
             else:
                 grad_norms = _grad_norms(worker.model.parameters(), multimodal_groups)
@@ -195,7 +232,9 @@ class TrainingManager:
             )
             clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
-                if stream_gradient_shards:
+                if deferred:
+                    worker.optimizer.clip_deferred_gradients(grad_norm, worker.grad_clip_norm)
+                elif stream_gradient_shards:
                     clip_coefficient = float(worker.grad_clip_norm) / (grad_norm + 1.0e-6) if grad_norm > 0.0 else 1.0
                     if clip_coefficient < 1.0:
                         worker.optimizer.scale_gradients(clip_coefficient)
@@ -212,6 +251,9 @@ class TrainingManager:
                 optimizer_state_metrics = {f"adam8_{name}": value for name, value in state_memory_metrics().items()}
             elif callable(state_memory_metrics) and str(state_quantizer).startswith("signed-de4/"):
                 optimizer_state_metrics = {f"adam4_{name}": value for name, value in state_memory_metrics().items()}
+            elif callable(state_memory_metrics) and worker.config.optimizer.galore_rank is not None:
+                optimizer_state_metrics = {f"galore_{name}": value for name, value in state_memory_metrics().items()}
+                optimizer_state_metrics["galore_projection_refresh"] = float(worker.optimizer.last_projection_refresh)
             worker.optimizer.zero_grad(set_to_none=True)
             worker._global_step += 1
             if worker.adapter_registry is not None:

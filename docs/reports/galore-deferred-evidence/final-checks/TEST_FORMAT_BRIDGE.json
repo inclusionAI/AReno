@@ -1,0 +1,6 @@
+{
+  "AST_equal": true,
+  "reason": "Use final repository Ruff line-length configuration; qualified original retained unchanged",
+  "original_sha256": "19d3918a354052d3bab9223ff91d3a24acab313b916fcb6fd7bc6bf82c455611",
+  "final_sha256": "22082050464a8cfa1e935f8fe50c221c3f5756f073e03d987e4ed7fc623727bf"
+}

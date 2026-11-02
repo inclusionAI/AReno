@@ -1,0 +1,46 @@
+{
+  "status": "passed",
+  "cases": 6,
+  "training_updates": 24576,
+  "updates_per_case": 4096,
+  "examples_per_validation": 708,
+  "response_targets_per_validation": 52181,
+  "runtime_sha256": "230fd97515ad044ebe075a011fed96f29ef7fa93aaac31147d8ec3fca3e4d668",
+  "native_sha256": "f2d49f7b8ffd2fccbfce0f6eeb3108088be7834627b88c9ad71a0eb486f4d226",
+  "raw_response_nll_recomputed": true,
+  "all_completed_worker_score_train_records_checked": true,
+  "old_completed3_unchanged": true,
+  "paired_seeds": [
+    {
+      "seed": 0,
+      "gpu": 1,
+      "port640_nll": 1.9373215776805608,
+      "deferred647_nll": 1.9113130060829269,
+      "relative_nll_difference_percent": -1.3425015184506672
+    },
+    {
+      "seed": 1,
+      "gpu": 2,
+      "port640_nll": 1.9336942296165118,
+      "deferred647_nll": 1.9083729110300782,
+      "relative_nll_difference_percent": -1.3094789340843849
+    },
+    {
+      "seed": 2,
+      "gpu": 3,
+      "port640_nll": 1.932742129106716,
+      "deferred647_nll": 1.9072118187363727,
+      "relative_nll_difference_percent": -1.3209372314010093
+    }
+  ],
+  "mean_response_token_nll": {
+    "port640": 1.9345859788012627,
+    "deferred647": 1.9089659119497926
+  },
+  "relative_mean_nll_difference_percent": -1.3243178195339378,
+  "untouched_PR640_end_to_end": false,
+  "historical_adamw_gate_retested": false,
+  "fresh_8bit_quality_comparison": false,
+  "token_payload_replayed_offline": false,
+  "archived_code_executed": false
+}
