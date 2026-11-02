@@ -69,12 +69,12 @@ def sampling_probs(
         # Same truncation rule as `_sample`: sort descending, drop tokens past
         # top-k and tokens whose exclusive prefix mass already exceeds top-p,
         # then scatter the renormalized tail back into vocab order.
-        probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+        probs_sort, probs_idx = probs.sort(dim=-1, descending=True, stable=True)
         if params.top_k > 0:
             probs_sort[:, min(params.top_k, vocab) :] = 0.0
         if params.top_p < 1.0:
-            probs_sum = torch.cumsum(probs_sort, dim=-1)
-            probs_sort[(probs_sum - probs_sort) > params.top_p] = 0.0
+            probs_sum = torch.cumsum(probs_sort.double(), dim=-1)
+            probs_sort[(probs_sum - probs_sort.double()) > params.top_p] = 0.0
         probs_sort = _renormalize_or_one_hot(probs_sort, torch.zeros_like(fallback))
         probs = torch.zeros_like(probs).scatter_(-1, probs_idx, probs_sort)
     return probs
