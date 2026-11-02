@@ -97,6 +97,21 @@ def canonical_model_path(path: str | None) -> str | None:
 def build_optimizer(params, optimizer_config, ctx, *, lr: float | None = None):
     """Construct the configured DP-sharded optimizer implementation."""
 
+    if optimizer_config.galore_rank is not None:
+        if ctx.world_size != 1 or ctx.dp_size != 1:
+            raise ValueError("GaLore supports single-GPU training only (tp_size=1 and dp_size=1)")
+        from areno.engine.optim.galore import GaLoreAdamW
+
+        return GaLoreAdamW(
+            params,
+            lr=optimizer_config.lr if lr is None else float(lr),
+            betas=optimizer_config.betas,
+            weight_decay=optimizer_config.weight_decay,
+            rank=optimizer_config.galore_rank,
+            update_proj_gap=optimizer_config.galore_update_proj_gap,
+            scale=optimizer_config.galore_scale,
+            bucket_numel=optimizer_config.fp32_master_bucket_numel,
+        )
     if optimizer_config.adam_4bit:
         optimizer_cls = AdamW4bit
     elif optimizer_config.adam_8bit:

@@ -33,6 +33,8 @@ AReno documentation
    JEV <concepts/jev>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
+   GaLore AdamW <concepts/galore>
+   GaLore Results <concepts/galore-results>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::

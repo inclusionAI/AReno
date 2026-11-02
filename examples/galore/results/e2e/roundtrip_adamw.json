@@ -1,0 +1,11 @@
+{
+  "restored_step": 4,
+  "optimizer_state": {
+    "compared_tensors": 400,
+    "only_in_first": [],
+    "only_in_second": [],
+    "bitwise_equal_tensors": 400,
+    "max_abs_diff": 0.0,
+    "first_mismatches": []
+  }
+}
