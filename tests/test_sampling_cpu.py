@@ -84,3 +84,26 @@ class SamplingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_pivot_cpu_fallback():
+    assert not sampling._pivot_supported(torch.ones(2, 32))
+
+
+def test_combined_uses_original_mass_cpu():
+    # top-k mass=.7 < top-p=.8: both tokens survive (no renormalization).
+    logits = torch.tensor([[0.4, 0.3, 0.2, 0.1]]).log()
+    params = SamplingParams(temperature=1.0, top_k=2, top_p=0.8)
+    gen = torch.Generator().manual_seed(634)
+    draws = [sampling._sample(logits, params, logits.device, generator=gen).item() for _ in range(200)]
+    assert set(draws) == {0, 1}
+
+
+def test_strict_nucleus_boundary_and_stable_ties_cpu():
+    from areno.engine.runtime.speculative import sampling_probs
+
+    logits = torch.zeros(1, 4)
+    probs = sampling_probs(logits, SamplingParams(temperature=1.0, top_p=0.5), (), torch.zeros(1))
+    torch.testing.assert_close(probs, torch.tensor([[1 / 3, 1 / 3, 1 / 3, 0.0]]))
+    token = sampling._sample(logits, SamplingParams(temperature=1.0, top_k=1), logits.device)
+    assert token.item() == 0
