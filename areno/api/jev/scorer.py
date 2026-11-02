@@ -15,43 +15,39 @@ def validate_question(qid: str, question: dict[str, Any]) -> None:
         raise ValueError("question ids and bodies must be nonempty strings and objects")
     if set(question) - {"type", "instructions", "criteria"}:
         raise ValueError(f"question {qid}: unsupported fields")
-    if not isinstance(question.get("instructions"), str) or not question["instructions"].strip():
-        raise ValueError(f"question {qid}: instructions must be nonempty text")
+    instructions = question.get("instructions")
+    if not (isinstance(instructions, str) and instructions.strip() or isinstance(instructions, dict) and instructions):
+        raise ValueError(f"question {qid}: instructions must be nonempty text or an object")
     kind, criteria = question.get("type"), question.get("criteria")
     if kind == "choice":
         if not isinstance(criteria, dict) or not 2 <= len(criteria) <= 255:
             raise ValueError(f"question {qid}: choice requires 2-255 candidates")
-        if any(
-            not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
-            for k, v in criteria.items()
-        ):
-            raise ValueError(f"question {qid}: candidate ids and descriptions must be nonempty text")
+        if any(not isinstance(k, str) or not k.strip() for k in criteria):
+            raise ValueError(f"question {qid}: candidate ids must be nonempty text")
     elif kind == "score":
         if not isinstance(criteria, list) or not 2 <= len(criteria) <= 10:
             raise ValueError(f"question {qid}: score requires 2-10 ordered levels")
-        if any(not isinstance(v, str) or not v.strip() for v in criteria):
-            raise ValueError(f"question {qid}: score levels must be nonempty text")
     elif kind == "noul":
-        if criteria is not None and (
-            not isinstance(criteria, dict)
-            or set(criteria) - {"true", "false"}
-            or any(not isinstance(v, str) or not v.strip() for v in criteria.values())
-        ):
+        if criteria is not None and (not isinstance(criteria, dict) or set(criteria) - {"true", "false"}):
             raise ValueError(f"question {qid}: noul criteria may contain only true/false descriptions")
     else:
         raise ValueError(f"question {qid}: type must be choice, score, or noul")
+    try:
+        json.dumps({"instructions": instructions, "criteria": criteria}, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"question {qid}: instructions and criteria must contain JSON values") from exc
 
 
 def render_state(state: Any) -> str:
-    if isinstance(state, str) and state.strip():
+    if isinstance(state, str):
         # Match training's canonical serialization when the state is JSON text.
         try:
             return json.dumps(json.loads(state), ensure_ascii=False, sort_keys=True)
         except ValueError:
             return state
-    if isinstance(state, dict | list) and state:
+    if isinstance(state, dict | list):
         return json.dumps(state, ensure_ascii=False, sort_keys=True)
-    raise ValueError("state must be nonempty text, object, or list")
+    raise ValueError("state must be text, object, or list")
 
 
 def answer_from_logits(question: dict[str, Any], logits: Any, temperature: float) -> dict[str, Any]:

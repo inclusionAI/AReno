@@ -2,12 +2,84 @@
 
 import math
 import threading
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
-from areno.api.jev.scorer import answer_from_logits, render_state, validate_question
+from areno.api.jev.schema import candidate_ids, record_to_questions
+from areno.api.jev.scorer import DecisionScorer, answer_from_logits, render_state, validate_question
 from areno.api.jev.serve import create_decision_app
+
+
+@pytest.mark.parametrize("state,expected", [("", ""), ("  ", "  "), ({}, "{}"), ([], "[]"), ("{}", "{}"), ("[]", "[]")])
+def test_prepare_accepts_empty_context(state, expected):
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: list(text.encode()))
+    scorer = object.__new__(DecisionScorer)
+    scorer.trainer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    scorer.max_length = 1024
+    question = {"type": "choice", "instructions": "Choose the smaller number.", "criteria": {"a": "1", "b": "2"}}
+
+    prepared, tokens = scorer.prepare(state, {"q": question})
+
+    texts = [bytes(row.tokens).decode() for row in prepared[0][2]]
+    assert len(texts) == 2 and tokens > 0
+    prefix = f"<|oj:state|>\n{expected}\n<|oj:question|>\nchoice: Choose the smaller number.\n"
+    assert all(text.startswith(prefix) for text in texts)
+
+
+@pytest.mark.parametrize("state", [None, 0, True, ()])
+def test_state_rejects_unsupported_types(state):
+    with pytest.raises(ValueError, match="state must"):
+        render_state(state)
+
+
+@pytest.mark.parametrize(
+    "kind,instructions,criteria",
+    [
+        ("choice", {"task": "Choose", "candidate": "Example"}, {"a": "A", "b": "B"}),
+        ("choice", {"policy": {"allow": ["a"]}}, {"a": "A", "b": "B"}),
+        ("choice", "Choose", {"a": {"move": "a1"}, "b": {"move": "b2"}}),
+        ("choice", "Choose", {"a": [1, 2, 3], "b": [4, 5, 6]}),
+        ("choice", "Choose", {"a": None, "b": None}),
+        ("choice", "Choose", {"a": 1, "b": 2}),
+        ("choice", "Choose", {"a": "", "b": False}),
+        ("score", {"task": "Rate"}, [{"level": "low"}, {"level": "high"}]),
+        ("score", "Rate", [0, 1, None]),
+        ("noul", {"task": "Check"}, {"false": [], "true": {"allowed": True}}),
+    ],
+)
+def test_structured_fields_match_training_prompts(kind, instructions, criteria):
+    question = {"type": kind, "instructions": instructions, "criteria": criteria}
+    ids = candidate_ids(question)
+    record = {
+        "id": "example",
+        "request": {"state": "context", "questions": {"q": question}},
+        "targets": {"q": {key: float(index == 0) for index, key in enumerate(ids)}},
+    }
+    training_row = record_to_questions(record)[0]
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: list(text.encode()))
+    scorer = object.__new__(DecisionScorer)
+    scorer.trainer = SimpleNamespace(get_tokenizer=lambda: tokenizer)
+    scorer.max_length = 1024
+
+    prepared, _ = scorer.prepare("context", {"q": question})
+
+    assert [bytes(row.tokens).decode() for row in prepared[0][2]] == [
+        training_row["prompt"] + candidate for candidate in training_row["candidates"]
+    ]
+
+
+@pytest.mark.parametrize("description", [{1, 2}, float("nan"), {"nested": [float("inf")]}])
+def test_candidate_descriptions_must_be_json(description):
+    with pytest.raises(ValueError, match="JSON"):
+        validate_question("q", {"type": "choice", "instructions": "Choose", "criteria": {"a": description, "b": "B"}})
+
+
+@pytest.mark.parametrize("instructions", [None, "", "  ", {}, [], 0, True])
+def test_instructions_require_nonempty_text_or_object(instructions):
+    with pytest.raises(ValueError, match="instructions"):
+        validate_question("q", {"type": "noul", "instructions": instructions})
 
 
 def test_decision_output_types_and_calibration():
