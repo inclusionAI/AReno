@@ -1,0 +1,19 @@
+scripts/sft/v4/run_areno_sft_fp32-v4-v1-3-refined-3-aig.md
+  s_f34a8ea9e558a1::t_4dfa6b3bcb97f2 13,101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "4f0049b687ecb3f3691f52aabff47493614c7c04",
+  "prompts": {},
+  "sessions": {
+    "s_f34a8ea9e558a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a177ec-4e8e-7bc0-b517-6de497cded00",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "成闲 <kyrie.wc@antgroup.com>"
+    }
+  }
+}
