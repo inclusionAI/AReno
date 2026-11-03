@@ -1,0 +1,19 @@
+scripts/validate_ling_recompute_config_cuda.py
+  s_7779b565419f0e::t_95773ce59e03fc 6,28-36,191-193,293,296
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "32615b94b5c6727955dc23cc4c9c14619cf2d60a",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
