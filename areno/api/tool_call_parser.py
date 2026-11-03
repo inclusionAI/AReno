@@ -63,6 +63,12 @@ def infer_tool_call_parser_name(trainer: Any) -> str:
     model_type = _read_model_type(model_path)
     haystack = " ".join([template, model_path, model_type])
 
+    if (
+        "gpt_oss" in haystack
+        or "gpt-oss" in haystack
+        or ("<|start|>" in template and ("<|call|>" in template or "<|ghissue|>" in template))
+    ):
+        return "gpt_oss"
     if "<|tool_call>" in template or "gemma4" in haystack or "gemma-4" in haystack:
         return "gemma4"
     if "minicpm" in haystack:
@@ -105,6 +111,50 @@ class QwenToolCallParser(JsonToolCallParser):
         if _chosen_tool_name(tools, tool_choice) is None:
             return ToolCallParseResult(normal_text=content)
         return super().parse(content, tools, tool_choice)
+
+
+class GptOssToolCallParser:
+    """Parse complete Harmony assistant-to-tool messages, including partial headers.
+
+    Generation starts after ``<|start|>assistant``. Tokenizers expose the
+    handoff as either ``<|call|>`` or ``<|ghissue|>``; channel markers likewise
+    have ``channel`` and ``meta_sep`` spellings. A JSON argument object alone
+    is not evidence of a tool call, even when a tool is forced.
+    """
+
+    name = "gpt_oss"
+    _header_start = re.compile(r"^(?:assistant\b)?\s*(?:to=|<\|(?:channel|meta_sep)\|>)")
+    _recipient = re.compile(r"(?:^|\s)to=([^\s<]+)")
+    _ending = re.compile(r"<\|(?:call|ghissue|end|return|fim_suffix)\|>")
+
+    def parse(self, content: str, tools: list[dict[str, Any]], tool_choice: Any) -> ToolCallParseResult:
+        if not tools or tool_choice == "none":
+            return ToolCallParseResult(normal_text=content)
+        names = _tool_names(tools)
+        calls = []
+        for index, frame in enumerate(content.split("<|start|>")):
+            header, separator, body = frame.partition("<|message|>")
+            header = header.strip()
+            if not separator or not self._header_start.match(header):
+                continue
+            if index > 0 and not re.match(r"assistant\b", header):
+                continue
+            recipient = self._recipient.search(header)
+            ending = self._ending.search(body)
+            if recipient is None or ending is None or ending[0] not in {"<|call|>", "<|ghissue|>"}:
+                continue
+            name = recipient[1]
+            if name not in names:
+                name = name.removeprefix("functions.")
+            if name not in names or not _tool_name_allowed(name, tools, tool_choice):
+                continue
+            try:
+                arguments = json.loads(body[: ending.start()])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(arguments, dict):
+                calls.append(_openai_tool_call(name, arguments))
+        return ToolCallParseResult(normal_text="" if calls else content, tool_calls=calls)
 
 
 class Gemma4ToolCallParser(JsonToolCallParser):
@@ -533,6 +583,7 @@ def _openai_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 register_tool_call_parser("json", JsonToolCallParser)
+register_tool_call_parser("gpt_oss", GptOssToolCallParser)
 register_tool_call_parser("qwen", QwenToolCallParser)
 register_tool_call_parser("qwen3", QwenToolCallParser)
 register_tool_call_parser("qwen3_5", QwenToolCallParser)

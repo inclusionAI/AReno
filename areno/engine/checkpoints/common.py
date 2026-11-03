@@ -92,6 +92,18 @@ class ParallelTensorSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PackedExpertTensorSpec:
+    """Expert-axis sharded matrices, transposed between native and HF layout.
+
+    Accepts dense HF tensors or MXFP4 *_blocks/*_scales pairs on load;
+    saves dense tensors so optimizer updates are not lost by requantization.
+    """
+
+    key: str
+    attr: str
+
+
+@dataclass(frozen=True, slots=True)
 class MergedColumnSpec:
     """Multiple HF column tensors loaded into one fused local module weight."""
 
@@ -694,6 +706,21 @@ def load_layer_op(
         if dst is not None and tensor_key in index.weight_map:
             dst.copy_(index.get_tensor(tensor_key).to(dtype=dst.dtype))
         return
+    if isinstance(op, PackedExpertTensorSpec):
+        dst = attr_path(module, op.attr)
+        tensor_key = key(op.key, prefix)
+        if tensor_key in index.weight_map:
+            value = _read_tp_shard(index, tensor_key, 0, rank, world_size).transpose(-1, -2)
+        else:
+            from areno.engine.checkpoints.mxfp4 import dequantize_mxfp4
+
+            blocks = _read_tp_shard(index, tensor_key + "_blocks", 0, rank, world_size)
+            scales = _read_tp_shard(index, tensor_key + "_scales", 0, rank, world_size)
+            value = dequantize_mxfp4(blocks, scales, dst.dtype, dst.device)
+        if tuple(value.shape) != tuple(dst.shape):
+            raise ValueError(f"checkpoint shape mismatch for {tensor_key}: {tuple(value.shape)} != {tuple(dst.shape)}")
+        dst.copy_(value.to(device=dst.device, dtype=dst.dtype))
+        return
     if isinstance(op, ParallelTensorSpec):
         _copy_parallel_tensor_from_index(
             attr_path(module, op.attr), index, key(op.key, prefix), op.dim, rank, world_size
@@ -741,6 +768,11 @@ def save_layer_op(
         value = optional_attr_path(module, op.attr)
         if value is not None:
             tensors[key(op.key, prefix)] = rank0_tensor(value)
+        return
+    if isinstance(op, PackedExpertTensorSpec):
+        tensors[key(op.key, prefix)] = gather_tensor_parallel_tensor(
+            attr_path(module, op.attr).transpose(-1, -2), dim=0
+        )
         return
     if isinstance(op, ParallelTensorSpec):
         save_parallel_tensors(tensors, module, prefix, (op,))

@@ -20,6 +20,8 @@ family is available on both backends.
      - Qwen3 text checkpoints.
    * - Qwen3-MoE
      - Routed expert checkpoints with Areno MoE kernels.
+   * - GPT-OSS
+     - GPT-OSS-20B checkpoints.
    * - Qwen3.5
      - Dense text and Qwen3.5-VL image checkpoints.
    * - Qwen3.5-MoE
