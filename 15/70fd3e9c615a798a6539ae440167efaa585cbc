@@ -1,0 +1,22 @@
+tests/test_moe_sequence_parallel_cpu.py
+  s_7779b565419f0e::t_69b6da82759560 46,84,149,166-167,210-211,305
+scripts/diagnose_recompute_numerics.py
+  s_7779b565419f0e::t_e339489ccbdc1d 1-119
+  s_7779b565419f0e::t_ef09c05f9f7304 120-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1570fd3e9c615a798a6539ae440167efaa585cbc",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
