@@ -5,6 +5,7 @@ remain visible and require a checkpoint until a recommendation is added here.
 """
 
 CHECKPOINTS = {
+    "gpt_oss": "openai/gpt-oss-20b",
     "qwen3": "Qwen/Qwen3-0.6B",
     "qwen3_moe": "Qwen/Qwen3-30B-A3B",
     "qwen3_5": "Qwen/Qwen3.5-0.8B",

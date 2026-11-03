@@ -115,16 +115,34 @@ def areno_fused_experts(
     config: FusedMoeConfig,
     *,
     activation: str = "silu",
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
+    activation_alpha: float = 1.702,
+    activation_limit: float = 7.0,
 ) -> torch.Tensor:
     if not on_kernel_device(hidden_states, w1, w2, topk_weights, topk_ids):
         raise RuntimeError("fused_experts requires CUDA or NPU tensors on the same device")
     if hidden_states.device.type == "npu":
+        if bias1 is not None or bias2 is not None or activation == "limited_swiglu":
+            raise NotImplementedError("biased limited-SwiGLU MoE currently requires CUDA")
         return extension(hidden_states.device).areno_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, config, activation=activation
         )
     from areno.accel.kernels.fused_moe import fused_experts
 
-    return fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, config, activation=activation)
+    return fused_experts(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        config,
+        activation=activation,
+        bias1=bias1,
+        bias2=bias2,
+        activation_alpha=activation_alpha,
+        activation_limit=activation_limit,
+    )
 
 
 def fused_moe_is_available():
