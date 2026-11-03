@@ -17,8 +17,6 @@ class JevMlxConfig(MlxConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.lora is None and not self.inference_only:
-            raise ValueError("JEV requires LoRA so the backbone and head train together")
         if not math.isfinite(self.head_lr) or self.head_lr <= 0:
             raise ValueError("head_lr must be positive")
         if self.max_seq_len < 2:
@@ -81,9 +79,7 @@ class JevTrainerConfig(TrainerConfig):
     def mlx_config(self) -> JevMlxConfig:
         base = TrainerConfig.mlx_config(self)
         values = {field.name: getattr(base, field.name) for field in fields(base)}
-        checkpoint = self.lora.adapter_path if self.lora is not None else None
-        if checkpoint is not None and not (Path(checkpoint) / "score_head.safetensors").is_file():
-            checkpoint = None
+        checkpoint = self.resume_checkpoint()
         return JevMlxConfig(
             **values, head_lr=self.head_lr, max_seq_len=self.max_seq_len, decision_checkpoint=checkpoint
         )

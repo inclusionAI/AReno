@@ -1,4 +1,4 @@
-"""MLX decision head, joint head/LoRA updates, and checkpoint persistence."""
+"""MLX decision head, joint backbone updates, and checkpoint persistence."""
 
 import math
 from pathlib import Path
@@ -146,11 +146,15 @@ def train_questions(
     grads = tree_map(lambda value: value / len(groups), accumulated)
     leaves = tree_flatten(grads)
     norms = {}
-    for name, predicate in (
+    parameter_groups = (
         ("head", lambda p: p.startswith("score_head.")),
         ("lora", lambda p: p.endswith(("lora_a", "lora_b"))),
-    ):
-        norms[name + "_grad_norm"] = mx.sqrt(sum((g.astype(mx.float32) ** 2).sum() for p, g in leaves if predicate(p)))
+        ("backbone", lambda p: not p.startswith("score_head.") and not p.endswith(("lora_a", "lora_b"))),
+    )
+    for name, predicate in parameter_groups:
+        norms[name + "_grad_norm"] = mx.sqrt(
+            sum(((g.astype(mx.float32) ** 2).sum() for p, g in leaves if predicate(p)), mx.array(0.0))
+        )
     grads, grad_norm = clip_grad_norm(grads, backend.config.optimizer.get("grad_clip_norm", 1.0))
     mx.eval(grad_norm, norms)
     if not all(math.isfinite(value) for value in stats_sum.values()) or not bool(mx.isfinite(grad_norm).item()):
@@ -158,15 +162,15 @@ def train_questions(
     before = dict(tree_flatten(backend.model.trainable_parameters()))
     apply_optimizer_update(backend.model, backend.optimizer, grads)
     after = dict(tree_flatten(backend.model.trainable_parameters()))
-    for name, predicate in (
-        ("head", lambda p: p.startswith("score_head.")),
-        ("lora", lambda p: p.endswith(("lora_a", "lora_b"))),
-    ):
+    for name, predicate in parameter_groups:
         norms[name + "_update_norm"] = mx.sqrt(
             sum(
-                ((after[p].astype(mx.float32) - value.astype(mx.float32)) ** 2).sum()
-                for p, value in before.items()
-                if predicate(p)
+                (
+                    ((after[p].astype(mx.float32) - value.astype(mx.float32)) ** 2).sum()
+                    for p, value in before.items()
+                    if predicate(p)
+                ),
+                mx.array(0.0),
             )
         )
     mx.eval(norms)

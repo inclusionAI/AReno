@@ -26,8 +26,8 @@ distribution :math:`t` and candidate scores :math:`s`, the default loss is:
 
 The optimizer averages this objective over questions. Both one-hot and soft
 targets are supported. With LoRA enabled, the decision head and backbone
-adapters train together while base weights stay frozen. CUDA also supports
-full-parameter training by omitting LoRA. The MLX training path requires LoRA.
+adapters train together while base weights stay frozen. Both CUDA and MLX
+support full-parameter training by omitting LoRA.
 
 The shared trainer, encoding, candidate packing, loss, and checkpoint metadata
 are reused across backends. Model execution stays in the backend's
@@ -99,9 +99,8 @@ can be added to select compressed AdamW state. Omitting these optimizer flags
 uses the native default AdamW. For full-parameter CUDA training, omit all
 LoRA and QLoRA options. Set ``--world-size 4 --tp-size 4`` for TP4.
 
-On Apple Silicon, use ``--backend mlx --world-size 1 --tp-size 1`` with LoRA.
-Add ``--q4`` for online 4-bit loading. This conversion happens in memory and
-preserves the source checkpoint files.
+On Apple Silicon, use ``--backend mlx --world-size 1 --tp-size 1``.
+Omit LoRA options for full-parameter training. ``--q4`` is supported.
 
 Batching controls have distinct units:
 
@@ -148,15 +147,14 @@ Continue an adapter checkpoint by passing its base model and
      --epochs 100 --max-steps 100 --save-interval 100
 
 Adapter metadata restores rank, alpha, targets, and quantization mode. To
-continue a full-parameter CUDA checkpoint, set ``--ckpt`` to its directory
+continue a full-parameter CUDA or MLX checkpoint, set ``--ckpt`` to its directory
 and omit adapter options. The head and dataset state are restored alongside
 the backbone or adapters. Dataset content, seed, and batch size must match
 the saved iterator state; incompatible resumes raise an error.
 
 ``--max-steps`` bounds additional updates in this invocation. The restored
-epoch must also remain below ``--epochs``. Optimizer moments are initialized
-again on restart; current checkpoints restore weights, step scheduling, and
-data position rather than complete optimizer state.
+epoch must also remain below ``--epochs``. Full-parameter MLX checkpoints
+also restore optimizer moments; other modes initialize them again.
 
 Serve typed decisions
 ---------------------

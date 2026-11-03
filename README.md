@@ -351,7 +351,7 @@ restore their quantization mode through `--lora-adapter-path`.
 
 #### JEV
 
-Train a decision head together with backbone LoRA using `--algo jev`:
+Train a decision head together using `--algo jev`:
 
 ```bash
 areno train \

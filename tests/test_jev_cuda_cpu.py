@@ -245,11 +245,3 @@ def test_scoring_does_not_run_the_training_mst_schedule(monkeypatch):
     with torch.no_grad():
         question_logits(candidate, rows)
     assert seen == [256, 0]
-
-
-def test_mlx_inference_can_load_full_backbone_checkpoint_without_lora():
-    from areno.api.jev import JevMlxConfig
-
-    assert JevMlxConfig(model_path="full-checkpoint", inference_only=True).lora is None
-    with pytest.raises(ValueError, match="requires LoRA"):
-        JevMlxConfig(model_path="base")
