@@ -1,0 +1,23 @@
+areno/accel/moe.py
+  s_7779b565419f0e::t_3dbe0280640c13 164
+tests/test_moe_topk_order_cuda.py
+  s_7779b565419f0e::t_fa1b9fbebbbdb4 66-103
+areno/accel/csrc/moe_permute.cu
+  s_7779b565419f0e::t_3dbe0280640c13 76-79,82-83,85-86,89-163,165-168,175,177-179,185,187-196,199,318,324,332-345,347-351,361,365,367-369,375,377-379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "155052fc3e1d265b65eb01a4d1b3e1f1e086f003",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
