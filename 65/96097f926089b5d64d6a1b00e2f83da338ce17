@@ -1,0 +1,52 @@
+areno/engine/runtime/train_step.py
+  s_7779b565419f0e::t_728bb311b3ad26 69
+areno/engine/runtime/recompute_policy.py
+  s_7779b565419f0e::t_6b6345efa0ce45 47
+  s_7779b565419f0e::t_728bb311b3ad26 1,26,38,44-46,48-74
+  s_7779b565419f0e::t_f7da5016b34db4 75-76
+areno/api/backend/cuda/decision.py
+  s_7779b565419f0e::t_728bb311b3ad26 82
+areno/engine/training.py
+  s_7779b565419f0e::t_55b0ebb560d6c2 159-161,167-172
+  s_7779b565419f0e::t_728bb311b3ad26 38,137,158,162-166,173-175,189-190
+tests/test_recompute_config_cpu.py
+  s_7779b565419f0e::t_23dc29bfdad7a3 26-28,40-48,60-70,97-117,148-156,172-174,176-178,181-194
+  s_7779b565419f0e::t_6b6345efa0ce45 1-25,29-39,49-59,71-96,118-147,157-171,175,179-180,195-200
+areno/engine/runtime/training_plan.py
+  s_7779b565419f0e::t_dd424735cb105a 1-53,61-84,91-107
+  s_7779b565419f0e::t_55b0ebb560d6c2 54-60,85-90
+scripts/validate_ling_recompute_config_cuda.py
+  s_7779b565419f0e::t_c9e3b01dfa3e2f 1-53,63-75,93-97,109-113,119,124,133-153,158-174,184-192
+  s_7779b565419f0e::t_7bd00c433f3a1d 54-62,76-92,98-108,114-118,120-123,125-132,154-157,175-183
+areno/api/trainer_config.py
+  s_7779b565419f0e::t_728bb311b3ad26 80-84,110-122,278-281,357-360
+docs/concepts/recompute-638-proposal.md
+  s_7779b565419f0e::t_eb3734539ae998 3-6
+areno/cli/train.py
+  s_7779b565419f0e::t_728bb311b3ad26 147-149,966-968,1401-1403
+  s_7779b565419f0e::t_6b6345efa0ce45 470-473,608-611
+  s_7779b565419f0e::t_dd424735cb105a 2009-2023
+areno/engine/config.py
+  s_7779b565419f0e::t_728bb311b3ad26 73-76,102-106,322,342
+  s_7779b565419f0e::t_6b6345efa0ce45 107-110
+  s_7779b565419f0e::t_55b0ebb560d6c2 20-24
+  s_7779b565419f0e::t_5b1fe6321d718c 343
+docs/concepts/selective-recompute.rst
+  s_7779b565419f0e::t_eb3734539ae998 1-78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6596097f926089b5d64d6a1b00e2f83da338ce17",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
