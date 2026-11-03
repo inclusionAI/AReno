@@ -1,0 +1,23 @@
+areno/models/bailing_v3/model.py
+  s_7779b565419f0e::t_fffb2bdebe6406 1726-1729,1763
+areno/engine/runtime/recompute.py
+  s_7779b565419f0e::t_fffb2bdebe6406 85
+areno/engine/runtime/training_plan.py
+  s_7779b565419f0e::t_fffb2bdebe6406 51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "582fcdc90a518ebfc6e35d80a457934d888a5073",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
