@@ -15,9 +15,9 @@ The tested environment was Python 3.12.7, PyTorch 2.7.1+cpu, with
 
 .. code-block:: console
 
-   C:/Users/AORUS/anaconda3/python -m pytest tests/test_kivi_reference_cpu.py -q
+   python -m pytest tests/test_kivi_reference_cpu.py -q
 
-Final result: ``25 passed``.
+Final result: ``26 passed``.
 
 Reference contract
 ------------------

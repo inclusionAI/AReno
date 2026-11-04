@@ -303,6 +303,24 @@ def test_nonfinite_and_incompatible_later_updates_are_rejected() -> None:
     assert cache.num_tokens == 2
 
 
+def test_incompatible_head_dim_is_rejected_without_mutating_cache() -> None:
+    key, value = _key_value((1, 1, 6, 3))
+    cache = KiviReferenceCache(group_size=4, residual_length=2)
+
+    with pytest.raises(ValueError, match="value head_dim.*divisible"):
+        cache.append(key, value)
+
+    assert cache.num_tokens == 0
+    assert cache.quantized_tokens == 0
+    assert cache.pending_tokens == 0
+    assert cache.residual_tokens == 0
+    assert cache.key_blocks == ()
+    assert cache.value_blocks == ()
+    assert cache.residual == (None, None)
+    with pytest.raises(RuntimeError, match="empty cache"):
+        cache.materialize()
+
+
 def test_quantizers_reject_a_partial_group() -> None:
     key, value = _key_value((1, 1, 3, 3))
     with pytest.raises(ValueError, match="key tokens.*divisible"):

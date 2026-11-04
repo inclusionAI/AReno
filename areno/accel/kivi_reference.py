@@ -204,6 +204,8 @@ class KiviReferenceCache:
             raise TypeError("key and value must have the same dtype")
         if key.device != value.device:
             raise ValueError("key and value must be on the same device")
+        if key.shape[3] % self.group_size != 0:
+            raise ValueError("value head_dim must be divisible by group_size")
 
         update_shape = (key.shape[0], key.shape[1], key.shape[3])
         if self._update_shape is not None and update_shape != self._update_shape:
