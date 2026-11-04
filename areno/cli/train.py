@@ -150,6 +150,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "sft_output_recompute",
             "mlx_compile_train_step",
             "mtp_loss_scale",
+            "cut_cross_entropy",
             "lora_rank",
             "q4",
             "qlora",
@@ -971,6 +972,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     args.reference_mode = getattr(args, "reference_mode", "independent")
+    args.cut_cross_entropy = getattr(args, "cut_cross_entropy", False)
     runtime_options = {
         "recompute_modules": getattr(args, "recompute_modules", None),
         "recompute_layers": getattr(args, "recompute_layers", None),
@@ -1037,6 +1039,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             mtp_loss_scale=args.mtp_loss_scale,
+            cut_cross_entropy=args.cut_cross_entropy,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             train_tool_results=args.train_tool_results,
@@ -1101,6 +1104,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             mtp_loss_scale=args.mtp_loss_scale,
+            cut_cross_entropy=args.cut_cross_entropy,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             train_tool_results=args.train_tool_results,
@@ -1200,6 +1204,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             mtp_loss_scale=args.mtp_loss_scale,
+            cut_cross_entropy=args.cut_cross_entropy,
             speculative_draft_tokens=args.speculative_draft_tokens,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
@@ -1274,6 +1279,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         eager_decode=args.eager_decode,
         attn_backend=args.attn_backend,
         mtp_loss_scale=args.mtp_loss_scale,
+        cut_cross_entropy=args.cut_cross_entropy,
         speculative_draft_tokens=args.speculative_draft_tokens,
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
@@ -1409,6 +1415,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "eager_decode",
                 "speculative_draft_tokens",
                 "mtp_loss_scale",
+                "cut_cross_entropy",
                 "activation_checkpointing",
                 "recompute_modules",
                 "recompute_layers",
@@ -2071,6 +2078,14 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     type=float,
     default=None,
     help="Weight of the auxiliary MTP (t+2) loss for checkpoints with MTP layers; unset leaves the layers unbuilt.",
+)
+@click.option(
+    "--cut-cross-entropy",
+    is_flag=True,
+    help=(
+        "Score targets with a vocabulary-chunked log-sum-exp instead of materializing "
+        "[tokens, vocab] logits (CUDA training at tp_size=1 only)."
+    ),
 )
 @click.option(
     "--attn-backend",

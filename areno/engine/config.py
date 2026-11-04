@@ -87,6 +87,12 @@ class RuntimeConfig:
     # it is meant for SFT / policy-gradient RL — not preference objectives
     # like DPO whose packed rows include rejected samples.
     mtp_loss_scale: float | None = None
+    # Opt-in fused LM-head loss: score targets from the hidden states with a
+    # vocabulary-chunked log-sum-exp instead of materializing
+    # `[tokens, vocab]` logits. Only the deferred LM-head path
+    # (CUDA training at tp_size=1) can use it; other layouts warn and keep the
+    # materialized-logits path. Off by default so existing runs are unchanged.
+    cut_cross_entropy: bool = False
     # Rollout speculative decoding: draft this many tokens per step with the
     # checkpoint's MTP layer and verify them in one target forward. 0 = off.
     # Requires the flash attention backend and a model with MTP layers.
