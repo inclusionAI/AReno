@@ -23,7 +23,7 @@ checkpoint or network access is needed.  Run:
 
 .. code-block:: console
 
-   C:/Users/AORUS/anaconda3/python -m pytest tests/test_shared_prompt_kv_reference_cpu.py -q -s
+   python -m pytest tests/test_shared_prompt_kv_reference_cpu.py -q -s
 
 On torch 2.7.1+cpu, all seven cases passed.  Across the comparisons in that
 run, the maximum absolute deviation was ``3.57627869e-07`` for logits and
