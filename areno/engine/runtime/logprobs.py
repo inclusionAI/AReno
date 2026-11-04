@@ -223,7 +223,21 @@ def _cut_cross_entropy_logprobs(
 
     from areno.accel.cut_cross_entropy import cut_cross_entropy_logprobs
 
-    rows = flat_hidden.index_select(0, positions)
+    fp32_projection = False
+    if weight.dtype in (torch.bfloat16, torch.float16):
+        projection_dtype = lm_head(flat_hidden[:0].to(weight.dtype).unsqueeze(0)).dtype
+        fp32_projection = projection_dtype == torch.float32
+        if fp32_projection:
+            # Match the deferred scorer: cast once for the whole graph so tied
+            # BF16/FP16 weight gradients accumulate in FP32 before one cast back.
+            weight = weight.float()
+
+    rows = flat_hidden.index_select(0, positions).to(weight.dtype)
+    if fp32_projection:
+        # Specialized heads such as Phi4MM explicitly project in FP32 even
+        # when their tied parameter and the surrounding model use autocast.
+        with torch.autocast(device_type=rows.device.type, enabled=False):
+            return cut_cross_entropy_logprobs(rows, weight, labels, logit_softcap=logit_softcap)
     return cut_cross_entropy_logprobs(rows, weight, labels, logit_softcap=logit_softcap)
 
 

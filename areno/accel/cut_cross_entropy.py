@@ -222,14 +222,15 @@ def _target_logits(
 ) -> torch.Tensor:
     """``rows x hidden`` dot product against the target rows only.
 
-    Products are formed in FP32 (both operands are exactly representable there)
-    so the result matches the projection's FP32 accumulation instead of
-    rounding each product to the weight dtype.
+    The projection uses the same input and output dtypes as each vocabulary
+    chunk. Only the subsequent softcap and log-sum-exp reductions are promoted,
+    so the numerator and denominator see identical rounded logits.
     """
 
     safe_targets = targets.clamp(min=0, max=weight.shape[0] - 1)
-    selected = weight.index_select(0, safe_targets).float()
-    logits = (hidden.float() * selected).sum(dim=-1)
+    selected = weight.index_select(0, safe_targets)
+    logits = torch.bmm(hidden.unsqueeze(1), selected.unsqueeze(2)).reshape(-1)
+    logits = logits.to(_accumulation_dtype(weight.dtype))
     if softcap is not None:
         logits = softcap * torch.tanh(logits / softcap)
     return logits

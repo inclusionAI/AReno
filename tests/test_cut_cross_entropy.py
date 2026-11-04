@@ -204,6 +204,18 @@ def test_float16_accumulates_in_float32():
     torch.testing.assert_close(actual, expected, atol=0.0, rtol=1e-2)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_low_precision_target_logits_match_streamed_projection(dtype):
+    hidden = torch.tensor([[3.28125]], dtype=dtype)
+    weight = torch.tensor([[3.28125], [0.0]], dtype=dtype)
+    targets = torch.tensor([0])
+
+    expected = _reference_logprobs(hidden, weight, targets)
+    actual = cut_cross_entropy_logprobs(hidden, weight, targets, vocab_chunk_size=1)
+
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+
+
 def test_label_smoothing_is_rejected_instead_of_mis_scored():
     with pytest.raises(NotImplementedError, match="label_smoothing"):
         cut_cross_entropy(torch.randn(2, 3), torch.randn(5, 3), torch.tensor([0, 1]), label_smoothing=0.1)
@@ -345,6 +357,60 @@ def test_packed_head_cut_cross_entropy_matches_full_projection():
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(hidden.grad, reference_hidden.grad, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(head.weight.grad, reference_head.weight.grad, atol=1e-5, rtol=1e-5)
+
+
+def test_packed_head_cut_cross_entropy_casts_hidden_to_fp32_weight():
+    torch.manual_seed(16)
+    head = nn.Linear(8, 17, bias=False, dtype=torch.float32)
+    hidden = torch.randn(1, 11, 8, dtype=torch.bfloat16, requires_grad=True)
+    tokens = torch.randint(17, (1, 11))
+    cu = torch.tensor([0, 11])
+
+    with PatchedContext(logprob_ops, get_tp_context=single_tp_context):
+        expected = logprob_ops.packed_next_token_logprobs(head(hidden.float()), tokens, cu)
+        actual = logprob_ops.packed_next_token_logprobs_from_hidden(
+            hidden, tokens, cu, head, cut_cross_entropy=True
+        )
+
+    upstream = torch.linspace(-1.0, 1.0, actual.numel())
+    expected_hidden_grad, expected_weight_grad = torch.autograd.grad(
+        (expected * upstream).sum(), (hidden, head.weight)
+    )
+    actual_hidden_grad, actual_weight_grad = torch.autograd.grad((actual * upstream).sum(), (hidden, head.weight))
+
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(actual_hidden_grad, expected_hidden_grad, atol=1e-3, rtol=1e-2)
+    torch.testing.assert_close(actual_weight_grad, expected_weight_grad, atol=1e-5, rtol=1e-5)
+
+
+def test_packed_head_cut_cross_entropy_preserves_specialized_fp32_projection():
+    class Head(nn.Linear):
+        def forward(self, states):
+            with torch.autocast(device_type=states.device.type, enabled=False):
+                return F.linear(states.float(), self.weight.float())
+
+    torch.manual_seed(17)
+    head = Head(8, 17, bias=False, dtype=torch.bfloat16)
+    hidden = torch.randn(1, 11, 8, dtype=torch.bfloat16, requires_grad=True)
+    tokens = torch.randint(17, (1, 11))
+    cu = torch.tensor([0, 11])
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        with PatchedContext(logprob_ops, get_tp_context=single_tp_context):
+            expected = logprob_ops.packed_next_token_logprobs(head(hidden), tokens, cu)
+            actual = logprob_ops.packed_next_token_logprobs_from_hidden(
+                hidden, tokens, cu, head, cut_cross_entropy=True
+            )
+
+    upstream = torch.linspace(-1.0, 1.0, actual.numel())
+    expected_hidden_grad, expected_weight_grad = torch.autograd.grad(
+        (expected * upstream).sum(), (hidden, head.weight)
+    )
+    actual_hidden_grad, actual_weight_grad = torch.autograd.grad((actual * upstream).sum(), (hidden, head.weight))
+
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(actual_hidden_grad, expected_hidden_grad, atol=1e-3, rtol=1e-2)
+    torch.testing.assert_close(actual_weight_grad, expected_weight_grad, atol=1e-3, rtol=1e-2)
 
 
 def test_packed_head_cut_cross_entropy_honors_softcap():
