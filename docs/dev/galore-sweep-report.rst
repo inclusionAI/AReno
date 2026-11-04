@@ -13,8 +13,8 @@ The artifacts are ``areno/optim/galore_reference.py``,
 ``tools/galore_sweep.py``, and ``tests/test_galore_reference_cpu.py``.
 Reproduce the reported run from the repository root with::
 
-   C:/Users/AORUS/anaconda3/python tools/galore_sweep.py
-   C:/Users/AORUS/anaconda3/python -m pytest tests/test_galore_reference_cpu.py -q
+   python tools/galore_sweep.py
+   python -m pytest tests/test_galore_reference_cpu.py -q
 
 The sweep uses seed 593, 40 by 40 matrices, 60 steps, ranks 4/8/16/32, and
 learning rates 0.003/0.01/0.03.  It runs a separable quadratic and a small
