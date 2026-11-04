@@ -1,0 +1,20 @@
+scripts/profile_ling_tokenwise_cuda.py
+  s_7779b565419f0e::t_b559bbddb6c0eb 1-94
+  s_7779b565419f0e::t_1210fd93c147c7 95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b21462ff2b4a74079e6aca53f4fc00a365f27b3b",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
