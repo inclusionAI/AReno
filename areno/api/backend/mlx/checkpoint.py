@@ -45,3 +45,54 @@ def save_checkpoint(
 
 
 __all__ = ["save_checkpoint"]
+
+
+def save_full_jev_checkpoint(backend: Any, ctx: Any, path: str) -> str:
+    """Save a loadable backbone separately from the head and optimizer state."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    from areno.api.backend.mlx.decision import save_head
+
+    # MLX-LM strict loading must not encounter score_head weights before AReno
+    # attaches the head. Restore the live module even if checkpoint I/O fails.
+    head = backend.model.pop("score_head")
+    try:
+        result = save_checkpoint(
+            backend.provider,
+            backend.optimizer,
+            source_path=backend.config.model_path or ctx.model_path,
+            destination_path=path,
+            policy_version=backend._policy_version,
+            global_step=ctx.global_step,
+        )
+    finally:
+        backend.model.score_head = head
+    save_head(backend, path)
+    leaves = tree_flatten(backend.optimizer.state)
+    arrays = {key: value for key, value in leaves if isinstance(value, mx.array)}
+    scalars = {key: value for key, value in leaves if not isinstance(value, mx.array)}
+    mx.save_safetensors(str(Path(path) / "jev_optimizer.safetensors"), arrays)
+    (Path(path) / "jev_optimizer.json").write_text(json.dumps(scalars) + "\n")
+    return result
+
+
+def restore_jev_optimizer(backend: Any, ctx: Any) -> None:
+    """Resume moments and the schedule counter after restoring backbone/head."""
+    import mlx.core as mx
+    from mlx.utils import tree_unflatten
+
+    checkpoint = backend.config.decision_checkpoint
+    if checkpoint is None:
+        return
+    root = Path(checkpoint)
+    state_path = root / "areno_mlx_state.json"
+    optimizer_path = root / "jev_optimizer.safetensors"
+    if optimizer_path.exists():
+        arrays = mx.load(str(optimizer_path))
+        scalars = json.loads((root / "jev_optimizer.json").read_text())
+        backend.optimizer.state = tree_unflatten(list({**scalars, **arrays}.items()))
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        ctx.global_step = int(state["global_step"])
+        backend._policy_version = int(state["policy_version"])

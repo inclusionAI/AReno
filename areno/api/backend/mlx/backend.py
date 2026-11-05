@@ -95,6 +95,9 @@ class MlxBackend(Backend):
             if quantization and any(requested[k] != quantization[k] for k in requested):
                 raise ValueError("online quantization conflicts with the adapter's saved quantization")
             quantization = requested
+        qat_quantization = None
+        if quantization is not None and getattr(config, "decision_head", False) and config.lora is None:
+            qat_quantization, quantization = quantization, None
         if quantization is not None:
             if self.config.lora is not None and self.config.lora.qlora:
                 raise ValueError(
@@ -112,6 +115,25 @@ class MlxBackend(Backend):
         self.tokenizer = self.provider.tokenizer
         self.processor = self.provider.processor
         self.model_config = self.provider.config
+        saved_qat = self.model_config.get("areno_qat")
+        if saved_qat is not None and saved_qat.get("format") != "mlx-affine-ste-v1":
+            raise ValueError("unsupported MLX full-parameter QAT checkpoint")
+        if saved_qat is not None and self.config.lora is not None:
+            raise ValueError("full-parameter QAT checkpoints must resume without LoRA")
+        if (
+            saved_qat is not None
+            and qat_quantization is not None
+            and any(saved_qat[k] != qat_quantization[k] for k in ("bits", "group_size"))
+        ):
+            raise ValueError("QAT configuration conflicts with the saved checkpoint")
+        if qat_quantization is not None or saved_qat is not None:
+            from areno.api.backend.mlx.qat import configure_qat
+
+            parameters = qat_quantization or saved_qat
+            self.model_config = configure_qat(
+                self.model, self.model_config, bits=parameters["bits"], group_size=parameters["group_size"]
+            )
+            self.provider.config = self.model_config
         if mx.metal.is_available():
             max_working_set_size = mx.device_info().get("max_recommended_working_set_size")
             if max_working_set_size is not None:
@@ -164,6 +186,10 @@ class MlxBackend(Backend):
             from areno.api.backend.mlx.decision import initialize_head
 
             initialize_head(self)
+            if self.config.lora is None and not self.config.inference_only:
+                from areno.api.backend.mlx.checkpoint import restore_jev_optimizer
+
+                restore_jev_optimizer(self, ctx)
             if self.config.inference_only:
                 self.model.eval()
                 self.model.set_dtype(mx.float32)
@@ -377,6 +403,10 @@ class MlxBackend(Backend):
         self._require_runtime()
         if self._lora_state is not None:
             return self.export_adapter(ctx, path)
+        if getattr(self.config, "decision_head", False):
+            from areno.api.backend.mlx.checkpoint import save_full_jev_checkpoint
+
+            return save_full_jev_checkpoint(self, ctx, path)
         return save_checkpoint(
             self.provider,
             self.optimizer,
