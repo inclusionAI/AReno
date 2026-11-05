@@ -545,6 +545,25 @@ class Trainer:
 
         return self._backend.save_checkpoint(self._ctx, path)
 
+    def save_training_state(self, path: str) -> None:
+        """Save backend-owned training state to a file."""
+
+        if not self._initialized or self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        self._backend.save_training_state(self._ctx, path)
+
+    def load_training_state(self, path: str, *, completed_batches: int | None = None) -> None:
+        """Restore backend-owned training state from a file."""
+
+        if not self._initialized or self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        if completed_batches is not None and completed_batches < 0:
+            raise ValueError("completed_batches must be nonnegative")
+        self._backend.load_training_state(self._ctx, path)
+        if completed_batches is not None:
+            self._ctx.global_step = completed_batches - 1
+            self.finish_step()
+
     def export_adapter(self, path: str) -> str:
         """Export the live native LoRA weights as a standard PEFT adapter."""
 
