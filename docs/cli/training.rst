@@ -409,6 +409,12 @@ in its description; flags for other algorithms are ignored.
 ``--lr FLOAT``
    Policy optimizer learning rate. Default: ``1.0e-6``.
 
+``--head-lr FLOAT``
+   Independent JEV decision-head learning rate. Only valid with ``--algo jev``;
+   must be finite and positive. Default: ``2e-4``. To continue fine-tuning a
+   pretrained head more conservatively, use e.g. ``--head-lr 2e-5`` alongside
+   ``--lr`` for the backbone or LoRA adapters.
+
 ``--min-lr FLOAT``
    Policy optimizer minimum learning rate. Default: ``1.0e-7``.
 
