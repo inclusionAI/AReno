@@ -7,6 +7,8 @@ a shared scalar decision head scores it. AReno supports ``choice``, ``noul``
 (yes/no), and ordered ``score`` questions through the same model-independent
 training and serving path.
 
+For a runnable Qwen3-4B example, see :doc:`../cookbook/jev-training`.
+
 Objective and backbone updates
 ------------------------------
 
