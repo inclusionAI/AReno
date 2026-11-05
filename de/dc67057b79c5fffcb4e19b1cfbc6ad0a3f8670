@@ -1,0 +1,31 @@
+docs/concepts/jev.rst
+  s_2c6d0ec9b9f82b::t_13365373937360 10-11
+docs/cookbook/jev-training.rst
+  s_2c6d0ec9b9f82b::t_de7fabd6df6c45 1-192
+docs/cookbook/jev/evaluate.py
+  s_2c6d0ec9b9f82b::t_98fa599f6ff22c 1-46
+docs/cookbook/jev/request.json
+  s_2c6d0ec9b9f82b::t_ce71e6fc365a6a 1-26
+docs/cookbook/jev/train.jsonl
+  s_2c6d0ec9b9f82b::t_cb10a6143cfbd2 1-4
+docs/cookbook/jev/validation.jsonl
+  s_2c6d0ec9b9f82b::t_697a993a579e45 1-2
+docs/index.rst
+  s_2c6d0ec9b9f82b::t_80ac4f08f0a0ef 46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "dedc67057b79c5fffcb4e19b1cfbc6ad0a3f8670",
+  "prompts": {},
+  "sessions": {
+    "s_2c6d0ec9b9f82b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a98f-5ee9-7231-8e04-2bfd48592dc9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
