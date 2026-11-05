@@ -82,6 +82,12 @@ class RuntimeConfig:
     # checkpoint's MTP layer and verify them in one target forward. 0 = off.
     # Requires the flash attention backend and a model with MTP layers.
     speculative_draft_tokens: int = 0
+    # Rollout/serving KV-cache storage. "auto" keeps the model dtype; "kivi2"
+    # and "kivi4" store KIVI asymmetric 2/4-bit codes (keys per channel,
+    # values per token) and keep the most recent tokens in full precision.
+    kv_cache_dtype: Literal["auto", "kivi2", "kivi4"] = "auto"
+    kivi_group_size: int = 32
+    kivi_residual_length: int = 128
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
@@ -104,6 +110,12 @@ class RuntimeConfig:
             raise ValueError("runtime.optimizer_state_offload_batch_size must be positive")
         if self.speculative_draft_tokens < 0:
             raise ValueError("runtime.speculative_draft_tokens must be non-negative")
+        if self.kv_cache_dtype not in {"auto", "kivi2", "kivi4"}:
+            raise ValueError("runtime.kv_cache_dtype must be one of: auto, kivi2, kivi4")
+        if self.kivi_group_size < 32 or self.kivi_group_size & (self.kivi_group_size - 1):
+            raise ValueError("runtime.kivi_group_size must be a power of two >= 32")
+        if self.kivi_residual_length < 0:
+            raise ValueError("runtime.kivi_residual_length must be non-negative")
 
     def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Switch flash-attn unsupported hardware or model shapes to native attention."""
@@ -163,6 +175,38 @@ class RuntimeConfig:
                 stacklevel=2,
             )
             self.eager_decode = True
+
+    def resolve_kv_cache_dtype(self, *, model: ModelConfig) -> None:
+        """Fall back to the model-dtype KV cache where KIVI storage is unsupported."""
+
+        if self.kv_cache_dtype == "auto":
+            return
+        reasons = []
+        if self.device_type != "cuda":
+            reasons.append("KIVI kernels require CUDA")
+        if model.model_type not in KIVI_MODEL_TYPES:
+            reasons.append(f"model_type {model.model_type!r} has no KIVI attention cache")
+        if self.speculative_draft_tokens > 0:
+            reasons.append("speculative decoding verifies several tokens per step")
+        group = self.kivi_group_size
+        if model.head_dim & (model.head_dim - 1) or model.head_dim % group:
+            reasons.append(f"head_dim {model.head_dim} is not a power of two divisible by kivi_group_size {group}")
+        if self.kv_block_size % group:
+            reasons.append(f"kivi_group_size {group} does not divide kv_block_size {self.kv_block_size}")
+        if not reasons:
+            return
+        warnings.warn(
+            f"KIVI KV cache is unavailable for the detected configuration ({'; '.join(reasons)}); "
+            "falling back to kv_cache_dtype='auto' (model-dtype KV cache).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        self.kv_cache_dtype = "auto"
+
+
+# Model families whose decoder attention is the shared dense CausalSelfAttention
+# with full (non-windowed) causal masks; others keep the model-dtype cache.
+KIVI_MODEL_TYPES = frozenset({"qwen3"})
 
 
 @dataclass(slots=True)
@@ -383,6 +427,7 @@ class EngineConfig:
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
         self.runtime.resolve_eager_decode(model=self.model, lora=self.lora)
+        self.runtime.resolve_kv_cache_dtype(model=self.model)
         self.model.attn_backend = self.runtime.attn_backend
         # Train and rollout partitions share this runtime, so both sides agree
         # on whether MTP tensors exist and the policy-sync plans stay aligned.

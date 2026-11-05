@@ -33,6 +33,7 @@ AReno documentation
    JEV <concepts/jev>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
+   KIVI KV Cache <concepts/kivi-kv-cache>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::
