@@ -43,6 +43,7 @@ AReno documentation
    Dashboard <cli/dashboard>
    cookbook/writing-loaders-and-rewards
    cookbook/math-rlvr
+   cookbook/jev-training
    cookbook/tictactoe-agentic-rl
    cookbook/duelgrid-visual-agent
 
