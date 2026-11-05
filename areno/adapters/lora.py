@@ -103,6 +103,7 @@ class LoraSlot(nn.Module):
                     (self.output_start, self.output_end, self.global_out_features),
                 )
         self._reset_parameters(seed, ctx.rank, ctx.world_size)
+        self.lora_A.requires_grad_(not config.lora_fa)
 
     @torch.no_grad()
     def _reset_parameters(self, seed: int, tp_rank: int, tp_size: int) -> None:
@@ -172,6 +173,7 @@ class RoutedExpertLoraSlot(nn.Module):
         mark_tensor_parallel_parameter(self.lora_A, True, sequence_parallel=False, tp_grad_allreduce=False)
         mark_tensor_parallel_parameter(self.lora_B, True, sequence_parallel=False, tp_grad_allreduce=False)
         self._reset_parameters(seed)
+        self.lora_A.requires_grad_(not config.lora_fa)
 
     @torch.no_grad()
     def _reset_parameters(self, seed: int) -> None:
@@ -215,7 +217,34 @@ class AdapterRegistry:
             yield f"{name}.lora_B.weight", slot.lora_B
 
     def parameters(self) -> tuple[nn.Parameter, ...]:
-        return tuple(parameter for _, parameter in self.named_parameters())
+        """Trainable adapter tensors; LoRA-FA keeps its frozen A out of the optimizer."""
+
+        return tuple(parameter for _, parameter in self.named_parameters() if parameter.requires_grad)
+
+    @torch.no_grad()
+    def install_lora_fa_grad_correction(self) -> None:
+        """Rescale every B gradient by ``(r/alpha)^2 (A A^T)^-1`` (LoRA-FA Theorem 4.1).
+
+        Call once after A reaches its final value (initialization or PEFT
+        load). The hook is linear, so it commutes with microbatch, chunked
+        MST, DP and TP gradient sums.
+        """
+
+        if not self.config.lora_fa_grad_correction:
+            return
+        ctx = get_tp_context()
+        inv_scale_sq = (float(self.config.rank) / float(self.config.alpha)) ** 2
+        for slot in self.slots.values():
+            if hasattr(slot, "lora_fa_correction"):
+                continue
+            lora_A = slot.lora_A.detach().double()
+            gram = lora_A @ lora_A.transpose(-1, -2)
+            if isinstance(slot, LoraSlot) and slot.row_parallel and ctx.world_size > 1:
+                # Row-parallel A is sharded along its input dimension.
+                torch.distributed.all_reduce(gram, group=ctx.group)
+            correction = (torch.linalg.inv(gram) * inv_scale_sq).to(torch.float32)
+            slot.register_buffer("lora_fa_correction", correction, persistent=False)
+            slot.lora_B.register_hook(_lora_fa_correction_hook(slot))
 
     def increment_version(self) -> int:
         self.version += 1
@@ -230,6 +259,14 @@ class AdapterRegistry:
             yield
         finally:
             self._runtime_state.base_only_depth -= 1
+
+
+def _lora_fa_correction_hook(slot: nn.Module):
+    def hook(grad: torch.Tensor) -> torch.Tensor:
+        # B is [..., out, r]; the paper's (A^T A)^-1 g^B becomes g_B (A A^T)^-1 here.
+        return torch.matmul(grad.float(), slot.lora_fa_correction).to(grad.dtype)
+
+    return hook
 
 
 def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> AdapterRegistry:
