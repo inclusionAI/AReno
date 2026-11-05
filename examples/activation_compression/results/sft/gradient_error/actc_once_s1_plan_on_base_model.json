@@ -1,0 +1,47 @@
+{
+  "ckpt": "runs/sft/base_with_plan",
+  "plan": "saved",
+  "error_budget": 0.01,
+  "batches": [
+    {
+      "batch": 0,
+      "tokens": 11034,
+      "relative_error": 0.007968297959212615,
+      "noise_floor": 0.0008923391921151085,
+      "baseline_nondeterminism": 0.003944295105796506,
+      "stored_fraction": 0.6945084120867788,
+      "plan_misses": 0
+    },
+    {
+      "batch": 1,
+      "tokens": 12304,
+      "relative_error": 0.007732037015312056,
+      "noise_floor": 0.0009060463922872685,
+      "baseline_nondeterminism": 0.0038428932338568024,
+      "stored_fraction": 0.6945079887112685,
+      "plan_misses": 0
+    },
+    {
+      "batch": 2,
+      "tokens": 9528,
+      "relative_error": 0.007737661010485969,
+      "noise_floor": 0.0010806484356813784,
+      "baseline_nondeterminism": 0.0036173756343144763,
+      "stored_fraction": 0.6945090604099713,
+      "plan_misses": 0
+    },
+    {
+      "batch": 3,
+      "tokens": 8908,
+      "relative_error": 0.008525297402236951,
+      "noise_floor": 0.0010161018928895099,
+      "baseline_nondeterminism": 0.003886021085653164,
+      "stored_fraction": 0.6945093910162117,
+      "plan_misses": 0
+    }
+  ],
+  "max_relative_error": 0.008525297402236951,
+  "mean_relative_error": 0.007990823346811898,
+  "rms_relative_error": 0.007997347411528565,
+  "within_budget": 4
+}

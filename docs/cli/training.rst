@@ -374,6 +374,19 @@ in its description; flags for other algorithms are ignored.
    Supported CUDA training paths use fixed MST recomputation chunks of 256
    tokens by default. Chunk sizes do not adapt to memory pressure.
 
+``--activation-compression [none|adaptive]``
+   Compress the activations autograd saves for backward (checkpoint
+   boundaries and other saved hidden states) to 8, 4 or 2 bits per tensor, or
+   keep them, as chosen by a gradient-sensitivity calibration at the first
+   step. CUDA-only, single-GPU (``--world-size 1 --tp-size 1``), dense models
+   and full-parameter training. Training metrics expose ``actc_saved_bytes``,
+   ``actc_stored_bytes`` and the calibration errors. Default: ``none``. See
+   :doc:`../concepts/activation-compression`.
+
+``--activation-compression-error-budget FLOAT``
+   Relative L2 error of the parameter gradients that the compression plan may
+   introduce on the calibration and held-out microbatches. Default: ``0.01``.
+
 ``--mlx-compile-train-step / --no-mlx-compile-train-step``
    Enable compilation of the MLX loss/gradient function. Default: enabled.
    Disabling this option requires the MLX backend.

@@ -34,9 +34,26 @@ from areno.engine.layers.attention_backend.common import (
     require_flash_attention_supported,
     use_native_attention,
 )
+from areno.engine.runtime.activation_compression import saved_uncompressed
 from areno.engine.runtime.metadata import TrainMeta
 
 _SDPA_MATH_QUERY_CHUNK = 512
+# A module flag rather than a ContextVar: activation recompute replays the
+# forward on autograd's device thread, which does not inherit context variables.
+_DETERMINISTIC_FLASH_BACKWARD = False
+
+
+@contextmanager
+def deterministic_flash_backward() -> Iterator[None]:
+    """Use FlashAttention's deterministic backward for forwards run inside."""
+
+    global _DETERMINISTIC_FLASH_BACKWARD
+    previous = _DETERMINISTIC_FLASH_BACKWARD
+    _DETERMINISTIC_FLASH_BACKWARD = True
+    try:
+        yield
+    finally:
+        _DETERMINISTIC_FLASH_BACKWARD = previous
 
 
 class TrainAttentionBackend(nn.Module, ABC):
@@ -71,6 +88,20 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
         meta: TrainMeta | None,
         window_size: tuple[int, int] | None = None,
         softmax_scale: float | None = None,
+    ) -> torch.Tensor:
+        # Attention backward recombines its saved Q, K, V, output and softmax
+        # statistics exactly; compressing them independently breaks that.
+        with saved_uncompressed():
+            return self._attend(q, k, v, meta, window_size, softmax_scale)
+
+    def _attend(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        meta: TrainMeta | None,
+        window_size: tuple[int, int] | None,
+        softmax_scale: float | None,
     ) -> torch.Tensor:
         call = build_attention_call(q, k, v, window_size, softmax_scale)
         if use_native_attention(self.attn_backend, call.q):
@@ -138,6 +169,8 @@ def _flash_attn_train_no_compile(*args, **kwargs) -> torch.Tensor:
     from areno.accel.flash_attention import flash_attention
 
     q = args[0] if args else kwargs["q"]
+    if _DETERMINISTIC_FLASH_BACKWARD and q.is_cuda:
+        kwargs["deterministic"] = True
     return flash_attention(q.device).flash_attn_func(*args, **kwargs)
 
 
@@ -148,6 +181,8 @@ def _flash_attn_varlen_train_no_compile(*args, **kwargs) -> torch.Tensor:
     from areno.accel.flash_attention import flash_attention
 
     q = args[0] if args else kwargs["q"]
+    if _DETERMINISTIC_FLASH_BACKWARD and q.is_cuda:
+        kwargs["deterministic"] = True
     return flash_attention(q.device).flash_attn_varlen_func(*args, **kwargs)
 
 

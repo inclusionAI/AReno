@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import math
+import time
 import warnings
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
 
 from areno.engine.data import to_device
+from areno.engine.layers.attention_backend.train import deterministic_flash_backward
 from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
+from areno.engine.runtime.activation_compression import ActivationCompressor, relative_error
 from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.logprobs import (
     packed_mtp_token_logprobs,
@@ -35,6 +39,16 @@ class TrainingManager:
 
     def __init__(self, worker):
         self.worker = worker
+        runtime = getattr(getattr(worker, "config", None), "runtime", None)
+        self.activation_compression = None
+        if getattr(runtime, "activation_compression", "none") != "none":
+            self.activation_compression = ActivationCompressor(
+                unwrap_model(worker.model),
+                error_budget=runtime.activation_compression_error_budget,
+                bits=runtime.activation_compression_bits,
+            )
+            # A checkpoint saved by a compressed run carries its plan.
+            self.activation_compression.load(worker.config.model_path)
 
     def train(self, payload: TrainPayload) -> list[dict | None]:
         """Run all microbatches for one actor optimizer step."""
@@ -72,12 +86,17 @@ class TrainingManager:
                     # step() keeps that bounded lookahead moving.
                     prefetch_state()
         worker.optimizer.zero_grad(set_to_none=True)
+        accelerator = accelerator_module(worker.device)
+        calibration_metrics = self._maybe_calibrate_activation_compression(packs)
         results = []
         try:
             for index, data_pack_shards in enumerate(packs):
                 group_start = (index // accumulation_steps) * accumulation_steps
                 group_size = min(accumulation_steps, len(packs) - group_start)
                 allow_step = (index + 1) % accumulation_steps == 0 or index == len(packs) - 1
+                if index == group_start and accelerator is not None:
+                    # Peak memory metrics cover one optimizer step's microbatches.
+                    accelerator.reset_peak_memory_stats(worker.device)
                 results.append(
                     self._train_step(
                         data_pack_shards,
@@ -85,6 +104,8 @@ class TrainingManager:
                         grad_scale=group_size,
                     )
                 )
+            if calibration_metrics and results and results[0] is not None:
+                results[0]["metrics"] = {**(results[0]["metrics"] or {}), **calibration_metrics}
             return results
         finally:
             if offload_mode != "none":
@@ -114,90 +135,22 @@ class TrainingManager:
         train_model = _actor_train_model(worker)
         train_model.train()
         data_pack = dict(data_pack_shards[ctx.dp_rank])
+        accelerator = accelerator_module(worker.device)
         if "_jev_groups" in data_pack:
             from types import SimpleNamespace
 
             from areno.api.backend.cuda.decision import backward_questions
 
             auto_tune_probe = False
-            accelerator = accelerator_module(worker.device)
             model_kwargs = {"train_meta": SimpleNamespace(sequence_parallel=worker.config.effective_sequence_parallel)}
             loss, metrics = backward_questions(worker, data_pack, grad_scale=grad_scale, model=train_model)
         else:
-            data_pack = _pack_train_data(data_pack)
-            pack_loss_fn = data_pack.get("_loss_fn")
-            auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
-            accelerator = accelerator_module(worker.device)
-            if auto_tune_probe and accelerator is not None:
-                accelerator.synchronize(worker.device)
-                accelerator.reset_peak_memory_stats(worker.device)
-            data_pack = to_device(data_pack, worker.device)
-            data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
-            data_pack["_mst_chunk_size"] = training_chunk_size(worker.device.type, ctx.world_size)
-            tokens = data_pack["input_ids"].long()
-            position_ids = data_pack.get("position_ids")
-            mtp_loss_scale = self._resolved_mtp_loss_scale()
-            train_meta = _train_meta(
-                data_pack,
-                tokens,
-                sequence_parallel=worker.config.effective_sequence_parallel,
-                mtp_enabled=mtp_loss_scale > 0.0,
+            data_pack, model_kwargs, auto_tune_probe, loss, metrics = self._backward_microbatch(
+                train_model, data_pack, grad_scale=grad_scale
             )
-            model_kwargs = {
-                "input_ids": tokens,
-                "position_ids": position_ids,
-                "train_meta": train_meta,
-            }
-            if data_pack.get("features") is not None:
-                model_kwargs["features"] = data_pack["features"]
-            existing_chunked_head = (
-                worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
-            )
-            defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
-            if defer_lm_head:
-                model_kwargs["defer_lm_head"] = True
-            with routing_replay_context(train_meta):
-                out = train_model(**model_kwargs)
-            if defer_lm_head:
-                logprobs = packed_next_token_logprobs_from_hidden(
-                    out.hidden_states,
-                    tokens,
-                    data_pack["train_cu_seqlens"],
-                    train_model.lm_head,
-                    logit_softcap=getattr(train_model, "final_logit_softcapping", None),
-                    # Retain the pre-existing head bound independently of the
-                    # tokenwise block schedule; widening it would regress memory.
-                    chunk_size=256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256),
-                )
-            else:
-                logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
-            loss_out = worker.loss_fn(data_pack, logprobs)
-            metrics = None
-            if isinstance(loss_out, tuple):
-                loss, metrics = loss_out
-            else:
-                loss = loss_out
-            if not isinstance(loss, torch.Tensor):
-                raise TypeError("train_loss_fn must return a torch.Tensor")
-            mtp_logits_shard = getattr(out, "mtp_logits_shard", None)
-            if mtp_logits_shard is not None:
-                mtp_loss = self._mtp_loss(mtp_logits_shard, tokens, data_pack)
-                loss = loss + mtp_loss_scale * mtp_loss
-                # Keep the tensor; the returned metrics are converted to floats
-                # after backward, avoiding a GPU sync on the hot path here.
-                metrics = dict(metrics or {})
-                metrics["mtp_loss"] = mtp_loss.detach()
-            elif mtp_loss_scale > 0.0:
-                # E.g. bailing v2 checkpoints declare MTP layers in their config
-                # but the model family implements none; without this the opt-in
-                # would no-op with nothing distinguishing it from a working run.
-                warnings.warn(
-                    "runtime.mtp_loss_scale is set but the model produced no MTP logits; "
-                    "the MTP loss is inactive for this model family.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            (loss / max(grad_scale, 1)).backward()
+        compression_metrics = None
+        if self.activation_compression is not None and self.activation_compression.last_capture is not None:
+            compression_metrics = self.activation_compression.last_capture.stats.metrics()
         stream_gradient_shards = bool(getattr(worker.optimizer, "stream_gradient_shards", False))
         if stream_gradient_shards:
             # AdamW4bit consumes each microbatch directly into compact BF16 DP
@@ -214,6 +167,7 @@ class TrainingManager:
         multimodal_grad_metrics = None
         clipped_grad_norm = None
         optimizer_state_metrics = None
+        step_memory_metrics = None
         if stepped:
             if not stream_gradient_shards:
                 self._sync_data_parallel_gradients()
@@ -251,7 +205,7 @@ class TrainingManager:
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
             multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
-            worker.optimizer.step()
+            step_memory_metrics = self._optimizer_step(accelerator)
             state_memory_metrics = getattr(worker.optimizer, "state_memory_metrics", None)
             state_quantizer = getattr(worker.optimizer, "state_quantizer", None)
             if callable(state_memory_metrics) and state_quantizer == "dynamic-tree-v1":
@@ -259,6 +213,9 @@ class TrainingManager:
             elif callable(state_memory_metrics) and str(state_quantizer).startswith("signed-de4/"):
                 optimizer_state_metrics = {f"adam4_{name}": value for name, value in state_memory_metrics().items()}
             worker.optimizer.zero_grad(set_to_none=True)
+            if step_memory_metrics is not None:
+                # Weights plus persistent optimizer state once gradients are released.
+                step_memory_metrics["allocated_bytes"] = float(accelerator.memory_allocated(worker.device))
             worker._global_step += 1
             if worker.adapter_registry is not None:
                 worker.adapter_registry.increment_version()
@@ -290,9 +247,191 @@ class TrainingManager:
                     multimodal_grad_metrics,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
                     optimizer_state_metrics,
+                    step_memory_metrics,
+                    compression_metrics,
                 ),
             }
         return None
+
+    def _backward_microbatch(self, train_model, data_pack: dict, *, grad_scale: int, plan="current"):
+        """Pack one microbatch, run the model and loss, and backpropagate.
+
+        ``plan`` is the activation compression plan for the model forward (see
+        ``ActivationCompressor.capture``); it is ignored when compression is off.
+        """
+
+        worker = self.worker
+        ctx = get_tp_context()
+        data_pack = _pack_train_data(data_pack)
+        pack_loss_fn = data_pack.get("_loss_fn")
+        auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
+        accelerator = accelerator_module(worker.device)
+        if auto_tune_probe and accelerator is not None:
+            accelerator.synchronize(worker.device)
+            accelerator.reset_peak_memory_stats(worker.device)
+        data_pack = to_device(data_pack, worker.device)
+        data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
+        data_pack["_mst_chunk_size"] = training_chunk_size(worker.device.type, ctx.world_size)
+        tokens = data_pack["input_ids"].long()
+        position_ids = data_pack.get("position_ids")
+        mtp_loss_scale = self._resolved_mtp_loss_scale()
+        train_meta = _train_meta(
+            data_pack,
+            tokens,
+            sequence_parallel=worker.config.effective_sequence_parallel,
+            mtp_enabled=mtp_loss_scale > 0.0,
+        )
+        model_kwargs = {
+            "input_ids": tokens,
+            "position_ids": position_ids,
+            "train_meta": train_meta,
+        }
+        if data_pack.get("features") is not None:
+            model_kwargs["features"] = data_pack["features"]
+        existing_chunked_head = (
+            worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
+        )
+        defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
+        if defer_lm_head:
+            model_kwargs["defer_lm_head"] = True
+        compression = (
+            self.activation_compression.capture(plan) if self.activation_compression is not None else nullcontext()
+        )
+        with routing_replay_context(train_meta), compression:
+            out = train_model(**model_kwargs)
+        if defer_lm_head:
+            logprobs = packed_next_token_logprobs_from_hidden(
+                out.hidden_states,
+                tokens,
+                data_pack["train_cu_seqlens"],
+                train_model.lm_head,
+                logit_softcap=getattr(train_model, "final_logit_softcapping", None),
+                # Retain the pre-existing head bound independently of the
+                # tokenwise block schedule; widening it would regress memory.
+                chunk_size=256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256),
+            )
+        else:
+            logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
+        loss_out = worker.loss_fn(data_pack, logprobs)
+        metrics = None
+        if isinstance(loss_out, tuple):
+            loss, metrics = loss_out
+        else:
+            loss = loss_out
+        if not isinstance(loss, torch.Tensor):
+            raise TypeError("train_loss_fn must return a torch.Tensor")
+        mtp_logits_shard = getattr(out, "mtp_logits_shard", None)
+        if mtp_logits_shard is not None:
+            mtp_loss = self._mtp_loss(mtp_logits_shard, tokens, data_pack)
+            loss = loss + mtp_loss_scale * mtp_loss
+            # Keep the tensor; the returned metrics are converted to floats
+            # after backward, avoiding a GPU sync on the hot path here.
+            metrics = dict(metrics or {})
+            metrics["mtp_loss"] = mtp_loss.detach()
+        elif mtp_loss_scale > 0.0:
+            # E.g. bailing v2 checkpoints declare MTP layers in their config
+            # but the model family implements none; without this the opt-in
+            # would no-op with nothing distinguishing it from a working run.
+            warnings.warn(
+                "runtime.mtp_loss_scale is set but the model produced no MTP logits; "
+                "the MTP loss is inactive for this model family.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        (loss / max(grad_scale, 1)).backward()
+        return data_pack, model_kwargs, auto_tune_probe, loss, metrics
+
+    def _maybe_calibrate_activation_compression(self, packs: list) -> dict[str, float] | None:
+        """Calibrate, or check, the compression plan on this step's first two microbatches.
+
+        Without a plan the first microbatch calibrates and the second, when
+        present, is the held-out validation batch. Every
+        ``activation_compression_check_interval`` steps the plan's error is
+        measured on the first microbatch, and a plan over budget is
+        recalibrated. Gradients are discarded afterwards, so the step itself
+        trains exactly as without calibration.
+        """
+
+        compressor = self.activation_compression
+        if compressor is None:
+            return None
+        worker = self.worker
+        interval = worker.config.runtime.activation_compression_check_interval
+        check = compressor.plan is not None and interval > 0 and worker._global_step > 0
+        check = check and worker._global_step % interval == 0
+        if compressor.plan is not None and not check:
+            return None
+        ctx = get_tp_context()
+        train_model = _actor_train_model(worker)
+        train_model.train()
+        parameters = [parameter for parameter in worker.model.parameters() if parameter.requires_grad]
+
+        def runner(data_pack_shards):
+            def run(plan):
+                for parameter in parameters:
+                    parameter.grad = None
+                self._backward_microbatch(train_model, dict(data_pack_shards[ctx.dp_rank]), grad_scale=1, plan=plan)
+                return [parameter.grad for parameter in parameters]
+
+            return run
+
+        if len(packs) < 2:
+            warnings.warn(
+                "activation compression calibration has no held-out microbatch; "
+                "use at least two microbatches per step to validate the plan",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        accelerator = accelerator_module(worker.device)
+        if accelerator is not None:
+            accelerator.reset_peak_memory_stats(worker.device)
+        run = runner(packs[0])
+        held_out = runner(packs[1]) if len(packs) > 1 else None
+        if check:
+            with deterministic_flash_backward():
+                metrics = compressor.check(run, held_out)
+        else:
+            # The default backward is nondeterministic (FlashAttention dQ
+            # atomics); report its run-to-run gradient difference, then
+            # calibrate against a deterministic backward so that noise is not
+            # charged to compression.
+            reference = [None if grad is None else grad.detach().clone() for grad in run(None)]
+            nondeterminism = relative_error(run(None), reference)
+            del reference
+            with deterministic_flash_backward():
+                metrics = compressor.calibrate(run, held_out)
+            metrics["actc_baseline_nondeterminism"] = nondeterminism
+        for parameter in parameters:
+            parameter.grad = None
+        if accelerator is not None and "actc_calibration_error" in metrics:
+            metrics["actc_calibration_peak_allocated_bytes"] = float(accelerator.max_memory_allocated(worker.device))
+        return metrics
+
+    def _optimizer_step(self, accelerator) -> dict[str, float] | None:
+        """Step the optimizer, reporting time and allocator peaks around the update.
+
+        ``train_peak_*`` covers this step's forward/backward microbatches and
+        ``optimizer_peak_*`` the update alone.
+        """
+
+        worker = self.worker
+        if accelerator is None:
+            worker.optimizer.step()
+            return None
+        device = worker.device
+        accelerator.synchronize(device)
+        metrics = {
+            "train_peak_allocated_bytes": float(accelerator.max_memory_allocated(device)),
+            "train_peak_reserved_bytes": float(accelerator.max_memory_reserved(device)),
+        }
+        accelerator.reset_peak_memory_stats(device)
+        start = time.perf_counter()
+        worker.optimizer.step()
+        accelerator.synchronize(device)
+        metrics["optimizer_step_time_s"] = time.perf_counter() - start
+        metrics["optimizer_peak_allocated_bytes"] = float(accelerator.max_memory_allocated(device))
+        metrics["optimizer_peak_reserved_bytes"] = float(accelerator.max_memory_reserved(device))
+        return metrics
 
     def _lr_for_step(self, step: int) -> float:
         """Compute the actor learning rate for a given optimizer step."""

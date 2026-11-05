@@ -33,6 +33,8 @@ AReno documentation
    JEV <concepts/jev>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
+   Activation Compression <concepts/activation-compression>
+   Activation Compression Results <concepts/activation-compression-results>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::

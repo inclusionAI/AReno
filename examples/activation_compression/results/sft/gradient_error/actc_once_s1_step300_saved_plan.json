@@ -1,0 +1,83 @@
+{
+  "ckpt": "runs/sft/actc_once_s1/step_000300",
+  "plan": "saved",
+  "error_budget": 0.01,
+  "batches": [
+    {
+      "batch": 0,
+      "tokens": 11034,
+      "relative_error": 0.016768768316640034,
+      "noise_floor": 0.0004634068661812457,
+      "baseline_nondeterminism": 0.008192318225971057,
+      "stored_fraction": 0.6945084120867788,
+      "plan_misses": 0
+    },
+    {
+      "batch": 1,
+      "tokens": 12304,
+      "relative_error": 0.016925369385782672,
+      "noise_floor": 0.0005870420922656037,
+      "baseline_nondeterminism": 0.00852399680428072,
+      "stored_fraction": 0.6945079887112685,
+      "plan_misses": 0
+    },
+    {
+      "batch": 2,
+      "tokens": 9528,
+      "relative_error": 0.01594687119291352,
+      "noise_floor": 0.00047117939497233214,
+      "baseline_nondeterminism": 0.007488366613907204,
+      "stored_fraction": 0.6945090604099713,
+      "plan_misses": 0
+    },
+    {
+      "batch": 3,
+      "tokens": 8908,
+      "relative_error": 0.01618748906920653,
+      "noise_floor": 0.0005177871611056843,
+      "baseline_nondeterminism": 0.007524094207480789,
+      "stored_fraction": 0.6945093910162117,
+      "plan_misses": 0
+    },
+    {
+      "batch": 4,
+      "tokens": 10833,
+      "relative_error": 0.01672609699536081,
+      "noise_floor": 0.0005717036276232916,
+      "baseline_nondeterminism": 0.008485455250151382,
+      "stored_fraction": 0.6945084881922097,
+      "plan_misses": 0
+    },
+    {
+      "batch": 5,
+      "tokens": 11361,
+      "relative_error": 0.01673087564947148,
+      "noise_floor": 0.0005338695636691463,
+      "baseline_nondeterminism": 0.00839475498591878,
+      "stored_fraction": 0.6945082940276627,
+      "plan_misses": 0
+    },
+    {
+      "batch": 6,
+      "tokens": 11536,
+      "relative_error": 0.01644645319254473,
+      "noise_floor": 0.0005157278548964723,
+      "baseline_nondeterminism": 0.008247834898349708,
+      "stored_fraction": 0.6945082335955809,
+      "plan_misses": 0
+    },
+    {
+      "batch": 7,
+      "tokens": 9955,
+      "relative_error": 0.015880948517874884,
+      "noise_floor": 0.0004906930604767706,
+      "baseline_nondeterminism": 0.007448855377989039,
+      "stored_fraction": 0.6945088566653389,
+      "plan_misses": 0
+    }
+  ],
+  "max_relative_error": 0.016925369385782672,
+  "mean_relative_error": 0.016451609039974332,
+  "rms_relative_error": 0.016455895949665157,
+  "within_budget": 0
+}
