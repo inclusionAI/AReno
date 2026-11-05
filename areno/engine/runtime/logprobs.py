@@ -134,12 +134,19 @@ def packed_next_token_logprobs_from_hidden(
     *,
     logit_softcap: float | None = None,
     chunk_size: int = 256,
+    cut_cross_entropy: bool = False,
 ) -> torch.Tensor:
     """Score packed tokens while checkpointing the vocabulary projection.
 
     Long multimodal rows make the ``[tokens, vocab]`` LM-head output several
     gigabytes even in BF16. Checkpoint each position chunk so its logits are
     recomputed during backward instead of retained for the entire loss graph.
+
+    ``cut_cross_entropy=True`` swaps the token-chunked projection for the
+    vocabulary-chunked :mod:`areno.accel.cut_cross_entropy` path, which never
+    materializes a ``[tokens, vocab]`` block at all. The flag is opt-in and off
+    by default, so the arithmetic above is unchanged unless a caller asks for
+    it.
     """
 
     flat_tokens = tokens.reshape(-1)
@@ -155,6 +162,8 @@ def packed_next_token_logprobs_from_hidden(
     positions = positions[keep]
     labels = flat_tokens[positions + 1]
     flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
+    if cut_cross_entropy:
+        return _cut_cross_entropy_logprobs(flat_hidden, positions, labels, lm_head, logit_softcap)
     cap = float(logit_softcap or 0.0)
     projection_parameters = None
     if torch.is_grad_enabled() and lm_head.weight.dtype in (torch.bfloat16, torch.float16):
@@ -189,6 +198,47 @@ def packed_next_token_logprobs_from_hidden(
             use_reentrant=False,
         )
     return selected
+
+
+def _cut_cross_entropy_logprobs(
+    flat_hidden: torch.Tensor,
+    positions: torch.Tensor,
+    labels: torch.Tensor,
+    lm_head,
+    logit_softcap: float | None,
+) -> torch.Tensor:
+    """Score action sites from hidden states with a vocabulary-chunked log-sum-exp."""
+
+    ctx = get_tp_context()
+    if ctx.world_size != 1:
+        raise NotImplementedError(
+            "cut_cross_entropy requires tp_size=1: a vocabulary-parallel head shards the "
+            "projection across ranks and the cross-rank log-sum-exp is not wired yet."
+        )
+    weight = getattr(lm_head, "weight", None)
+    if weight is None:
+        raise NotImplementedError("cut_cross_entropy requires an LM head exposing `.weight`")
+    if getattr(lm_head, "bias", None) is not None:
+        raise NotImplementedError("cut_cross_entropy does not support an LM head bias")
+
+    from areno.accel.cut_cross_entropy import cut_cross_entropy_logprobs
+
+    fp32_projection = False
+    if weight.dtype in (torch.bfloat16, torch.float16):
+        projection_dtype = lm_head(flat_hidden[:0].to(weight.dtype).unsqueeze(0)).dtype
+        fp32_projection = projection_dtype == torch.float32
+        if fp32_projection:
+            # Match the deferred scorer: cast once for the whole graph so tied
+            # BF16/FP16 weight gradients accumulate in FP32 before one cast back.
+            weight = weight.float()
+
+    rows = flat_hidden.index_select(0, positions).to(weight.dtype)
+    if fp32_projection:
+        # Specialized heads such as Phi4MM explicitly project in FP32 even
+        # when their tied parameter and the surrounding model use autocast.
+        with torch.autocast(device_type=rows.device.type, enabled=False):
+            return cut_cross_entropy_logprobs(rows, weight, labels, logit_softcap=logit_softcap)
+    return cut_cross_entropy_logprobs(rows, weight, labels, logit_softcap=logit_softcap)
 
 
 def vocab_parallel_selected_logprobs(logits_shard: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
