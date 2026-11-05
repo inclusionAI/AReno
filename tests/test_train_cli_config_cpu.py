@@ -1133,3 +1133,67 @@ def test_jev_cli_uses_offline_decision_config_and_joint_lora(tmp_path, q4):
     assert config.lora.rank == 32
 
     assert config.backend_config().quantization_bits == (4 if q4 else None)
+
+
+@pytest.mark.parametrize("backend", ["mlx", "cuda"])
+@pytest.mark.parametrize("head_lr", [None, 2e-5])
+def test_jev_head_lr_reaches_backend_and_summary(backend, head_lr):
+    config = _trainer_config_from_options(
+        **_options(
+            algo="jev",
+            backend=backend,
+            world_size=1,
+            tp_size=1,
+            save_path="runs/jev",
+            lora_rank=128,
+            head_lr=head_lr,
+            lr=1e-6,
+        )
+    )
+    expected = 2e-4 if head_lr is None else head_lr
+    assert config.head_lr == expected
+    assert config.backend_config().head_lr == expected
+    assert config.optimizer_lr == 1e-6
+    summary = _format_training_config_summary(config)
+    assert re.search(rf"(?m)^  head_lr\s+{re.escape(str(expected))}$", summary)
+
+
+@pytest.mark.parametrize("head_lr", [0, -1e-5, float("nan"), float("inf"), -float("inf")])
+def test_jev_head_lr_rejects_invalid_values(head_lr):
+    with pytest.raises(UsageError, match="--head-lr must be finite and positive"):
+        _trainer_config_from_options(**_options(algo="jev", head_lr=head_lr))
+
+
+def test_head_lr_rejects_non_jev_algorithm():
+    with pytest.raises(UsageError, match="--head-lr requires --algo jev"):
+        _trainer_config_from_options(**_options(algo="sft", head_lr=2e-5))
+
+
+def test_jev_head_lr_cli_parsing(monkeypatch):
+    captured = []
+    monkeypatch.setattr(train_cli, "_run_train_command", lambda config, options: captured.append(config))
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "jev",
+            "--backend",
+            "mlx",
+            "--ckpt",
+            "model",
+            "--dataset-path",
+            "data.parquet",
+            "--save-path",
+            "runs/jev",
+            "--world-size",
+            "1",
+            "--tp-size",
+            "1",
+            "--lora-rank",
+            "128",
+            "--head-lr",
+            "2e-5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured[0].mlx_config().head_lr == 2e-5

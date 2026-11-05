@@ -18,6 +18,7 @@ import importlib.util
 import inspect
 import json
 import logging
+import math
 import os
 import shutil
 import textwrap
@@ -155,6 +156,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lora_adapter_path",
             "reference_mode",
             "lr",
+            "head_lr",
             "min_lr",
             "lr_decay_steps",
             "lr_decay_style",
@@ -249,6 +251,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         backend = default_backend_type().value
     args.backend = backend.lower()
     args.max_steps = getattr(args, "max_steps", None)
+    args.head_lr = getattr(args, "head_lr", None)
     args.export_gguf_path = getattr(args, "export_gguf_path", None)
     args.gguf_file_type = getattr(args, "gguf_file_type", "f16")
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
@@ -377,6 +380,11 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
             raise click.UsageError("--export-gguf must point to a new output directory")
         if args.save_path is not None and Path(args.export_gguf_path).resolve() == Path(args.save_path).resolve():
             raise click.UsageError("--export-gguf must use a different directory from --save-path")
+    if args.head_lr is not None:
+        if algorithm.name != "jev":
+            raise click.UsageError("--head-lr requires --algo jev")
+        if not math.isfinite(args.head_lr) or args.head_lr <= 0:
+            raise click.UsageError("--head-lr must be finite and positive")
     if args.epochs <= 0:
         raise click.UsageError("--epochs must be positive")
     if args.max_steps is not None and args.max_steps <= 0:
@@ -627,6 +635,7 @@ def _format_training_config_summary(
                         f"bias_correction={_format_bool(config.adam_bias_correction)}"
                     ),
                 ),
+                *([("head_lr", str(config.head_lr))] if config.algo == "jev" else []),
                 ("optimizer_state_offload", str(config.optimizer_state_offload)),
                 ("optimizer_state_offload_dir", _format_optional(config.optimizer_state_offload_dir)),
                 ("optimizer_state_offload_batch_size", str(config.optimizer_state_offload_batch_size)),
@@ -1090,7 +1099,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         if algorithm.name == "jev":
             from areno.api.jev import JevTrainerConfig
 
-            return JevTrainerConfig(**{field.name: getattr(config, field.name) for field in fields(config)})
+            values = {field.name: getattr(config, field.name) for field in fields(config)}
+            if args.head_lr is not None:
+                values["head_lr"] = args.head_lr
+            return JevTrainerConfig(**values)
         if not any(
             (
                 getattr(args, "validation_dataset_path", None),
@@ -1910,6 +1922,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     show_default=True,
     help="Use the frozen actor base as the PPO/DPO reference instead of loading a second reference model.",
 )
+@click.option("--head-lr", type=float, default=None, help="JEV decision-head learning rate; defaults to 2e-4.")
 @click.option("--min-lr", type=float, default=1.0e-7, show_default=True, help="Policy optimizer minimum learning rate.")
 @click.option("--lr-decay-steps", type=int, default=1000, show_default=True, help="Policy LR decay steps.")
 @click.option("--lr-decay-style", default="cosine", show_default=True, help="Policy LR decay style.")
