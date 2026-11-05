@@ -1,0 +1,24 @@
+tests/test_train_cli_config_cpu.py
+  s_c9448a1c17a19a::t_ee4da912dc9e96 1142-1197
+  s_c9448a1c17a19a::t_8b3332f7ff9eb7 1136-1141,1198-1199
+areno/cli/train.py
+  s_c9448a1c17a19a::t_81dce7689f4cf9 21,159,254,383-387,638,1102-1105,1925
+docs/cli/training.rst
+  s_c9448a1c17a19a::t_9884a5013c0927 412-417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e21dfe05639fd1273be89e7d79847517117d1bec",
+  "prompts": {},
+  "sessions": {
+    "s_c9448a1c17a19a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a9cf-ba4d-71e1-a92c-5c9339a92682",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
