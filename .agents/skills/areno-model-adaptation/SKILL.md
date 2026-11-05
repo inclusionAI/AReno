@@ -22,6 +22,22 @@ python .agents/skills/areno-model-adaptation/scripts/inspect_checkpoint.py <chec
 
 Record architecture/config fields, tokenizer or processor class, tensor names/shapes/dtypes, fused projection order, tied weights, and reference outputs. Never infer layout from class names.
 
+For a new decoder-only family, generate a reviewed starting point from a local
+config before implementing model-specific semantics:
+
+```bash
+python .agents/skills/areno-model-adaptation/scripts/generate_adapter_scaffold.py \
+  --hf-config /path/to/config.json \
+  --adapter-name mymodel \
+  --dest-dir areno/models/mymodel
+```
+
+Confirm the inferred dense or MoE choice and dimensions. The generated model
+and checkpoint mapping are placeholders; do not treat successful generation as
+adaptation evidence. Generated forward methods preserve AReno's activation
+checkpoint metadata, but model-specific lifecycle hooks, checkpoint keys, and
+MoE routing still require review and validation through the gated phases below.
+
 ## Gated phases
 
 1. **Config and construction:** implement model-family matching and `ModelConfig` translation. Verify local TP shapes.
