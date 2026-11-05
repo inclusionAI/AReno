@@ -1,0 +1,19 @@
+docs/cookbook/jev-training.rst
+  s_2c6d0ec9b9f82b::t_2bcf6b4cdb9559 99,106-108,118-119,121-123,132,141-142,144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0392b76d57b3a9bc1d08f87a46a88a3ea5e19cbc",
+  "prompts": {},
+  "sessions": {
+    "s_2c6d0ec9b9f82b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a98f-5ee9-7231-8e04-2bfd48592dc9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
