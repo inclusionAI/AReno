@@ -263,27 +263,38 @@ void check_grouped_device(const at::Tensor& tensor, const at::Tensor& input) {
               "areno_grouped_linear tensors must be on the same CUDA device");
 }
 
-auto grouped_gemm() {
-  cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
-  return [handle](const at::Tensor& a, const at::Tensor& b, at::Tensor& out,
-                  int64_t m, int64_t n, int64_t k, bool transpose_a, bool transpose_b) {
-    auto dtype = cuda_type(a.scalar_type());
-    // Row-major A @ B is column-major B^T @ A^T, as in the original calls.
-    gemm_row_major(handle, transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N,
-        transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N, n, m, k,
-        b.data_ptr(), dtype, transpose_b ? k : n,
-        a.data_ptr(), dtype, transpose_a ? m : k, out.data_ptr(), dtype, n);
-  };
-}
 } // namespace
 } // namespace areno_accel
 
 torch::Tensor areno_grouped_linear_forward_cuda(
     torch::Tensor input, torch::Tensor weight, std::vector<int64_t> tokens_per_expert) {
   areno_accel::check_grouped_device(input, input);
+  areno_accel::check_grouped_device(weight, input);
   const at::cuda::OptionalCUDAGuard guard(device_of(input));
-  return areno_accel::grouped_linear::forward(input, weight, tokens_per_expert,
-      areno_accel::check_grouped_device, areno_accel::grouped_gemm());
+  areno_accel::grouped_linear::check_layout(input, weight, tokens_per_expert);
+  const int64_t k = input.size(1), n = weight.size(1);
+  auto output = at::empty({input.size(0), n}, input.options());
+  if (output.numel() == 0) return output;
+  if (k == 0) return output.zero_();
+  auto handle = at::cuda::getCurrentCUDABlasHandle();
+  auto dtype = areno_accel::cuda_type(input.scalar_type());
+  const auto bytes = input.element_size();
+  const auto* x = static_cast<const char*>(input.const_data_ptr());
+  const auto* w = static_cast<const char*>(weight.const_data_ptr());
+  auto* y = static_cast<char*>(output.mutable_data_ptr());
+  int64_t offset = 0;
+  for (int64_t expert = 0; expert < weight.size(0); ++expert) {
+    const int64_t m = tokens_per_expert[expert];
+    if (m > 0) {
+      // Identical GEMM shapes, order and pointers to the previous tensor
+      // slices, without constructing narrow/select views for each expert.
+      areno_accel::gemm_row_major(handle, CUBLAS_OP_T, CUBLAS_OP_N, n, m, k,
+          w + expert * n * k * bytes, dtype, k, x + offset * k * bytes, dtype, k,
+          y + offset * n * bytes, dtype, n);
+    }
+    offset += m;
+  }
+  return output;
 }
 
 torch::Tensor areno_grouped_linear_forward_counts_cuda(
@@ -297,9 +308,45 @@ std::vector<torch::Tensor> areno_grouped_linear_backward_cuda(
     torch::Tensor grad_output, torch::Tensor input, torch::Tensor weight,
     std::vector<int64_t> tokens_per_expert, bool need_grad_input, bool need_grad_weight) {
   areno_accel::check_grouped_device(input, input);
+  areno_accel::check_grouped_device(weight, input);
+  areno_accel::check_grouped_device(grad_output, input);
   const at::cuda::OptionalCUDAGuard guard(device_of(input));
-  return areno_accel::grouped_linear::backward(grad_output, input, weight, tokens_per_expert,
-      need_grad_input, need_grad_weight, areno_accel::check_grouped_device, areno_accel::grouped_gemm());
+  areno_accel::grouped_linear::check_layout(input, weight, tokens_per_expert);
+  TORCH_CHECK(grad_output.scalar_type() == input.scalar_type(), "areno_grouped_linear grad dtype must match input");
+  TORCH_CHECK(grad_output.dim() == 2 && grad_output.size(0) == input.size(0) && grad_output.size(1) == weight.size(1),
+              "areno_grouped_linear gradient shape mismatch");
+  TORCH_CHECK(grad_output.is_contiguous(), "areno_grouped_linear native gradient must be contiguous");
+  auto dx = need_grad_input ? at::empty(input.sizes(), input.options()) : at::empty({0}, input.options());
+  auto dw = need_grad_weight ? at::zeros(weight.sizes(), weight.options()) : at::empty({0}, weight.options());
+  const int64_t k = input.size(1), n = weight.size(1);
+  if (n == 0 && need_grad_input) dx.zero_();
+  if (k == 0 || n == 0 || input.size(0) == 0 || !(need_grad_input || need_grad_weight)) return {dx, dw};
+  auto handle = at::cuda::getCurrentCUDABlasHandle();
+  auto dtype = areno_accel::cuda_type(input.scalar_type());
+  const auto bytes = input.element_size();
+  const auto* x = static_cast<const char*>(input.const_data_ptr());
+  const auto* w = static_cast<const char*>(weight.const_data_ptr());
+  const auto* g = static_cast<const char*>(grad_output.const_data_ptr());
+  auto* dx_data = static_cast<char*>(dx.mutable_data_ptr());
+  auto* dw_data = static_cast<char*>(dw.mutable_data_ptr());
+  int64_t offset = 0;
+  for (int64_t expert = 0; expert < weight.size(0); ++expert) {
+    const int64_t m = tokens_per_expert[expert];
+    if (m > 0) {
+      if (need_grad_input) {
+        areno_accel::gemm_row_major(handle, CUBLAS_OP_N, CUBLAS_OP_N, k, m, n,
+            w + expert * n * k * bytes, dtype, k, g + offset * n * bytes, dtype, n,
+            dx_data + offset * k * bytes, dtype, k);
+      }
+      if (need_grad_weight) {
+        areno_accel::gemm_row_major(handle, CUBLAS_OP_N, CUBLAS_OP_T, k, n, m,
+            x + offset * k * bytes, dtype, k, g + offset * n * bytes, dtype, n,
+            dw_data + expert * n * k * bytes, dtype, k);
+      }
+    }
+    offset += m;
+  }
+  return {dx, dw};
 }
 
 std::vector<torch::Tensor> areno_grouped_linear_backward_counts_cuda(

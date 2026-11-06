@@ -118,6 +118,8 @@ class BailingDenseMLP(nn.Module):
     """Plain SwiGLU MLP used for shared experts and for the first
     ``first_k_dense_replace`` decoder layers (before MoE kicks in)."""
 
+    mst_consistent_tiles = True
+
     def __init__(self, config: ModelConfig, intermediate_size: int):
         super().__init__()
         self.gate_proj = ColumnParallelLinear(config.hidden_size, intermediate_size, bias=False)
@@ -306,6 +308,8 @@ class BailingSparseMoeBlock(nn.Module):
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weight: torch.Tensor,
+        *,
+        include_shared: bool = True,
     ) -> torch.Tensor:
         """Run routed and shared experts with a fixed routing decision."""
 
@@ -327,7 +331,7 @@ class BailingSparseMoeBlock(nn.Module):
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
         if moe_sequence_parallel:
             out = scatter_to_sequence_parallel_region(out)
-        if self.shared_experts is not None:
+        if include_shared and self.shared_experts is not None:
             shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
             out = out + self.shared_experts(shared_input)
         return out
@@ -526,6 +530,11 @@ class BailingGroupedExperts(nn.Module):
                 for slot in self.lora_slots.values():
                     zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
             return all_reduce(flat.new_zeros(flat.shape) + zero)
+        if tokens_per_expert.device.type == "cuda":
+            # Every base/LoRA GEMM below consumes the same immutable layout.
+            # Materialize it once instead of synchronizing a device-to-host
+            # counts copy in every grouped forward and backward call.
+            tokens_per_expert = tokens_per_expert.cpu().tolist()
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
         if self.has_active_lora():
             gate, up = hidden.chunk(2, dim=-1)
@@ -1639,6 +1648,8 @@ class BailingDecoderLayer(nn.Module):
     layers use the dense SwiGLU MLP before MoE kicks in.
     """
 
+    mst_consistent_tiles = True
+
     def __init__(
         self,
         config: ModelConfig,
@@ -1678,6 +1689,75 @@ class BailingDecoderLayer(nn.Module):
     def _dense_mlp_block(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.mlp(self.post_attention_layernorm(hidden_states))
 
+    def _routed_experts_block(
+        self, hidden_states: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor
+    ) -> torch.Tensor:
+        return self.mlp.forward_with_routes(hidden_states, topk_idx, topk_weight, include_shared=False)
+
+    def _forward_selective(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta,
+        infer_meta: InferMeta | None,
+    ) -> torch.Tensor:
+        """Apply explicit module/layer selection, keeping routing outside it."""
+        options = {"train_meta": train_meta, "infer_meta": infer_meta, "layer_idx": self.layer_idx}
+        attention_module = "softmax_attention" if self.attention_layer_type == "attention" else "kda_attention"
+        hidden_states = hidden_states + checkpoint_layer(
+            self._attention_block,
+            hidden_states,
+            position_ids,
+            train_meta,
+            infer_meta,
+            module=attention_module,
+            **options,
+        )
+        if not isinstance(self.mlp, BailingSparseMoeBlock):
+            return hidden_states + checkpoint_layer(
+                self._dense_mlp_block,
+                hidden_states,
+                tokenwise=True,
+                module="dense_mlp",
+                **options,
+            )
+        mlp_input = self.post_attention_layernorm(hidden_states)
+        routed_recompute = should_checkpoint_layer(
+            train_meta, infer_meta, module="routed_experts", layer_idx=self.layer_idx
+        )
+        shared_recompute = self.mlp.shared_experts is not None and should_checkpoint_layer(
+            train_meta, infer_meta, module="shared_experts", layer_idx=self.layer_idx
+        )
+        tiled = (
+            hidden_states.device.type in ("cuda", "cpu")
+            and get_tp_context().world_size == 1
+            and not train_meta.sequence_parallel
+            and not is_sequence_parallel_active()
+        )
+        if not (routed_recompute or shared_recompute) and not tiled:
+            # Keep the original single-gather path when neither expert branch
+            # needs recomputation, including an explicitly disabled decoder.
+            return hidden_states + self.mlp(mlp_input, train_meta.num_padding_tokens)
+        topk_idx, topk_weight = self.mlp.route(mlp_input, train_meta.num_padding_tokens)
+        output = checkpoint_layer(
+            self._routed_experts_block,
+            mlp_input,
+            topk_idx,
+            topk_weight,
+            tokenwise=True,
+            module="routed_experts",
+            **options,
+        )
+        if self.mlp.shared_experts is not None:
+            output = output + checkpoint_layer(
+                self.mlp.shared_experts,
+                mlp_input,
+                tokenwise=True,
+                module="shared_experts",
+                **options,
+            )
+        return hidden_states + output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1685,6 +1765,15 @@ class BailingDecoderLayer(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
+        tiled = (
+            train_meta is not None
+            and get_tp_context().world_size == 1
+            and hidden_states.device.type in ("cuda", "cpu")
+            and not train_meta.sequence_parallel
+            and not is_sequence_parallel_active()
+        )
+        if infer_meta is None and (getattr(train_meta, "recompute_policy", None) is not None or tiled):
+            return self._forward_selective(hidden_states, position_ids, train_meta, infer_meta)
         # Checkpoint attention for every Ling/Bailing V3 layer. Sparse MoE
         # routing remains outside recomputation so its load counters are not
         # accumulated twice and rollout-replayed routes stay authoritative.

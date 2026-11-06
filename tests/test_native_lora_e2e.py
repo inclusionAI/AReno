@@ -30,15 +30,23 @@ def test_native_adapter_two_step_save_reload(tmp_path, model_env, qlora, targets
     model_path = os.getenv(model_env)
     if not model_path or not torch.cuda.is_available():
         pytest.skip(f"set {model_env} to a local checkpoint on a CUDA host")
+    tp_size = int(os.getenv("ARENO_E2E_TP_SIZE", "1"))
+    if torch.cuda.device_count() < tp_size:
+        pytest.skip(f"TP={tp_size} needs {tp_size} visible CUDA devices")
+    sp_override = os.getenv("ARENO_E2E_SEQUENCE_PARALLEL")
+    sequence_parallel = None if sp_override is None else sp_override == "1"
+    seed = int(os.getenv("ARENO_E2E_SEED", "638"))
+    torch.manual_seed(seed)
 
     def build(lora):
         return Trainer(
-            1,
+            tp_size,
             model_path,
             metrics_log_dir=str(tmp_path / "metrics"),
             custom_config=CudaConfig(
-                tp_size=1,
-                devices=[0],
+                tp_size=tp_size,
+                devices=list(range(tp_size)),
+                sequence_parallel=sequence_parallel,
                 lora=lora,
                 max_running_prompts=2,
                 optimizer={
@@ -53,7 +61,15 @@ def test_native_adapter_two_step_save_reload(tmp_path, model_env, qlora, targets
         )
 
     trainer = build(LoraConfig(rank=8, alpha=16, target_modules=targets, qlora=qlora))
-    report = {"model_env": model_env, "model_path": model_path, "qlora": qlora, "steps": []}
+    report = {
+        "model_env": model_env,
+        "model_path": model_path,
+        "qlora": qlora,
+        "tp_size": tp_size,
+        "sequence_parallel_override": sequence_parallel,
+        "seed": seed,
+        "steps": [],
+    }
     trainer.init()
     try:
         tokenizer = trainer.get_tokenizer()

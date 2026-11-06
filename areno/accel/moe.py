@@ -159,6 +159,9 @@ def areno_moe_topk_permute(
     (``[local_expert_start, local_expert_start + local_num_experts)``) are
     materialised. Returns ``(permuted_x, route_weight, token_index,
     tokens_per_expert)`` ready to feed into ``areno_grouped_linear``.
+    CUDA rows are ordered by expert, source token, then top-k slot so expert
+    weight-gradient reductions see the same token order on repeated calls.
+    Integer tile ranks and prefix sums construct this order without sorting.
     """
     if not on_kernel_device(x, topk_idx, topk_weight):
         raise RuntimeError("areno_moe_topk_permute requires CUDA or NPU tensors on the same device")

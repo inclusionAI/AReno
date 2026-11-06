@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from areno.engine.runtime.metadata import TrainMeta
+
 
 @contextmanager
 def _record_region(calls, active):
@@ -43,6 +45,7 @@ def test_qwen3_moe_gathers_before_routing_and_scatters_complete_expert_output(mo
     )
     mlp = SimpleNamespace(
         gate=torch.zeros((2, 2)),
+        routing_layer_slot=0,
         top_k=1,
         norm_topk_prob=True,
         training=True,
@@ -74,17 +77,27 @@ def test_qwen35_moe_gathers_once_and_scatters_complete_output(monkeypatch):
         ),
     )
 
-    def shared_expert(states):
-        calls.append(("shared", states.shape[1]))
-        return states * 3
+    class Experts:
+        gate_up_weight = torch.zeros(1)
+
+        def __call__(self, flat, indices, weights):
+            return flat * 2
+
+    class SharedExpert:
+        gate_proj = SimpleNamespace(weight=torch.zeros(1))
+
+        def __call__(self, states):
+            calls.append(("shared", states.shape[1]))
+            return states * 3
 
     mlp = SimpleNamespace(
         gate=torch.zeros((2, 2)),
+        routing_layer_slot=0,
         top_k=1,
         norm_topk_prob=True,
         training=True,
-        experts=lambda flat, indices, weights: flat * 2,
-        shared_expert=shared_expert,
+        experts=Experts(),
+        shared_expert=SharedExpert(),
         shared_expert_gate=None,
     )
     hidden = torch.ones((1, 2, 2))
@@ -144,6 +157,7 @@ def test_bailing_router_load_ignores_alignment_tokens(monkeypatch):
         monkeypatch.setattr(module, "_areno_linear_no_compile", lambda x, weight: x)
         gate = SimpleNamespace(
             weight=torch.zeros((2, 2)),
+            routing_layer_slot=0,
             num_experts=2,
             local_tokens_per_expert=torch.zeros(2),
             _forward_grouped_topk=lambda logits: (topk_idx, topk_weight),
@@ -160,8 +174,8 @@ def test_bailing_v3_decoder_checkpoints_attention_and_dense_mlp(monkeypatch):
 
     checkpointed = []
 
-    def checkpoint(function, states, *args, train_meta=None, infer_meta=None):
-        del train_meta, infer_meta
+    def checkpoint(function, states, *args, train_meta=None, infer_meta=None, tokenwise=False):
+        del train_meta, infer_meta, tokenwise
         checkpointed.append(function.__name__)
         return function(states, *args)
 
@@ -188,7 +202,8 @@ def test_bailing_v3_decoder_checkpoints_attention_and_dense_mlp(monkeypatch):
         layer,
         hidden,
         torch.arange(2).unsqueeze(0),
-        SimpleNamespace(num_padding_tokens=0),
+        # Exercise the sequence-parallel checkpoint boundary.
+        TrainMeta(num_padding_tokens=0, activation_checkpointing=True, sequence_parallel=True),
         None,
     )
 
@@ -204,8 +219,8 @@ def test_bailing_v3_decoder_keeps_sparse_router_outside_recompute(monkeypatch):
     route_calls = []
     expert_calls = []
 
-    def checkpoint(function, states, *args, train_meta=None, infer_meta=None):
-        del train_meta, infer_meta
+    def checkpoint(function, states, *args, train_meta=None, infer_meta=None, tokenwise=False):
+        del train_meta, infer_meta, tokenwise
         checkpointed.append(function.__name__)
         return function(states, *args)
 
@@ -238,7 +253,7 @@ def test_bailing_v3_decoder_keeps_sparse_router_outside_recompute(monkeypatch):
         layer,
         hidden,
         torch.arange(2).unsqueeze(0),
-        SimpleNamespace(num_padding_tokens=1),
+        TrainMeta(num_padding_tokens=1, activation_checkpointing=True, sequence_parallel=True),
         None,
     )
 
@@ -282,7 +297,7 @@ def test_bailing_v3_decoder_uses_direct_sparse_path_without_checkpoint(monkeypat
         layer,
         hidden,
         torch.arange(2).unsqueeze(0),
-        SimpleNamespace(num_padding_tokens=1, activation_checkpointing=False),
+        TrainMeta(num_padding_tokens=1, activation_checkpointing=False, sequence_parallel=True),
         None,
     )
 
@@ -299,7 +314,7 @@ def test_gemma4_moe_routes_local_shard_then_gathers_expert_inputs(monkeypatch):
     monkeypatch.setattr(
         gemma4,
         "checkpoint_layer",
-        lambda function, *args, train_meta=None, infer_meta=None: function(*args),
+        lambda function, *args, train_meta=None, infer_meta=None, tokenwise=False: function(*args),
     )
 
     class Moe:

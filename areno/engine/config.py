@@ -17,6 +17,11 @@ from typing import Any, Literal
 import torch
 
 from areno.adapters.config import LoraConfig
+from areno.engine.runtime.recompute_policy import (
+    RecomputePolicy,
+    normalize_recompute_selection,
+    resolve_runtime_recompute_policy,
+)
 
 # AReno's flash path uses flash-attn features beyond the Turing-compatible
 # forward kernels, including paged KV/cache and training paths, so require
@@ -65,6 +70,10 @@ class RuntimeConfig:
     attn_backend: Literal["flash", "native"] = "flash"
     compile_model: bool = True
     activation_checkpointing: bool = True
+    recompute_modules: tuple[str, ...] | str | None = field(default=None, kw_only=True)
+    recompute_layers: tuple[int, ...] | str | None = field(default=None, kw_only=True)
+    sft_output_recompute: bool | None = field(default=None, kw_only=True)
+    recompute_plan_dir: str | None = field(default=None, kw_only=True)
     keep_rollout_state: bool = True
     decision_head: dict[str, Any] | None = None
     optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
@@ -90,6 +99,15 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         if self.device_type not in {"cuda", "npu"}:
             raise ValueError("runtime.device_type must be one of: cuda, npu")
+        self.recompute_modules, self.recompute_layers = normalize_recompute_selection(
+            self.recompute_modules, self.recompute_layers
+        )
+        if self.sft_output_recompute is not None and type(self.sft_output_recompute) is not bool:
+            raise ValueError("runtime.sft_output_recompute must be bool or None")
+        if self.device_type != "cuda" and any(
+            value is not None for value in (self.recompute_modules, self.recompute_layers, self.sft_output_recompute)
+        ):
+            raise ValueError("selective recompute controls require CUDA")
         if self.device_type == "npu":
             self.compile_model = False
         if self.attn_backend not in {"flash", "native"}:
@@ -301,6 +319,7 @@ class EngineConfig:
     """Complete engine config shared by the coordinator and rank workers."""
 
     model: ModelConfig
+    recompute_policy: RecomputePolicy | None = field(default=None, init=False)
     model_path: str | None = None
     train_loss_fn: Callable[[Any, torch.Tensor], torch.Tensor | tuple[torch.Tensor, dict[str, Any]]] | None = None
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
@@ -319,6 +338,8 @@ class EngineConfig:
 
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
+
+        self.recompute_policy = resolve_runtime_recompute_policy(self.model, self.runtime)
 
         if self.lora is not None and self.lora.qlora:
             if self.runtime.device_type != "cuda":

@@ -9,8 +9,10 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from areno.engine.parallel.collectives import sequence_parallel_region
+from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.mst import mini_sequence_forward
+from areno.engine.runtime.tokenwise_checkpoint import tokenwise_checkpoint
 
 
 def _disable_dynamo_frame(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -22,15 +24,25 @@ def _disable_dynamo_frame(fn: Callable[..., Any]) -> Callable[..., Any]:
         return fn
 
 
-def should_checkpoint_layer(train_meta: TrainMeta | None, infer_meta: InferMeta | None) -> bool:
+def should_checkpoint_layer(
+    train_meta: TrainMeta | None,
+    infer_meta: InferMeta | None,
+    *,
+    module: str | None = None,
+    layer_idx: int | None = None,
+) -> bool:
     """Return true when layer activation recompute is enabled for this forward."""
 
-    return bool(
+    enabled = bool(
         torch.is_grad_enabled()
         and infer_meta is None
         and train_meta is not None
         and getattr(train_meta, "activation_checkpointing", False)
     )
+    policy = getattr(train_meta, "recompute_policy", None)
+    if enabled and policy is not None and module is not None and layer_idx is not None:
+        return policy.selects(module, layer_idx)
+    return enabled
 
 
 def tokenwise_forward(
@@ -60,12 +72,38 @@ def checkpoint_layer(
     train_meta: TrainMeta | None = None,
     infer_meta: InferMeta | None = None,
     tokenwise: bool = False,
+    module: str | None = None,
+    layer_idx: int | None = None,
 ) -> Any:
     """Checkpoint one decoder layer, recomputing its activations in backward."""
 
+    selected = should_checkpoint_layer(train_meta, infer_meta, module=module, layer_idx=layer_idx)
+    owner = layer_fn if isinstance(layer_fn, torch.nn.Module) else getattr(layer_fn, "__self__", None)
+    if (
+        tokenwise
+        and train_meta is not None
+        and infer_meta is None
+        and getattr(owner, "mst_consistent_tiles", False)
+        and hidden_states.device.type in ("cuda", "cpu")
+        and get_tp_context().world_size == 1
+        and not train_meta.sequence_parallel
+    ):
+        return tokenwise_checkpoint(
+            layer_fn,
+            hidden_states,
+            *args,
+            chunk_size=train_meta.mst_chunk_size or 256,
+            recompute=selected,
+            checkpoint_chunks=bool(train_meta.mst_chunk_size),
+            sequence_parallel=False,
+        )
+    # An explicit selection must also gate MST, which otherwise precedes the
+    # legacy global checkpoint switch and can still recompute excluded MLPs.
+    if getattr(train_meta, "recompute_policy", None) is not None and module is not None and not selected:
+        return layer_fn(hidden_states, *args)
     if tokenwise and infer_meta is None and getattr(train_meta, "mst_chunk_size", 0):
         return mini_sequence_forward(layer_fn, hidden_states, *args, chunk_size=train_meta.mst_chunk_size)
-    if not should_checkpoint_layer(train_meta, infer_meta):
+    if not selected:
         return layer_fn(hidden_states, *args)
 
     def recompute(states: torch.Tensor) -> Any:
