@@ -66,6 +66,7 @@ def _train_meta(
         packed=True,
         sequence_parallel=sequence_parallel,
         activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
+        recompute_policy=data_pack.get("_recompute_policy"),
         num_padding_tokens=int(data_pack.get("packed_singleton_padding", 0)),
         routing_replay=data_pack.get("packed_routing_replay"),
         mtp_enabled=mtp_enabled,

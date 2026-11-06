@@ -30,6 +30,7 @@ AReno documentation
    Dataset Formats <concepts/dataset-formats>
    Multimodal Inputs <concepts/multimodal-inputs>
    Native LoRA <concepts/native-lora>
+   Selective Recompute <concepts/selective-recompute>
    JEV <concepts/jev>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>

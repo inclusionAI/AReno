@@ -77,6 +77,11 @@ class TrainerConfig:
     multimodal_projector_lr_decay_steps: int | None = None
     multimodal_projector_lr_decay_style: str | None = None
     activation_checkpointing: bool = True
+    recompute_modules: tuple[str, ...] | str | None = field(default=None, kw_only=True)
+    recompute_layers: tuple[int, ...] | str | None = field(default=None, kw_only=True)
+    # None retains the existing output schedule; explicit bools request the
+    # bounded LM-head path and independently enable/disable its checkpoint.
+    sft_output_recompute: bool | None = field(default=None, kw_only=True)
     keep_rollout_state: bool = True
     optimizer_state_offload: str | bool = "none"
     optimizer_state_offload_dir: str | None = None
@@ -102,6 +107,19 @@ class TrainerConfig:
             self.backend = self.backend.lower()
         if self.backend not in {"cuda", "mlx", "npu"}:
             raise ValueError("backend must be one of: cuda, mlx, npu")
+        from areno.engine.runtime.recompute_policy import normalize_recompute_selection
+
+        self.recompute_modules, self.recompute_layers = normalize_recompute_selection(
+            self.recompute_modules, self.recompute_layers
+        )
+        if self.sft_output_recompute is not None and type(self.sft_output_recompute) is not bool:
+            raise ValueError("sft_output_recompute must be bool or None")
+        if self.sft_output_recompute is not None and self.algo != "sft":
+            raise ValueError("sft_output_recompute requires algo=sft")
+        if self.backend != "cuda" and any(
+            value is not None for value in (self.recompute_modules, self.recompute_layers, self.sft_output_recompute)
+        ):
+            raise ValueError("selective recompute and SFT output recompute controls require backend=cuda")
         if not self.adam_bias_correction and self.backend != "mlx":
             raise ValueError("disabling Adam bias correction currently requires backend=mlx")
         if not self.mlx_compile_train_step and self.backend != "mlx":
@@ -257,6 +275,10 @@ class TrainerConfig:
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
+                "recompute_modules": self.recompute_modules,
+                "recompute_layers": self.recompute_layers,
+                "sft_output_recompute": self.sft_output_recompute,
+                "recompute_plan_dir": self.metrics_log_dir,
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,
@@ -332,6 +354,10 @@ class RolloutTrainerConfig(TrainerConfig):
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
+                "recompute_modules": self.recompute_modules,
+                "recompute_layers": self.recompute_layers,
+                "sft_output_recompute": self.sft_output_recompute,
+                "recompute_plan_dir": self.metrics_log_dir,
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,

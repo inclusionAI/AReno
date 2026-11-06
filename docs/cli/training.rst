@@ -374,6 +374,16 @@ in its description; flags for other algorithms are ignored.
    Supported CUDA training paths use fixed MST recomputation chunks of 256
    tokens by default. Chunk sizes do not adapt to memory pressure.
 
+``--recompute-modules TEXT``, ``--recompute-layers TEXT``
+   Select CUDA Ling v3 decoder modules and zero-based layer indices or
+   inclusive ranges. Both selectors must match for a module to be recomputed.
+   See :doc:`/concepts/selective-recompute` for accepted values.
+
+``--sft-output-recompute / --no-sft-output-recompute``
+   Control CUDA SFT output checkpointing independently from decoder recompute.
+   Either explicit setting uses chunked scoring; omitting the option preserves
+   the existing output path.
+
 ``--mlx-compile-train-step / --no-mlx-compile-train-step``
    Enable compilation of the MLX loss/gradient function. Default: enabled.
    Disabling this option requires the MLX backend.

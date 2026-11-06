@@ -15,6 +15,8 @@ from typing import Literal
 
 import torch
 
+from areno.engine.runtime.recompute_policy import RecomputePolicy
+
 
 @dataclass(slots=True)
 class TrainMeta:
@@ -30,6 +32,7 @@ class TrainMeta:
     # True when the training step wants MTP logits from models with MTP layers.
     mtp_enabled: bool = False
     mst_chunk_size: int = 0
+    recompute_policy: RecomputePolicy | None = None
 
 
 @dataclass(slots=True)

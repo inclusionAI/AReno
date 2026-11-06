@@ -134,14 +134,18 @@ def packed_next_token_logprobs_from_hidden(
     *,
     logit_softcap: float | None = None,
     chunk_size: int = 256,
+    recompute: bool = True,
 ) -> torch.Tensor:
-    """Score packed tokens while checkpointing the vocabulary projection.
+    """Score packed tokens with optional vocabulary-projection checkpointing.
 
     Long multimodal rows make the ``[tokens, vocab]`` LM-head output several
     gigabytes even in BF16. Checkpoint each position chunk so its logits are
     recomputed during backward instead of retained for the entire loss graph.
+    Setting ``recompute=False`` keeps the same chunking and target positions.
     """
 
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
     flat_tokens = tokens.reshape(-1)
     cu_seqlens = cu_seqlens.to(device=tokens.device, dtype=torch.long)
     action_count = max(flat_tokens.numel() - (cu_seqlens.numel() - 1), 0)
@@ -182,12 +186,15 @@ def packed_next_token_logprobs_from_hidden(
     for start in range(0, action_count, chunk_size):
         end = min(start + chunk_size, action_count)
         chunk_hidden = flat_hidden.index_select(0, positions[start:end])
-        selected[start:end] = checkpoint(
-            score_chunk,
-            chunk_hidden,
-            labels[start:end],
-            use_reentrant=False,
-        )
+        if recompute and torch.is_grad_enabled():
+            selected[start:end] = checkpoint(
+                score_chunk,
+                chunk_hidden,
+                labels[start:end],
+                use_reentrant=False,
+            )
+        else:
+            selected[start:end] = score_chunk(chunk_hidden, labels[start:end])
     return selected
 
 

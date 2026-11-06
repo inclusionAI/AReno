@@ -73,21 +73,99 @@ __global__ void moe_gather_by_token_index_kernel(
   }
 }
 
-__global__ void moe_topk_route_count_kernel(
+constexpr int kTopkTile = 512;
+
+template <int ExpertTile>
+__global__ void moe_topk_tile_rank_kernel(
     const int64_t* __restrict__ topk_idx,
     const float* __restrict__ topk_weight,
+    int32_t* __restrict__ route_rank,
+    int32_t* __restrict__ tile_offsets,
     int32_t* __restrict__ tokens_per_expert,
-    int tokens,
-    int top_k,
+    int64_t routes,
+    int tiles,
     int local_expert_start,
     int local_num_experts) {
-  int64_t total = static_cast<int64_t>(tokens) * top_k;
-  for (int64_t route = blockIdx.x * blockDim.x + threadIdx.x; route < total; route += static_cast<int64_t>(blockDim.x) * gridDim.x) {
-    int expert = static_cast<int>(topk_idx[route]);
-    int local_expert = expert - local_expert_start;
-    if (local_expert >= 0 && local_expert < local_num_experts && topk_weight[route] != 0.0f) {
-      atomicAdd(tokens_per_expert + local_expert, 1);
+  constexpr int warps = kTopkTile / 32;
+  __shared__ int32_t warp_counts[warps * ExpertTile];
+  for (int index = threadIdx.x; index < warps * ExpertTile; index += blockDim.x) {
+    warp_counts[index] = 0;
+  }
+  __syncthreads();
+
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x / 32;
+  const int expert_begin = blockIdx.y * ExpertTile;
+  const int64_t route = static_cast<int64_t>(blockIdx.x) * kTopkTile + threadIdx.x;
+  int expert = ExpertTile;  // One shared sentinel for all invalid lanes.
+  if (route < routes) {
+    int local_expert = static_cast<int>(topk_idx[route]) - local_expert_start;
+    if (local_expert >= expert_begin && local_expert < expert_begin + ExpertTile &&
+        local_expert < local_num_experts && topk_weight[route] != 0.0f) {
+      expert = local_expert - expert_begin;
     }
+  }
+  unsigned peers;
+#if __CUDA_ARCH__ >= 700
+  peers = __match_any_sync(0xffffffffu, expert);
+#else
+  // Same peer groups on older CUDA architectures without match_any.
+  peers = 0xffffffffu;
+  for (int bit = 1; bit <= ExpertTile; bit <<= 1) {
+    unsigned mask = __ballot_sync(0xffffffffu, (expert & bit) != 0);
+    peers &= (expert & bit) ? mask : ~mask;
+  }
+#endif
+  if (expert < ExpertTile && lane == __ffs(peers) - 1) {
+    warp_counts[warp * ExpertTile + expert] = __popc(peers);
+  }
+  __syncthreads();
+  if (expert < ExpertTile) {
+    int rank = __popc(peers & ((1u << lane) - 1));
+    for (int previous = 0; previous < warp; ++previous) {
+      rank += warp_counts[previous * ExpertTile + expert];
+    }
+    route_rank[route] = rank;
+  }
+  if (threadIdx.x < ExpertTile && expert_begin + threadIdx.x < local_num_experts) {
+    int count = 0;
+#pragma unroll
+    for (int previous = 0; previous < warps; ++previous) {
+      count += warp_counts[previous * ExpertTile + threadIdx.x];
+    }
+    int local_expert = expert_begin + threadIdx.x;
+    tile_offsets[static_cast<int64_t>(local_expert) * tiles + blockIdx.x] = tiles == 1 ? 0 : count;
+    if (tiles == 1) {
+      tokens_per_expert[local_expert] = count;
+    }
+  }
+}
+
+__global__ void moe_topk_tile_prefix_kernel(
+    int32_t* __restrict__ tile_offsets,
+    int32_t* __restrict__ tokens_per_expert,
+    int tiles) {
+  const int lane = threadIdx.x;
+  int total = 0;
+  for (int begin = 0; begin < tiles; begin += 32) {
+    int tile = begin + lane;
+    int64_t index = static_cast<int64_t>(blockIdx.x) * tiles + tile;
+    int count = tile < tiles ? tile_offsets[index] : 0;
+    int inclusive = count;
+#pragma unroll
+    for (int delta = 1; delta < 32; delta <<= 1) {
+      int previous = __shfl_up_sync(0xffffffffu, inclusive, delta);
+      if (lane >= delta) {
+        inclusive += previous;
+      }
+    }
+    if (tile < tiles) {
+      tile_offsets[index] = total + inclusive - count;
+    }
+    total += __shfl_sync(0xffffffffu, inclusive, 31);
+  }
+  if (lane == 0) {
+    tokens_per_expert[blockIdx.x] = total;
   }
 }
 
@@ -96,50 +174,35 @@ __global__ void moe_topk_permute_kernel(
     const scalar_t* __restrict__ input,
     const int64_t* __restrict__ topk_idx,
     const float* __restrict__ topk_weight,
+    const int32_t* __restrict__ route_rank,
+    const int32_t* __restrict__ tile_offsets,
     const int64_t* __restrict__ offsets,
-    int32_t* __restrict__ counters,
     scalar_t* __restrict__ output,
     float* __restrict__ route_weight,
     int64_t* __restrict__ token_index,
     int32_t* __restrict__ topk_position,
-    int tokens,
+    int64_t route_count,
+    int tiles,
     int top_k,
     int hidden,
     int local_expert_start,
     int local_num_experts) {
-  __shared__ int64_t row_s;
-  __shared__ int valid_s;
-  __shared__ float weight_s;
-  __shared__ int token_s;
-  __shared__ int topk_pos_s;
-  int64_t total = static_cast<int64_t>(tokens) * top_k;
-  for (int64_t route = blockIdx.x; route < total; route += gridDim.x) {
-    if (threadIdx.x == 0) {
-      int token = static_cast<int>(route / top_k);
-      int topk_pos = static_cast<int>(route - static_cast<int64_t>(token) * top_k);
-      int expert = static_cast<int>(topk_idx[route]);
-      int local_expert = expert - local_expert_start;
-      float weight = topk_weight[route];
-      valid_s = local_expert >= 0 && local_expert < local_num_experts && weight != 0.0f;
-      if (valid_s) {
-        row_s = offsets[local_expert] + atomicAdd(counters + local_expert, 1);
-        weight_s = weight;
-        token_s = token;
-        topk_pos_s = topk_pos;
-        route_weight[row_s] = weight_s;
-        token_index[row_s] = token_s;
-        topk_position[row_s] = topk_pos_s;
-      }
-    }
-    __syncthreads();
-    if (!valid_s) {
-      __syncthreads();
+  for (int64_t route = blockIdx.x; route < route_count; route += gridDim.x) {
+    int expert = static_cast<int>(topk_idx[route]) - local_expert_start;
+    float weight = topk_weight[route];
+    if (expert < 0 || expert >= local_num_experts || weight == 0.0f) {
       continue;
     }
-    for (int col = threadIdx.x; col < hidden; col += blockDim.x) {
-      output[row_s * hidden + col] = input[token_s * hidden + col];
+    int64_t row = offsets[expert] + tile_offsets[static_cast<int64_t>(expert) * tiles + route / kTopkTile] + route_rank[route];
+    int64_t token = route / top_k;
+    if (threadIdx.x == 0) {
+      route_weight[row] = weight;
+      token_index[row] = token;
+      topk_position[row] = static_cast<int32_t>(route % top_k);
     }
-    __syncthreads();
+    for (int col = threadIdx.x; col < hidden; col += blockDim.x) {
+      output[row * hidden + col] = input[token * hidden + col];
+    }
   }
 }
 
@@ -252,13 +315,13 @@ std::vector<torch::Tensor> areno_moe_topk_permute_forward_cuda(
   const int tokens = static_cast<int>(input.size(0));
   const int hidden = static_cast<int>(input.size(1));
   const int top_k = static_cast<int>(topk_idx.size(1));
-  auto tokens_per_expert_i32 = torch::zeros({local_num_experts}, input.options().dtype(torch::kInt32));
+  auto tokens_per_expert_i32 = torch::empty({local_num_experts}, input.options().dtype(torch::kInt32));
 
   const at::cuda::OptionalCUDAGuard guard(device_of(input));
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int threads = 256;
   const int64_t route_count = static_cast<int64_t>(tokens) * top_k;
-  if (route_count == 0) {
+  if (route_count == 0 || local_num_experts == 0) {
     auto empty_output = torch::empty({0, hidden}, input.options());
     auto empty_weight = torch::empty({0}, input.options().dtype(torch::kFloat32));
     auto empty_token_index = torch::empty({0}, input.options().dtype(torch::kInt64));
@@ -266,40 +329,50 @@ std::vector<torch::Tensor> areno_moe_topk_permute_forward_cuda(
     auto empty_counts = torch::zeros({local_num_experts}, input.options().dtype(torch::kInt64));
     return {empty_output, empty_weight, empty_token_index, empty_topk_position, empty_counts};
   }
-  int blocks = static_cast<int>(std::min<int64_t>((route_count + threads - 1) / threads, 4096));
-  areno_accel::moe_topk_route_count_kernel<<<blocks, threads, 0, stream>>>(
-      topk_idx.data_ptr<int64_t>(),
-      topk_weight.data_ptr<float>(),
-      tokens_per_expert_i32.data_ptr<int32_t>(),
-      tokens,
-      top_k,
-      static_cast<int>(local_expert_start),
-      static_cast<int>(local_num_experts));
+  const int tiles = static_cast<int>((route_count + areno_accel::kTopkTile - 1) / areno_accel::kTopkTile);
+  auto route_rank = torch::empty({route_count}, input.options().dtype(torch::kInt32));
+  auto tile_offsets = torch::empty({local_num_experts, tiles}, input.options().dtype(torch::kInt32));
+  if (local_num_experts <= 32) {
+    areno_accel::moe_topk_tile_rank_kernel<32><<<dim3(tiles, 1), areno_accel::kTopkTile, 0, stream>>>(
+        topk_idx.data_ptr<int64_t>(), topk_weight.data_ptr<float>(), route_rank.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(), tokens_per_expert_i32.data_ptr<int32_t>(), route_count, tiles,
+        static_cast<int>(local_expert_start), static_cast<int>(local_num_experts));
+  } else {
+    areno_accel::moe_topk_tile_rank_kernel<128><<<dim3(tiles, (local_num_experts + 127) / 128), areno_accel::kTopkTile, 0, stream>>>(
+        topk_idx.data_ptr<int64_t>(), topk_weight.data_ptr<float>(), route_rank.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(), tokens_per_expert_i32.data_ptr<int32_t>(), route_count, tiles,
+        static_cast<int>(local_expert_start), static_cast<int>(local_num_experts));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (tiles > 1) {
+    areno_accel::moe_topk_tile_prefix_kernel<<<local_num_experts, 32, 0, stream>>>(
+        tile_offsets.data_ptr<int32_t>(), tokens_per_expert_i32.data_ptr<int32_t>(), tiles);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 
   auto buffers = areno_accel::moe::allocate_topk(input, tokens_per_expert_i32);
   auto& output = buffers.output;
   auto& route_weight = buffers.weight;
   auto& token_index = buffers.token_index;
   auto& topk_position = buffers.position;
-  auto& offsets = buffers.offsets;
-  auto counters = torch::zeros({local_num_experts}, input.options().dtype(torch::kInt32));
   if (output.size(0) == 0) {
     return buffers.result();
   }
-  blocks = static_cast<int>(std::min<int64_t>(route_count, 65535));
+  int blocks = static_cast<int>(std::min<int64_t>(route_count, 65535));
   AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(), "areno_moe_topk_permute_forward", [&] {
     areno_accel::moe_topk_permute_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
         input.data_ptr<scalar_t>(),
         topk_idx.data_ptr<int64_t>(),
         topk_weight.data_ptr<float>(),
-        offsets.data_ptr<int64_t>(),
-        counters.data_ptr<int32_t>(),
+        route_rank.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(),
+        buffers.offsets.data_ptr<int64_t>(),
         output.data_ptr<scalar_t>(),
         route_weight.data_ptr<float>(),
         token_index.data_ptr<int64_t>(),
         topk_position.data_ptr<int32_t>(),
-        tokens,
+        route_count,
+        tiles,
         top_k,
         hidden,
         static_cast<int>(local_expert_start),
