@@ -154,11 +154,16 @@ def get_algorithm(name: str) -> AlgorithmSpec:
 
 
 def list_algorithms(*, include_experimental: bool = True) -> dict[str, AlgorithmSpec]:
-    """Return the registered algorithm specs keyed by algorithm name."""
+    """Return the registered algorithm specs keyed by algorithm name.
+
+    Experimental plugins are only loaded (and only listed) when
+    ``include_experimental`` is true; already-imported experimental specs are
+    filtered out otherwise.
+    """
 
     if include_experimental:
         load_experimental_algorithms()
-    return dict(_ALGORITHMS)
+    return {name: spec for name, spec in _ALGORITHMS.items() if include_experimental or not spec.experimental}
 
 
 def describe_loss_fn(loss_fn: Callable) -> BackendLossSpec:
