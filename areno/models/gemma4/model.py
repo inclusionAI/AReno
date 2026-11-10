@@ -1355,6 +1355,13 @@ class Gemma4Adapter(ModelAdapter):
     """Adapter glue for both Gemma4 LM and Gemma4 multimodal trunks."""
 
     name = "gemma4"
+    supports_qlora = True
+
+    @property
+    def lora_initializer(self):
+        from areno.models.gemma4.lora import initialize_gemma4_lora
+
+        return initialize_gemma4_lora
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         architectures = set(hf_config.get("architectures") or [])
