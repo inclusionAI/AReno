@@ -145,6 +145,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "score_micro_bs",
             "gradient_accumulation_steps",
             "activation_checkpointing",
+            "recompute_modules",
+            "recompute_layers",
+            "sft_output_recompute",
             "mlx_compile_train_step",
             "mtp_loss_scale",
             "lora_rank",
@@ -472,7 +475,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     _preflight_task_hooks(args, algorithm)
-    config = _trainer_config_from_args(args)
+    try:
+        config = _trainer_config_from_args(args)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
     bits = 4 if getattr(args, "q4", False) else None
     if bits is not None:
         from areno.api.backend.mlx.quantization import validate_quantization
@@ -607,6 +613,10 @@ def _format_training_config_summary(
             [
                 ("max_steps", _format_optional(config.max_steps)),
                 ("sequence_parallel", _sequence_parallel_for_summary(config, model_config)),
+                ("activation_checkpointing", _format_bool(config.activation_checkpointing)),
+                ("recompute_modules", _format_optional(config.recompute_modules, default="all (legacy)")),
+                ("recompute_layers", _format_optional(config.recompute_layers, default="all")),
+                ("sft_output_recompute", _format_optional(config.sft_output_recompute, default="existing schedule")),
                 ("mini_bs", str(config.mini_bs)),
                 ("score_micro_bs", str(config.score_micro_bs)),
                 ("seed", _format_optional(config.seed)),
@@ -962,6 +972,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     args.reference_mode = getattr(args, "reference_mode", "independent")
     runtime_options = {
+        "recompute_modules": getattr(args, "recompute_modules", None),
+        "recompute_layers": getattr(args, "recompute_layers", None),
+        "sft_output_recompute": getattr(args, "sft_output_recompute", None),
         "clip_gradients": getattr(args, "clip_gradients", True),
         "adam_bias_correction": getattr(args, "adam_bias_correction", True),
         "seed": getattr(args, "seed", None),
@@ -1397,6 +1410,9 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "speculative_draft_tokens",
                 "mtp_loss_scale",
                 "activation_checkpointing",
+                "recompute_modules",
+                "recompute_layers",
+                "sft_output_recompute",
                 "keep_rollout_state",
                 "optimizer_state_offload",
                 "optimizer_state_offload_dir",
@@ -2002,6 +2018,21 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     default=True,
     show_default=True,
     help="Enable decoder-layer activation recompute during training.",
+)
+@click.option(
+    "--recompute-modules",
+    default=None,
+    help="CUDA Ling v3 decoder modules: softmax_attention,kda_attention,dense_mlp,routed_experts,shared_experts; all/none supported.",
+)
+@click.option(
+    "--recompute-layers",
+    default=None,
+    help="Zero-based decoder layer indices/inclusive ranges, e.g. 0,4..7; all/none supported.",
+)
+@click.option(
+    "--sft-output-recompute/--no-sft-output-recompute",
+    default=None,
+    help="Independently checkpoint SFT LM-head/logprobs. Explicit off retains chunking; omitted preserves the existing schedule.",
 )
 @click.option(
     "--drop-rollout-state",

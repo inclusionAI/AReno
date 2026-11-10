@@ -35,6 +35,7 @@ class TrainingManager:
 
     def __init__(self, worker):
         self.worker = worker
+        self._recompute_plan_written = False
 
     def train(self, payload: TrainPayload) -> list[dict | None]:
         """Run all microbatches for one actor optimizer step."""
@@ -133,6 +134,7 @@ class TrainingManager:
                 accelerator.reset_peak_memory_stats(worker.device)
             data_pack = to_device(data_pack, worker.device)
             data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
+            data_pack["_recompute_policy"] = getattr(worker.config, "recompute_policy", None)
             data_pack["_mst_chunk_size"] = training_chunk_size(worker.device.type, ctx.world_size)
             tokens = data_pack["input_ids"].long()
             position_ids = data_pack.get("position_ids")
@@ -153,7 +155,24 @@ class TrainingManager:
             existing_chunked_head = (
                 worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
             )
-            defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
+            output_recompute = getattr(worker.config.runtime, "sft_output_recompute", None)
+            defer_lm_head = (
+                existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0)) or output_recompute is not None
+            )
+            output_chunk_size = 256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256)
+            if not self._recompute_plan_written:
+                from areno.engine.runtime.training_plan import record_training_recompute_plan
+
+                record_training_recompute_plan(
+                    worker,
+                    train_model,
+                    train_meta,
+                    data_pack,
+                    defer_lm_head=defer_lm_head,
+                    output_chunk_size=output_chunk_size,
+                    output_recompute=output_recompute is not False,
+                )
+                self._recompute_plan_written = True
             if defer_lm_head:
                 model_kwargs["defer_lm_head"] = True
             with routing_replay_context(train_meta):
@@ -167,7 +186,8 @@ class TrainingManager:
                     logit_softcap=getattr(train_model, "final_logit_softcapping", None),
                     # Retain the pre-existing head bound independently of the
                     # tokenwise block schedule; widening it would regress memory.
-                    chunk_size=256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256),
+                    chunk_size=output_chunk_size,
+                    recompute=output_recompute is not False,
                 )
             else:
                 logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])

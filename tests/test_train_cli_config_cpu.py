@@ -195,6 +195,39 @@ def test_mtp_options_reach_the_engine_runtime():
     assert "speculative_draft_tokens" not in sft.cuda_config().runtime
 
 
+@pytest.mark.parametrize("flag,expected", [("--sft-output-recompute", True), ("--no-sft-output-recompute", False)])
+def test_sft_recompute_options_reach_the_engine_runtime(monkeypatch, flag, expected):
+    captured = []
+    monkeypatch.setattr(train_cli, "_run_train_command", lambda config, options: captured.append(config))
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "sft",
+            "--backend",
+            "cuda",
+            "--ckpt",
+            "model",
+            "--dataset-path",
+            "data",
+            "--dataset-loader-fn",
+            "examples/math/dataset_loader.py",
+            "--recompute-modules",
+            "routed_experts",
+            "--recompute-layers",
+            "0,1..2",
+            "--no-activation-checkpointing",
+            flag,
+        ],
+    )
+    assert result.exit_code == 0, result.output + str(result.exception)
+    runtime = captured[0].cuda_config().runtime
+    assert runtime["recompute_modules"] == ("routed_experts",)
+    assert runtime["recompute_layers"] == (0, 1, 2)
+    assert runtime["activation_checkpointing"] is False
+    assert runtime["sft_output_recompute"] is expected
+
+
 def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     cfg = _trainer_config_from_options(
         **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0, attn_backend="native")
@@ -207,7 +240,11 @@ def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     assert cfg.model_hub == "modelscope"
     assert cfg.optimizer_min_lr == 0.0
     assert cfg.attn_backend == "native"
-    assert cfg.cuda_config().runtime["attn_backend"] == "native"
+    runtime = cfg.cuda_config().runtime
+    assert runtime["attn_backend"] == "native"
+    assert runtime["recompute_modules"] is None
+    assert runtime["recompute_layers"] is None
+    assert runtime["sft_output_recompute"] is None
     assert cfg.batch_size == 2
     assert cfg.mini_bs == 1
     assert not hasattr(cfg, "n_samples")

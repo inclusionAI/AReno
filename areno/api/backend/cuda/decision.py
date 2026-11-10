@@ -79,6 +79,7 @@ def question_logits(worker, rows, *, model=None):
     pack = _pack_train_data(pack)
     pack = to_device(pack, worker.device)
     pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
+    pack["_recompute_policy"] = getattr(worker.config, "recompute_policy", None)
     pack["_mst_chunk_size"] = (
         training_chunk_size(worker.device.type, get_tp_context().world_size) if torch.is_grad_enabled() else 0
     )
