@@ -13,11 +13,12 @@ import io
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 from urllib.parse import urlparse
 
 import click
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from areno.adapters import LoraConfig
@@ -27,7 +28,12 @@ from areno.api.multimodal import (
     image_token_counts_from_features,
     mrope_position_ids_from_image_grid,
 )
-from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
+from areno.api.openai_chat import (
+    build_chat_completion_response,
+    format_sse_data,
+    iter_chat_completion_chunks,
+    messages_to_prompt_tokens,
+)
 from areno.api.tokenizer import (
     apply_chat_template_with_options,
     configure_chat_template_enable_thinking,
@@ -90,6 +96,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: int = Field(default=-1, ge=-1)
     n: int = Field(default=1, ge=1)
     stream: bool = False
+    stream_options: dict[str, Any] | None = None
     stop: str | list[str] | None = None
     seed: int | None = None
 
@@ -193,6 +200,14 @@ class _ToolParserTrainerShim:
 class _ServeRollout:
     response_ids: list[list[int]]
     finish_reason: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestOutcome:
+    """Envelope plus the generated token ids backing it (needed for stream deltas)."""
+
+    response: ChatCompletionResponse
+    response_ids: list[list[int]]
 
 
 class _CudaServeRuntime:
@@ -517,10 +532,16 @@ def create_app(
         }
 
     @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-    async def chat_completions(raw_request: Request, request: ChatCompletionRequest) -> ChatCompletionResponse:
-        """Validate the request, encode the prompt, run rollout, and await the response."""
-        if request.stream:
-            raise HTTPException(status_code=400, detail="stream=true is not supported")
+    async def chat_completions(
+        raw_request: Request, request: ChatCompletionRequest
+    ) -> ChatCompletionResponse | StreamingResponse:
+        """Validate the request, encode the prompt, run rollout, and await the response.
+
+        `stream=true` returns an OpenAI-style SSE stream of `chat.completion.chunk`
+        events terminated by `data: [DONE]`. The chunks are emitted once
+        generation completes — the engine has no per-token events yet — so the
+        stream is protocol-level; token deltas are still token-aligned.
+        """
         if not request.messages:
             raise HTTPException(status_code=400, detail="messages must be non-empty")
 
@@ -554,7 +575,21 @@ def create_app(
         task = asyncio.create_task(_run_request_task(app, pending))
         state.active_tasks.add(task)
         task.add_done_callback(state.active_tasks.discard)
-        return await _await_pending_response(state, raw_request, pending)
+        outcome = await _await_pending_response(state, raw_request, pending)
+        if not request.stream:
+            return outcome.response
+        include_usage = bool((request.stream_options or {}).get("include_usage"))
+        chunks = iter_chat_completion_chunks(
+            outcome.response.model_dump(),
+            tokenizer=state.tokenizer,
+            response_ids=outcome.response_ids,
+            include_usage=include_usage,
+        )
+        return StreamingResponse(
+            _sse_event_stream(chunks),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return app
 
@@ -635,14 +670,14 @@ async def _run_request_task(app: FastAPI, item: PendingRequest) -> None:
     """Run one HTTP request as an independent concurrent rollout call."""
 
     try:
-        response = await _run_request_rollout(app, item)
-        _set_future_result(item.future, response)
+        outcome = await _run_request_rollout(app, item)
+        _set_future_result(item.future, outcome)
     except BaseException as exc:
         if not item.future.done():
             item.future.set_exception(exc)
 
 
-async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatCompletionResponse | None:
+async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> _RequestOutcome | None:
     """Run one request through the async engine rollout path."""
 
     state: ServeState = app.state.areno_serve
@@ -670,18 +705,19 @@ async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatComple
     )
     if item.future.done():
         return None
-    return _build_response(state, item.request, item.prompt, rollout.response_ids, rollout.finish_reason)
+    response = _build_response(state, item.request, item.prompt, rollout.response_ids, rollout.finish_reason)
+    return _RequestOutcome(response=response, response_ids=[list(ids) for ids in rollout.response_ids])
 
 
-def _set_future_result(future: asyncio.Future, response: ChatCompletionResponse) -> None:
-    """Resolve `future` with `response` unless something else got there first."""
-    if response is not None and not future.done():
-        future.set_result(response)
+def _set_future_result(future: asyncio.Future, outcome: _RequestOutcome | None) -> None:
+    """Resolve `future` with `outcome` unless something else got there first."""
+    if outcome is not None and not future.done():
+        future.set_result(outcome)
 
 
 async def _await_pending_response(
     state: ServeState, raw_request: Request, item: PendingRequest
-) -> ChatCompletionResponse:
+) -> _RequestOutcome:
     """Wait for `item.future`, run a disconnect watcher in parallel, and return the response.
 
     Uses `asyncio.shield` so a cancelled awaiter (e.g. client gone) does not
@@ -719,11 +755,19 @@ def _cancel_pending_request(item: PendingRequest) -> None:
     item.cancelled = True
 
 
-def _build_cancelled_response(state: ServeState, item: PendingRequest) -> ChatCompletionResponse:
+def _build_cancelled_response(state: ServeState, item: PendingRequest) -> _RequestOutcome:
     """Synthesise an empty-token response with stop finish reason for a cancelled request."""
     response_ids = [[] for _ in range(int(item.request.n))]
     finish_reasons = ["stop" for _ in response_ids]
-    return _build_response(state, item.request, item.prompt, response_ids, finish_reasons)
+    response = _build_response(state, item.request, item.prompt, response_ids, finish_reasons)
+    return _RequestOutcome(response=response, response_ids=response_ids)
+
+
+def _sse_event_stream(chunks: Iterator[dict[str, Any]]) -> Iterator[bytes]:
+    """Yield SSE frames for `chunks` followed by the `[DONE]` sentinel."""
+    for chunk in chunks:
+        yield format_sse_data(chunk)
+    yield format_sse_data("[DONE]")
 
 
 def _build_response(

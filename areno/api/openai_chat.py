@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any
+from typing import Any, Iterator
 
 from areno.api.tokenizer import apply_chat_template_with_options, normalize_token_ids
 from areno.api.tool_call_parser import ToolCallParser
@@ -229,6 +229,105 @@ def build_chat_completion_response(
             "routed_experts": list(routed_experts[0] if routed_experts else []),
         }
     return response
+
+
+def format_sse_data(payload: Any) -> bytes:
+    """Frame one SSE `data:` event; pass the string ``"[DONE]"`` for the sentinel."""
+
+    data = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    return f"data: {data}\n\n".encode("utf-8")
+
+
+def iter_chat_completion_chunks(
+    response: dict[str, Any],
+    *,
+    tokenizer: Any = None,
+    response_ids: list[list[int]] | None = None,
+    include_usage: bool = False,
+) -> Iterator[dict[str, Any]]:
+    """Split a completed chat-completion envelope into OpenAI streaming chunks.
+
+    Yields ``chat.completion.chunk`` objects: a role chunk and token-aligned
+    content deltas per choice, then a terminal chunk carrying the finish reason
+    (and the full ``tool_calls`` list when the message parsed any — callers that
+    only accumulate content still see the raw tool-call text via non-stream
+    responses, while streaming clients read them from this delta), and finally
+    an empty-choices usage chunk when ``include_usage`` is set.
+
+    ``response_ids``/``tokenizer`` make content deltas token-aligned via
+    cumulative prefix decoding; without them each choice streams as one delta.
+    """
+
+    base = {
+        "id": response["id"],
+        "object": "chat.completion.chunk",
+        "created": response["created"],
+        "model": response["model"],
+    }
+
+    def chunk(index: int | None, delta: dict[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
+        payload = dict(base)
+        if index is None:
+            payload["choices"] = []
+        else:
+            payload["choices"] = [{"index": index, "delta": delta, "finish_reason": finish_reason}]
+        return payload
+
+    for choice in response.get("choices", []):
+        index = int(choice["index"])
+        message = choice.get("message") or {}
+        finish_reason = choice.get("finish_reason") or "stop"
+        yield chunk(index, {"role": "assistant"})
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            yield chunk(index, {"tool_calls": tool_calls}, finish_reason)
+            continue
+        content = message.get("content") or ""
+        ids = response_ids[index] if response_ids is not None and index < len(response_ids) else None
+        for piece in _content_deltas(tokenizer, ids, content):
+            yield chunk(index, {"content": piece})
+        yield chunk(index, {}, finish_reason)
+    if include_usage:
+        usage_chunk = dict(base)
+        usage_chunk["choices"] = []
+        usage_chunk["usage"] = response.get("usage", {})
+        yield usage_chunk
+
+
+def _content_deltas(tokenizer: Any, token_ids: list[int] | None, content: str) -> list[str]:
+    """Split `content` into token-aligned pieces via cumulative prefix decoding.
+
+    The concatenation of the returned pieces is exactly `content`, even when
+    stop-string trimming or special-token skipping makes the full decode differ
+    from the per-token concatenation.
+    """
+
+    if not content:
+        return []
+    if tokenizer is None or not token_ids:
+        return [content]
+    deltas: list[str] = []
+    accumulated = ""
+    for cut in range(1, len(token_ids) + 1):
+        prefix = _decode(tokenizer, token_ids[:cut], skip_special_tokens=True)
+        if not prefix.startswith(accumulated):
+            # Prefix decode churned (tokenizer normalization); fall through to
+            # the remainder so the concatenation stays exact.
+            break
+        piece = prefix[len(accumulated) :]
+        if not piece:
+            continue
+        if not content.startswith(prefix):
+            # Decode went past the final text (e.g. a stop marker was trimmed).
+            break
+        deltas.append(piece)
+        accumulated = prefix
+        if accumulated == content:
+            return deltas
+    remainder = content[len(accumulated) :]
+    if remainder:
+        deltas.append(remainder)
+    return deltas
 
 
 def _decode(tokenizer: Any, token_ids: list[int], *, skip_special_tokens: bool) -> str:
