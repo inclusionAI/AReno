@@ -704,7 +704,8 @@ class ArenoEngine:
 
         Fullweight workers cooperatively write HuggingFace shards to ``path``.
         Native LoRA keeps the base frozen, so its checkpoint is the adapter-only
-        PEFT artifact consumed by training and serving.
+        PEFT artifact consumed by training and serving; hybrid registries add
+        their full_param_modules subset as ``areno_full_params.safetensors``.
         """
 
         if self.config.lora is not None:

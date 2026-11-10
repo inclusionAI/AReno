@@ -94,6 +94,8 @@ class ArenoWorker:
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
         )
+        if self.adapter_registry is not None and self.adapter_registry.full_params:
+            optimizer_parameters = (*optimizer_parameters, *self.adapter_registry.full_parameters())
         if config.runtime.decision_head is not None and self.adapter_registry is not None:
             optimizer_parameters = (*optimizer_parameters, *self.model.score_head.parameters())
         self.optimizer = build_optimizer(optimizer_parameters, opt, ctx) if config.role == "train" else None

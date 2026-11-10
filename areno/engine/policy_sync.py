@@ -33,6 +33,8 @@ def build_policy_plan(worker) -> tuple[dict[str, object], tuple[PolicyTensorMeta
         if worker.adapter_registry is not None
         else build_policy_weight_plan(worker.model, worker.config.model)
     )
+    if worker.adapter_registry is not None and worker.adapter_registry.full_params:
+        _merge_full_param_plan(plan, worker, worker.adapter_registry.full_params)
     metadata = []
     for key, task in plan.items():
         layout = task.policy_layout()
@@ -111,6 +113,31 @@ def build_adapter_policy_plan(registry: AdapterRegistry) -> PolicyTensorStore:
                 PolicyTensorLayout(shape=shape, dtype=slot.lora_B.dtype, pieces=tuple(pieces)),
             )
     return plan
+
+
+def _merge_full_param_plan(plan: PolicyTensorStore, worker, full_params: dict[str, torch.nn.Parameter]) -> None:
+    """Add hybrid full-parameter tensors to a plan, keyed by module parameter name.
+
+    Checkpoint plan keys use HF checkpoint names, so each live parameter is
+    located by tensor-storage identity against the plan's local piece views.
+    """
+
+    remaining = dict(full_params)
+    full_plan = build_policy_weight_plan(worker.model, worker.config.model)
+    for key, task in full_plan.items():
+        if not remaining:
+            break
+        layout = task.policy_layout()
+        pieces = (*layout.pieces, *layout.flat_pieces)
+        for name, parameter in list(remaining.items()):
+            parameter_storage = parameter.untyped_storage().data_ptr()
+            if any(piece.tensor.untyped_storage().data_ptr() == parameter_storage for piece in pieces):
+                plan[name] = task
+                del remaining[name]
+    if remaining:
+        raise ValueError(
+            "hybrid full-parameters are missing from the checkpoint policy plan: " + ", ".join(sorted(remaining))
+        )
 
 
 def _sharded_layout(
