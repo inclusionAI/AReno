@@ -1,0 +1,29 @@
+areno/models/gemma4/lora.py
+  s_c9448a1c17a19a::t_708e56ec84f6e5 1-46
+areno/models/gemma4/model.py
+  s_c9448a1c17a19a::t_e122c804a498bd 1358-1364
+docs/concepts/native-lora.rst
+  s_c9448a1c17a19a::t_e996cc1abdfbc9 18,45-46,49-56
+tests/test_gemma4_lora_cpu.py
+  s_c9448a1c17a19a::t_5e81d9cc75aab5 1-191
+tests/test_gemma4_lora_cuda.py
+  s_c9448a1c17a19a::t_ec8e7e501c10e9 1-77
+tests/test_native_lora_e2e.py
+  s_c9448a1c17a19a::t_6f383ce03ad236 24-25,29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e6f682d474e7fcc7eb88cef527e7737dc9f77835",
+  "prompts": {},
+  "sessions": {
+    "s_c9448a1c17a19a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1a9cf-ba4d-71e1-a92c-5c9339a92682",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
