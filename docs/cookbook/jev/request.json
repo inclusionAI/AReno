@@ -1,0 +1,26 @@
+{
+  "state": "I need an invoice copy sometime this week.",
+  "questions": {
+    "route": {
+      "type": "choice",
+      "instructions": "Choose the support team.",
+      "criteria": {
+        "billing": "Refunds and payments",
+        "technical": "Login and software problems"
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Does the customer need immediate help?"
+    },
+    "priority": {
+      "type": "score",
+      "instructions": "Rate urgency.",
+      "criteria": [
+        "Routine",
+        "Soon",
+        "Immediate"
+      ]
+    }
+  }
+}
