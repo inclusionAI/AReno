@@ -1,0 +1,23 @@
+areno/engine/runtime/tokenwise_checkpoint.py
+  s_7779b565419f0e::t_114ade6dd92323 63-72,84-87,91
+tests/test_tokenwise_checkpoint_cpu.py
+  s_7779b565419f0e::t_114ade6dd92323 86-114
+areno/accel/csrc/linear.cu
+  s_7779b565419f0e::t_ffdbd9c5f58b2c 272,274-297,311-312,314-349
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "61a626a492c76df92f6b70769a9f94464b2ad049",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

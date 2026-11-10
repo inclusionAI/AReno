@@ -1,0 +1,23 @@
+tests/test_recompute_config_cpu.py
+  s_7779b565419f0e::t_ee120c1cf1cd6d 14,20-25
+  s_7779b565419f0e::t_373e3337e7dd4a 26-27
+tests/test_selective_recompute_cpu.py
+  s_7779b565419f0e::t_ee120c1cf1cd6d 14,28-33
+  s_7779b565419f0e::t_5c02c6688e280a 34-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0058bc68274cc749f47f62b3dcfc88864a350f30",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

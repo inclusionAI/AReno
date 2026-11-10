@@ -1,0 +1,20 @@
+scripts/diagnose_recompute_initial_gradients_cuda.py
+  s_7779b565419f0e::t_6591e699dfae7e 5
+  s_7779b565419f0e::t_5cb842765c2174 1-4,6-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7d17aa2f3441b139f7967d82366c96da0a90057a",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+tests/test_recompute_config_cpu.py
+  s_7779b565419f0e::t_07dee35988487a 204
+areno/engine/runtime/training_plan.py
+  s_7779b565419f0e::t_07dee35988487a 57-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b41c7c1c9f46fa870b9ca7fd8f2f694193efd292",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+tests/test_moe_sequence_parallel_cpu.py
+  s_7779b565419f0e::t_ae613921c6e40a 7-8,205-207,257,301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "729745b72e9284feb0cf5e1e167fe33b1f58c550",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

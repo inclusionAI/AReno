@@ -1,0 +1,32 @@
+areno/adapters/lora.py
+  s_7779b565419f0e::t_0525ea52fdcd2e 23,123-124,192-193
+areno/engine/runtime/mst.py
+  s_7779b565419f0e::t_0525ea52fdcd2e 8,17,92,108,112,126,186,214-217
+areno/engine/runtime/projection_replay.py
+  s_7779b565419f0e::t_b3a4f7bfbb68c1 51-52,69-70
+  s_7779b565419f0e::t_0525ea52fdcd2e 1-50,53-68,71-95
+areno/models/bailing_v3/model.py
+  s_7779b565419f0e::t_0525ea52fdcd2e 96,122-123,670,680
+  s_7779b565419f0e::t_195345ab9781e3 1647
+  s_7779b565419f0e::t_4fd7c5120ad933 1648
+tests/test_projection_replay_cpu.py
+  s_7779b565419f0e::t_b3a4f7bfbb68c1 1-83
+areno/engine/layers/linear.py
+  s_7779b565419f0e::t_0525ea52fdcd2e 30,302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f8af0ff35b0b0f7e0d92700602c7c43a4b12b5fa",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
