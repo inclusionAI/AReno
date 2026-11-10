@@ -21,10 +21,12 @@ from areno.api.algorithms import sft_loss_fn
     [
         ("ARENO_E2E_QWEN35_MODEL", False, QWEN35_TARGETS),
         ("ARENO_E2E_QWEN35_MODEL", True, QWEN35_TARGETS),
+        ("ARENO_E2E_GEMMA4_MODEL", False, QWEN3_DENSE_TARGETS),
+        ("ARENO_E2E_GEMMA4_MODEL", True, QWEN3_DENSE_TARGETS),
         ("ARENO_E2E_QWEN3_MODEL", True, QWEN3_DENSE_TARGETS),
         ("ARENO_E2E_LING_MODEL", True, QWEN3_DENSE_TARGETS),
     ],
-    ids=["qwen35-lora", "qwen35-qlora", "qwen3-qlora", "ling-qlora"],
+    ids=["qwen35-lora", "qwen35-qlora", "gemma4-lora", "gemma4-qlora", "qwen3-qlora", "ling-qlora"],
 )
 def test_native_adapter_two_step_save_reload(tmp_path, model_env, qlora, targets):
     model_path = os.getenv(model_env)

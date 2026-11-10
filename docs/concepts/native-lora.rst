@@ -15,6 +15,7 @@ Native LoRA currently supports these CUDA model adapters:
 * Qwen3
 * Qwen3-MoE
 * Qwen3.5 dense text and multimodal language backbones
+* Gemma4 dense text and Unified language backbones with frozen media modules
 * Bailing-MoE V3 checkpoints with ``no_kda_lora=true``
 
 On Apple Silicon, the MLX backend supports dense Qwen3 LoRA and includes an
@@ -41,8 +42,17 @@ for multimodal checkpoints. Combining these adapters with an unfrozen vision
 tower or projector is rejected.
 
 Use ``--qlora --lora-rank 8`` for a frozen NF4 base with double quantization.
-QLoRA supports Qwen3 dense, Qwen3.5 dense language backbones, and Bailing-MoE V3.
+QLoRA supports Qwen3 dense, Qwen3.5 dense language backbones, Gemma4 dense
+language backbones, and Bailing-MoE V3.
 Qwen3.5-MoE LoRA and QLoRA are not supported by this adapter path.
+
+Gemma4 uses the default attention and MLP target names. Full-attention layers
+with ``attention_k_eq_v`` share one ``k_proj`` adapter between the K and V
+paths, matching the checkpoint's single projection; these layers do not
+export a separate ``v_proj``. KV-sharing tail layers adapt their own Q/output
+and MLP projections but do not create unused K/V adapters. Unified adapter
+keys retain the ``language_model`` prefix. Gemma4 MoE adapter training and
+unfrozen media towers/projectors are not supported by this path.
 
 LoRA dropout must currently be zero. Standard PEFT LoRA adapters are accepted,
 but options that change the adapter structure, such as DoRA, RS-LoRA, bias
