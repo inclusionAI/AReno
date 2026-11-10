@@ -60,11 +60,12 @@ def test_loss_matches_numpy_and_is_candidate_permutation_equivariant():
         assert float(stats["jev_brier"].item()) == pytest.approx(brier, abs=1e-6)
 
 
+@pytest.mark.parametrize("training_mode", ["lora", "full", "qat"])
 @pytest.mark.parametrize("sizes", [(3,), (2, 3, 2)])
 @pytest.mark.parametrize("mini_bs", [1, 2, 3, 8])
 @pytest.mark.parametrize("alternate_layout", [False, True])
 def test_streaming_gradient_matches_joint_gradient_and_updates_head_and_lora(
-    tmp_path, alternate_layout, mini_bs, sizes
+    tmp_path, alternate_layout, mini_bs, sizes, training_mode
 ):
     mx = pytest.importorskip("mlx.core")
     import mlx.nn as nn
@@ -79,10 +80,11 @@ def test_streaming_gradient_matches_joint_gradient_and_updates_head_and_lora(
     class Backbone(nn.Module):
         def __init__(self):
             super().__init__()
-            self.embedding = nn.Embedding(40, 8)
-            self.projection = nn.Linear(8, 8)
-            self.freeze()
-            self.projection = LoRALinear.from_base(self.projection, r=4, scale=2.0, dropout=0.0)
+            self.embedding = nn.Embedding(40, hidden)
+            self.projection = nn.Linear(hidden, hidden)
+            if training_mode == "lora":
+                self.freeze()
+                self.projection = LoRALinear.from_base(self.projection, r=4, scale=2.0, dropout=0.0)
 
         def __call__(self, tokens):
             return self.projection(mx.cumsum(self.embedding(tokens), axis=1))
@@ -102,14 +104,19 @@ def test_streaming_gradient_matches_joint_gradient_and_updates_head_and_lora(
 
     with mx.stream(mx.cpu):
         mx.random.seed(42)
+        hidden = 64 if training_mode == "qat" else 8
         model = OtherLayout() if alternate_layout else Backbone()
-        provider = Provider(model, None, None, {"dim": 8})
+        if training_mode == "qat":
+            from areno.api.backend.mlx.qat import configure_qat
+
+            configure_qat(model, {}, bits=4, group_size=32)
+        provider = Provider(model, None, None, {"dim": hidden})
         optimizer = optim.AdamW(learning_rate=1e-3)
         backend = SimpleNamespace(
             model=model,
             provider=provider,
             optimizer=optimizer,
-            model_config={"dim": 8},
+            model_config={"dim": hidden},
             _policy_version=0,
             config=SimpleNamespace(
                 head_lr=1e-3,
@@ -168,8 +175,9 @@ def test_streaming_gradient_matches_joint_gradient_and_updates_head_and_lora(
         for key, value in after.items():
             expected = before[key] - 1e-3 * flat_grads[key] if key in trainable else before[key]
             np.testing.assert_allclose(np.array(value), np.array(expected), atol=3e-6, rtol=3e-5)
-        assert result["head_update_norm"] > 0 and result["lora_update_norm"] > 0
-        assert result["head_grad_norm"] > 0 and result["lora_grad_norm"] > 0
+        backbone = "lora" if training_mode == "lora" else "backbone"
+        assert result["head_update_norm"] > 0 and result[backbone + "_update_norm"] > 0
+        assert result["head_grad_norm"] > 0 and result[backbone + "_grad_norm"] > 0
         expected_logits = np.array(question_logits(provider, rows))
         save_head(backend, tmp_path)
         model.score_head.load_weights(str(tmp_path / "score_head.safetensors"))
@@ -342,3 +350,36 @@ def test_training_normalizes_cli_records_without_including_test_split(tmp_path):
     pq.write_table(pa.Table.from_pylist([typed]), path)
     assert load_parquet_questions(path) == expected
     assert normalize_questions(pq.read_table(path).to_pylist()) == expected
+
+
+@pytest.mark.parametrize("inference_only", [False, True])
+@pytest.mark.parametrize("quantization_bits", [None, 4])
+def test_mlx_full_backbone_config_without_lora(inference_only, quantization_bits):
+    from areno.api.jev import JevMlxConfig
+
+    config = JevMlxConfig(
+        model_path="full-checkpoint",
+        inference_only=inference_only,
+        quantization_bits=quantization_bits,
+    )
+    assert config.lora is None
+    assert config.inference_only is inference_only
+    assert config.quantization_bits == quantization_bits
+
+
+def test_mlx_full_backbone_trainer_restores_decision_checkpoint(tmp_path):
+    from areno.api.jev import JevTrainerConfig
+
+    (tmp_path / "score_head.safetensors").touch()
+    config = JevTrainerConfig(
+        algo="jev",
+        ckpt=str(tmp_path),
+        dataset_path="data",
+        backend="mlx",
+        world_size=1,
+        tp_size=1,
+        save_path="out",
+    )
+    runtime = config.backend_config()
+    assert runtime.lora is None
+    assert runtime.decision_checkpoint == str(tmp_path)
