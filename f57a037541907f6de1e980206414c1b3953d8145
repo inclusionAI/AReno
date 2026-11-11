@@ -1,0 +1,48 @@
+areno/engine/runtime/recompute_policy.py
+  s_7779b565419f0e::t_47ee49b155f784 66-70
+  s_7779b565419f0e::t_8e518ab0eb00d3 1-65,71-77
+tests/test_selective_recompute_cpu.py
+  s_7779b565419f0e::t_df2e8c18571161 232-237,239-241
+  s_7779b565419f0e::t_c926ecc3e7cad1 289-300,304-308
+  s_7779b565419f0e::t_d4b6dbbe15afde 301-303
+  s_7779b565419f0e::t_f018655e32c249 13,161,182-185,204-224
+  s_7779b565419f0e::t_7c46565df47eb2 1-11,14-17,24-117,120-160,165-181,186-189,193-196,200-203,257-267,272-278,281,285-288
+  s_7779b565419f0e::t_2a95f94fccf69a 12,225-231,238,242-256
+  s_7779b565419f0e::t_47ee49b155f784 18-23,118-119,162-164,190-192,197-199,268-271,279-280,282-284
+areno/models/bailing_v3/model.py
+  s_7779b565419f0e::t_93f294c23c172a 1683-1685,1688-1694
+  s_7779b565419f0e::t_8e518ab0eb00d3 309-310,332,1686-1687,1695-1698,1706-1708,1714-1715,1726-1727,1735-1737,1743-1745,1753-1754
+  s_7779b565419f0e::t_47ee49b155f784 1699-1705,1709-1713,1728-1734,1738-1742
+  s_7779b565419f0e::t_d4b6dbbe15afde 1716-1718
+  s_7779b565419f0e::t_c926ecc3e7cad1 1719-1725
+areno/engine/runtime/recompute.py
+  s_7779b565419f0e::t_8e518ab0eb00d3 25-31,34,40-43,73-74,78-82,85
+scripts/validate_recompute_head.py
+  s_7779b565419f0e::t_b20514332cf502 1-89,93-101,118-120,124-130
+  s_7779b565419f0e::t_47ee49b155f784 90-92,102-117,121-123
+scripts/compare_recompute_head.py
+  s_7779b565419f0e::t_b20514332cf502 1-45
+docs/concepts/recompute-638-proposal.md
+  s_7779b565419f0e::t_7c46565df47eb2 1-83
+areno/engine/runtime/metadata.py
+  s_7779b565419f0e::t_8e518ab0eb00d3 18-19,35
+areno/engine/runtime/logprobs.py
+  s_7779b565419f0e::t_93f294c23c172a 139,144
+  s_7779b565419f0e::t_8e518ab0eb00d3 137,147-148,189-197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f57a037541907f6de1e980206414c1b3953d8145",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+scripts/diagnose_recompute_numerics.py
+  s_7779b565419f0e::t_e03cf6dd70ee52 49-67
+  s_7779b565419f0e::t_bee8b6f8450b5b 68-77,165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "28b49dc3a39391bd1aa06892cc62d9b31cccaf75",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
