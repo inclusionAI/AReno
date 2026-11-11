@@ -6,7 +6,7 @@ trajectory and ``prompt`` carries the task statement.
 
 from __future__ import annotations
 
-DEFAULT_PROMPT = "Keep the pole balanced as long as possible."
+DEFAULT_PROMPT = "Play the episode and maximize the cumulative reward."
 
 
 def load_training_dataset(dataset_path: str, *, default_loader, **_: object) -> list[dict]:

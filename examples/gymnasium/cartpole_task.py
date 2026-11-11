@@ -26,9 +26,19 @@ def decode_action(model_text):
     return int(model_text.strip())
 
 
-run_agent, reward_fn = make_gymnasium_rollout(
+_run_episode, _score_episode = make_gymnasium_rollout(
     make_env=lambda: gym.make("CartPole-v1"),
     encode_observation=encode_observation,
     decode_action=decode_action,
     max_episode_steps=128,
 )
+
+
+# The CLI preflight validates task hooks by finding top-level `def` nodes, so
+# the factory pair is exposed through explicit wrappers.
+async def run_agent(ctx, batch):
+    return await _run_episode(ctx, batch)
+
+
+def reward_fn(record):
+    return _score_episode(record)
