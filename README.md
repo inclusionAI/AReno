@@ -29,14 +29,9 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 ## Highlights
 
-- ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
-- 🪶 **Lightweight**: one self-contained train/serve stack with CUDA, Ascend NPU, and Apple Silicon MLX backends.
-- 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
-- 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
-- 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
-- 🗜️ **QLoRA**: train Qwen3 dense and Bailing-MoE V3 adapters on CUDA with NF4 weights, double quantization, and paged optimizers.
-- 🎯 **JEV**: train a model-independent decision head with backbone LoRA or full parameter updates, including native CUDA QLoRA and 4-bit/8-bit AdamW, then serve typed `choice`, `noul`, and `score` decisions.
-- 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
+- ✨ **Plug-and-play**: Various post-training methods are easily accessible via the simple command line interface (CLI) or via [Trainer](https://github.com/inclusionAI/AReno/blob/main/areno/api/trainer.py) API from Python SDK.
+- 🪶 **Self-contained**: A self-contained stack, no external training or inference backend, no need to set up cluster or launcher, just native [CUDA](https://developer.nvidia.com/cuda/toolkit) or [MLX](https://github.com/ml-explore/mlx).
+- 🧩 **Extensible**: Easily register new algorithms, model adapters, reward functions, and hardware backends without needing to modify the core.
 
 ## Installation
 
