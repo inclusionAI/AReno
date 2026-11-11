@@ -722,6 +722,11 @@ def test_phi4mm_vision_checkpoint_save_reload_closes(tmp_path, monkeypatch):
     adapter = Phi4MMAdapter()
     config = adapter.config_from_hf(_config())
     first = adapter.build(config).float()
+    # Native checkpoint-backed parameters (including the vision pooling
+    # probe) may use empty storage until loaded. Seed finite source weights.
+    with torch.no_grad():
+        for parameter in first.parameters():
+            parameter.uniform_(-0.02, 0.02)
     seed = tmp_path / "seed"
     save_checkpoint_weights(
         first,

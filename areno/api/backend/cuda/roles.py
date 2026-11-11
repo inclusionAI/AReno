@@ -12,9 +12,9 @@ from areno.engine.config import EngineConfig
 from areno.engine.data import to_device
 from areno.engine.modeling import build_model_on_device, build_optimizer, canonical_model_path, param_grad, unwrap_model
 from areno.engine.optim import AdamW4bit, AdamW8bit, AdamWFP32Master
-from areno.engine.parallel.collectives import gather_from_sequence_parallel_region
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import EnsureRolesPayload, ScorePayload, TrainValuesPayload
+from areno.engine.runtime.heads import gather_packed_hidden as _gather_packed_hidden
 from areno.engine.runtime.logprobs import packed_next_token_logprobs
 from areno.engine.runtime.routing_replay import routing_replay_context
 from areno.engine.runtime.train_step import _pack_train_data, _train_meta
@@ -32,19 +32,6 @@ _REWARD_HEAD_WEIGHT_KEYS = (
     "model.reward_head.weight",
     "model.value_head.weight",
 )
-
-
-class _ScaleGradient(torch.autograd.Function):
-    """Keep forward values unchanged while scaling the input gradient."""
-
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, scale: float) -> torch.Tensor:
-        ctx.scale = scale
-        return x
-
-    @staticmethod
-    def backward(ctx, grad: torch.Tensor):
-        return grad * ctx.scale, None
 
 
 def accumulate_role_main_gradients(role: WorkerRole) -> None:
@@ -165,6 +152,17 @@ def _zero_init_value_head(value_head: torch.nn.Module | None) -> None:
         param.zero_()
 
 
+def _load_shared_base_state(model: torch.nn.Module, state: dict[str, torch.Tensor]) -> None:
+    """Load an actor's weights into a role model that may lack the actor's MTP layers."""
+
+    result = model.load_state_dict(state, strict=False)
+    unexpected = [key for key in result.unexpected_keys if not key.startswith("mtp_layers.")]
+    if result.missing_keys or unexpected:
+        raise RuntimeError(
+            f"role model does not match the actor: missing={result.missing_keys} unexpected={unexpected}"
+        )
+
+
 class WorkerRole:
     """A swap-in non-actor model (reference / critic / reward) on this rank."""
 
@@ -222,11 +220,14 @@ class WorkerRole:
             devices=devices,
             dummy_load=False,
         )
+        # Reference, critic and reward roles neither train nor draft with an
+        # MTP head, so they skip its parameters even when the actor keeps them.
+        role_config.model.mtp_layers_enabled = False
         model = build_model_on_device(role_config, device)
         if source_model is None:
             load_model_weights(model, model_config, path)
         else:
-            model.load_state_dict(unwrap_model(source_model).state_dict())
+            _load_shared_base_state(model, unwrap_model(source_model).state_dict())
         checkpoint_head_out = _maybe_reward_head_out_features(path) if critic else None
         head_out = _reward_head_out_features(path) if reward else checkpoint_head_out or 1
         head_bias = _reward_head_uses_bias(path) if reward or checkpoint_head_out is not None else False
@@ -766,21 +767,6 @@ def _split_packed_token_rows(values: torch.Tensor, lengths: list[int]) -> list[l
         rows.append(values[offset : offset + length].detach().cpu().tolist())
         offset += length
     return rows
-
-
-def _gather_packed_hidden(hidden_states: torch.Tensor, train_meta) -> torch.Tensor:
-    """Materialize the full packed token axis for replicated scalar heads."""
-
-    if train_meta.sequence_parallel:
-        hidden_states = gather_from_sequence_parallel_region(hidden_states)
-        # Every TP rank applies the same replicated scalar head and therefore
-        # contributes the same full-sequence hidden gradient. The gather's
-        # backward reduce-scatter sums those copies, so average only the
-        # gradient crossing back into the TP backbone. Value-head parameter
-        # gradients remain unscaled and are averaged by `_sync_role_grads`.
-        world_size = get_tp_context().world_size
-        return _ScaleGradient.apply(hidden_states, 1.0 / world_size)
-    return hidden_states
 
 
 def _packed_action_positions(tokens: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:

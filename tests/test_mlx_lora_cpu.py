@@ -22,9 +22,20 @@ class _FakeLinear:
     def __init__(self, input_dims: int, output_dims: int) -> None:
         self.input_dims = input_dims
         self.output_dims = output_dims
+        self.weight = np.zeros((output_dims, input_dims), dtype=np.float32)
 
 
 class _FakeQuantizedLinear(_FakeLinear):
+    pass
+
+
+class _FakeSwitchLinear:
+    def __init__(self, input_dims, output_dims, num_experts):
+        self.input_dims, self.output_dims, self.num_experts = input_dims, output_dims, num_experts
+        self.weight = np.zeros((num_experts, output_dims, input_dims), dtype=np.float32)
+
+
+class _FakeQuantizedSwitchLinear(_FakeSwitchLinear):
     pass
 
 
@@ -73,6 +84,20 @@ class _FakeModel:
             parameters[self.extra_trainable] = np.zeros((1,), dtype=np.float32)
         return parameters
 
+    def parameters(self):
+        parameters = self.trainable_parameters()
+        for path, module in self.modules.items():
+            base = module.linear if isinstance(module, _FakeLoraLinear) else module
+            parameters[f"{path}.weight"] = base.weight
+        return parameters
+
+
+class _FakeLoraSwitchLinear(_FakeLoraLinear):
+    def __init__(self, base, *, rank, dropout, scale):
+        super().__init__(base, rank=rank, dropout=dropout, scale=scale)
+        self.lora_a = np.zeros((base.num_experts, rank, base.input_dims), dtype=np.float32)
+        self.lora_b = np.zeros((base.num_experts, base.output_dims, rank), dtype=np.float32)
+
 
 def _fake_api(*, tensors: dict[str, np.ndarray] | None = None, evaluated: list | None = None):
     def load(path: str):
@@ -85,10 +110,13 @@ def _fake_api(*, tensors: dict[str, np.ndarray] | None = None, evaluated: list |
             evaluated.extend(arrays)
 
     return SimpleNamespace(
-        mx=SimpleNamespace(load=load, eval=evaluate, float32=np.float32),
+        mx=SimpleNamespace(load=load, eval=evaluate, float32=np.float32, stack=np.stack),
         linear_type=_FakeLinear,
         quantized_linear_type=_FakeQuantizedLinear,
         lora_linear_type=_FakeLoraLinear,
+        switch_linear_type=_FakeSwitchLinear,
+        quantized_switch_linear_type=_FakeQuantizedSwitchLinear,
+        lora_switch_linear_type=_FakeLoraSwitchLinear,
         tree_flatten=lambda tree: list(tree.items()),
         tree_unflatten=lambda pairs: dict(pairs),
     )
@@ -145,19 +173,17 @@ def test_initialize_lora_rejects_unsupported_model_families_before_import(monkey
         lambda: pytest.fail("MLX should not be imported for an unsupported model family"),
     )
 
-    with pytest.raises(ValueError, match="qwen3"):
+    with pytest.raises(ValueError, match="decoder layers"):
         initialize_lora(_FakeModel({}), LoraConfig(), model_type=model_type)
 
 
-def test_initialize_lora_rejects_quantized_targets_before_freezing(monkeypatch):
+def test_initialize_lora_accepts_quantized_targets_and_freezes_base(monkeypatch):
     model = _FakeModel({"model.layers.0.self_attn.q_proj": _FakeQuantizedLinear(4, 6)})
     config = LoraConfig(rank=2, target_modules=("q_proj",))
     monkeypatch.setattr("areno.api.backend.mlx.lora._mlx_lora_api", _fake_api)
 
-    with pytest.raises(ValueError, match="QLoRA"):
-        initialize_lora(model, config, model_type="qwen3")
-
-    assert not model.frozen
+    state = initialize_lora(model, config, model_type="qwen3")
+    assert model.frozen and state.slots
 
 
 def test_initialize_lora_rejects_any_unexpected_trainable_parameter(monkeypatch):

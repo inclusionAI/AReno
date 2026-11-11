@@ -34,6 +34,7 @@ from areno.engine.modeling import canonical_model_path
 from areno.engine.protocol import (
     EnsureRolesPayload,
     ExportAdapterPayload,
+    ExportGGUFPayload,
     Op,
     RoleSpecPayload,
     RolloutCacheProbePayload,
@@ -307,9 +308,9 @@ class ArenoEngine:
         rollout_max_cache_len = rollout_max_prompt_len + max_new_tokens
         dp_size = int(self.config.dp_size)
         local_max_running_prompts = max(ceil_div(int(max_running_prompts), dp_size), 1)
-        # Worst-case per-rank prefill = every local running slot prefilling its
-        # full prompt. The public max_running_prompts value is global.
-        max_prefill_tokens = local_max_running_prompts * rollout_max_prompt_len
+        # Bound temporary activations independently of KV/context capacity.
+        # The worker retains full prompts and fills their caches in chunks.
+        max_prefill_tokens = min(local_max_running_prompts * rollout_max_prompt_len, 8192)
         # InferenceBatchState already owns bounded admission and continuous
         # refill. Keeping the whole request in one worker payload prevents the
         # coordinator from serialising independent max-running-sized chunks and
@@ -445,7 +446,7 @@ class ArenoEngine:
             self._async_dp_cursor = count()
         dp_start = next(self._async_dp_cursor) % dp_size
         local_max_running_prompts = max(ceil_div(int(max_running_prompts), dp_size), 1)
-        max_prefill_tokens = local_max_running_prompts * rollout_max_prompt_len
+        max_prefill_tokens = min(local_max_running_prompts * rollout_max_prompt_len, 8192)
         # InferenceBatchState already owns bounded admission and continuous
         # refill. Submit all rows together so pending prompts can enter a free
         # slot without waiting for an earlier coordinator chunk to finish.
@@ -718,6 +719,14 @@ class ArenoEngine:
         result = next((result for result in results if result is not None), None)
         if result is None:
             raise RuntimeError("native LoRA export did not produce an artifact")
+        return result["path"]
+
+    def export_gguf(self, output_dir: str, *, file_type: str = "f16") -> str:
+        """Write trained policy tensors directly to a portable GGUF package."""
+        results = self.cluster.call(Op.EXPORT_GGUF, ExportGGUFPayload(output_dir, file_type))
+        result = next((result for result in results if result is not None), None)
+        if result is None:
+            raise RuntimeError("GGUF export did not produce an artifact")
         return result["path"]
 
     def _transport_payload(self, payload: Any) -> Any:

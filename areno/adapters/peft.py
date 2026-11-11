@@ -57,7 +57,7 @@ def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
             local_B = canonical_B
         else:
             local_A = canonical_A
-            local_B = canonical_B[slot.output_start : slot.output_end]
+            local_B = torch.cat([canonical_B[start:end] for start, end in slot.output_ranges], dim=0)
         slot.lora_A.copy_(local_A.to(device=slot.lora_A.device, dtype=slot.lora_A.dtype))
         slot.lora_B.copy_(local_B.to(device=slot.lora_B.device, dtype=slot.lora_B.dtype))
 
@@ -99,11 +99,14 @@ def export_peft_adapter(
             if ctx.rank != 0:
                 continue
             canonical_A = slot.lora_A.detach()
-            canonical_B = (
-                _gather_replicated_column(slot, gathered_B, ctx.world_size)
-                if slot.output_replicated
-                else torch.cat(gathered_B, dim=0)
-            )
+            if slot.output_replicated:
+                canonical_B = _gather_replicated_column(slot, gathered_B, ctx.world_size)
+            elif len(slot.output_ranges) > 1:
+                widths = [end - start for start, end in slot.output_ranges]
+                pieces = [tensor.split(widths, dim=0) for tensor in gathered_B]
+                canonical_B = torch.cat([torch.cat(part, dim=0) for part in zip(*pieces, strict=True)], dim=0)
+            else:
+                canonical_B = torch.cat(gathered_B, dim=0)
         state[_key(logical_name, "A")] = canonical_A.float().cpu().contiguous()
         state[_key(logical_name, "B")] = canonical_B.float().cpu().contiguous()
     if ctx.rank != 0:

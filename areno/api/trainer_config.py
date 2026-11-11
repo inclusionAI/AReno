@@ -32,9 +32,13 @@ class TrainerConfig:
     backend: str | None = None
     base_model_name_or_path: str | None = field(default=None, kw_only=True)
     model_hub: str = "modelscope"
+    mlx_quantize_bits: int | None = field(default=None, kw_only=True)
+    mlx_quantize_group_size: int = field(default=64, kw_only=True)
     dataset_loader_fn: str | None = None
     save_path: str | None = None
     save_interval: int = 100
+    export_gguf_path: str | None = field(default=None, kw_only=True)
+    gguf_file_type: Literal["f16", "q8_0"] = field(default="f16", kw_only=True)
     epochs: int = 10
     max_steps: int | None = None
     tp_size: int = 4
@@ -56,6 +60,10 @@ class TrainerConfig:
     optimizer_beta2: float = 0.999
     weight_decay: float = 1.0e-2
     grad_clip_norm: float = 1.0
+    clip_gradients: bool = field(default=True, kw_only=True)
+    adam_bias_correction: bool = field(default=True, kw_only=True)
+    seed: int | None = field(default=None, kw_only=True)
+    mlx_compile_train_step: bool = field(default=True, kw_only=True)
     adam_8bit: bool = False
     adam_4bit: bool = False
     unfreeze_multimodal_tower: bool = False
@@ -75,6 +83,9 @@ class TrainerConfig:
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     attn_backend: str = "flash"
+    # Opt-in auxiliary MTP loss for checkpoints that ship MTP layers; None keeps
+    # the layers unbuilt unless speculative decoding needs them.
+    mtp_loss_scale: float | None = None
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     agent_fn: str | None = None
     train_tool_results: bool = False
@@ -91,6 +102,27 @@ class TrainerConfig:
             self.backend = self.backend.lower()
         if self.backend not in {"cuda", "mlx", "npu"}:
             raise ValueError("backend must be one of: cuda, mlx, npu")
+        if not self.adam_bias_correction and self.backend != "mlx":
+            raise ValueError("disabling Adam bias correction currently requires backend=mlx")
+        if not self.mlx_compile_train_step and self.backend != "mlx":
+            raise ValueError("mlx_compile_train_step=False requires backend=mlx")
+        if not self.clip_gradients and self.backend != "mlx":
+            raise ValueError("disabling gradient clipping currently requires backend=mlx")
+        if self.seed is not None and not 0 <= self.seed < 2**32:
+            raise ValueError("seed must be in [0, 2**32)")
+        if self.gguf_file_type not in {"f16", "q8_0"}:
+            raise ValueError("gguf_file_type must be one of: f16, q8_0")
+        if self.export_gguf_path is not None:
+            if self.backend != "cuda":
+                raise ValueError("GGUF export is only supported by the CUDA backend")
+            if self.lora is not None and self.lora.qlora:
+                raise ValueError("GGUF export of packed QLoRA bases is not supported")
+        if self.mlx_quantize_bits is not None:
+            from areno.api.backend.mlx.quantization import validate_quantization
+
+            if self.backend != "mlx":
+                raise ValueError("MLX online quantization requires backend=mlx")
+            validate_quantization(self.mlx_quantize_bits, self.mlx_quantize_group_size)
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("adam_4bit and adam_8bit are mutually exclusive")
         if self.adam_4bit and self.backend not in {"cuda", "npu"}:
@@ -151,14 +183,14 @@ class TrainerConfig:
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""
 
-        return {
+        optimizer = {
             "lr": self.optimizer_lr,
             "min_lr": self.optimizer_min_lr,
             "lr_decay_steps": self.lr_decay_steps,
             "lr_decay_style": self.lr_decay_style,
             "betas": (self.optimizer_beta1, self.optimizer_beta2),
             "weight_decay": self.weight_decay,
-            "grad_clip_norm": self.grad_clip_norm,
+            "grad_clip_norm": self.grad_clip_norm if self.clip_gradients else None,
             "adam_8bit": self.adam_8bit,
             "adam_4bit": self.adam_4bit,
             "unfreeze_multimodal_tower": self.unfreeze_multimodal_tower,
@@ -172,6 +204,9 @@ class TrainerConfig:
             "multimodal_projector_lr_decay_steps": self.multimodal_projector_lr_decay_steps,
             "multimodal_projector_lr_decay_style": self.multimodal_projector_lr_decay_style,
         }
+        if self.backend == "mlx":
+            optimizer["bias_correction"] = self.adam_bias_correction
+        return optimizer
 
     def backend_type(self):
         """Return the selected execution backend without importing it eagerly."""
@@ -193,10 +228,13 @@ class TrainerConfig:
         from areno.api.config import MlxConfig
 
         return MlxConfig(
+            quantization_bits=self.mlx_quantize_bits,
+            quantization_group_size=self.mlx_quantize_group_size,
             base_model_name_or_path=self.base_model_name_or_path,
             optimizer=self.optimizer_config(),
             keep_rollout_state=self.keep_rollout_state,
-            compile_train_step=True,
+            compile_train_step=self.mlx_compile_train_step,
+            seed=self.seed,
             gradient_checkpointing=self.activation_checkpointing,
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -225,6 +263,7 @@ class TrainerConfig:
                 "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "mtp_loss_scale": self.mtp_loss_scale,
             },
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -232,9 +271,33 @@ class TrainerConfig:
 
 
 @dataclass(slots=True)
+class SFTTrainerConfig(TrainerConfig):
+    """Optional deterministic shuffling and held-out validation for SFT."""
+
+    validation_dataset_path: str | None = field(default=None, kw_only=True)
+    validation_dataset_loader_fn: str | None = field(default=None, kw_only=True)
+    eval_interval: int = field(default=50, kw_only=True)
+    eval_batches: int | None = field(default=None, kw_only=True)
+    eval_before_step: bool = field(default=False, kw_only=True)
+    shuffle: bool = field(default=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        TrainerConfig.__post_init__(self)
+        if self.eval_interval < 1:
+            raise ValueError("eval_interval must be positive")
+        if self.eval_batches is not None and self.eval_batches < 1:
+            raise ValueError("eval_batches must be positive or None")
+        if self.validation_dataset_loader_fn and not self.validation_dataset_path:
+            raise ValueError("validation_dataset_loader_fn requires validation_dataset_path")
+
+
+@dataclass(slots=True)
 class RolloutTrainerConfig(TrainerConfig):
     """Sampling/rollout settings used by online RL trainers."""
 
+    # Rollout speculative decoding with the checkpoint's MTP layer: draft this
+    # many tokens per step and verify them in one target forward. 0 disables it.
+    speculative_draft_tokens: int = 0
     n_samples: int = 8
     greedy: bool = False
     temperature: float = 1.0
@@ -275,6 +338,8 @@ class RolloutTrainerConfig(TrainerConfig):
                 "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "mtp_loss_scale": self.mtp_loss_scale,
+                "speculative_draft_tokens": self.speculative_draft_tokens,
                 # R3 is the default CUDA path for rollout-based MoE training.
                 # EngineConfig disables it again when the checkpoint is dense.
                 "rollout_routing_replay": True,
@@ -296,7 +361,8 @@ class RolloutTrainerConfig(TrainerConfig):
             completion_batch_size=max_running,
             prefill_batch_size=min(max_running, 8),
             keep_rollout_state=self.keep_rollout_state,
-            compile_train_step=True,
+            compile_train_step=self.mlx_compile_train_step,
+            seed=self.seed,
             gradient_checkpointing=self.activation_checkpointing,
             lora=self.lora,
             reference_mode=self.reference_mode,

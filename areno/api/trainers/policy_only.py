@@ -27,6 +27,7 @@ import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.trainers.export import export_gguf_if_configured
 
 
 class _LogprobStats:
@@ -151,6 +152,7 @@ class PolicyOnlyTrainer:
         self.areno.init()
         try:
             self._fit_initialized()
+            export_gguf_if_configured(self)
         finally:
             self.areno.close()
 
@@ -632,6 +634,7 @@ class PolicyOnlyTrainer:
                     advantages=[],
                     prompt_len=prompt_len,
                     scalar_advantage=advantage,
+                    trajectory_id=reward_index,
                     features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,

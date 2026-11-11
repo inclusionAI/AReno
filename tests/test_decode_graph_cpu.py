@@ -64,7 +64,7 @@ def test_graph_uses_selected_device_for_warmup_capture_and_replay(monkeypatch, d
 
     def model(**kwargs):
         events.append(("model",))
-        return SimpleNamespace(logits_shard=kwargs["input_ids"].float().unsqueeze(-1))
+        return SimpleNamespace(logits_shard=kwargs["input_ids"].float().unsqueeze(-1), hidden_states=None)
 
     captured = decode_graph.DecodeGraph(model, 4, 2, 9, 4, device)
     pointers = [t.data_ptr() for t in (captured.input_ids, captured.block_table, captured.recurrent_slots)]
@@ -103,6 +103,8 @@ def test_graph_sync_brackets_collective_on_selected_device(monkeypatch, device):
 def test_graph_memory_vote_includes_other_tp_ranks(monkeypatch, device, cpu_storage, free, peer_ready, expected):
     monkeypatch.setattr(torch, device.type, SimpleNamespace(mem_get_info=lambda d: (free, 1000)))
     monkeypatch.setattr(decode_graph.dist, "is_initialized", lambda: True)
+    # The trial allocation would need real device memory; the probe passes here.
+    monkeypatch.setattr(torch, "empty", lambda *args, **kwargs: None)
     tp_group = object()
 
     def vote(value, *, op, group):
@@ -112,7 +114,9 @@ def test_graph_memory_vote_includes_other_tp_ranks(monkeypatch, device, cpu_stor
             value.zero_()
 
     monkeypatch.setattr(decode_graph.dist, "all_reduce", vote)
-    assert decode_graph.has_graph_capture_memory(device, tp_group, 100) == expected
+    headroom, free_bytes = decode_graph.graph_capture_headroom(device, 100)
+    assert free_bytes == free
+    assert decode_graph.agree_across_ranks(device, tp_group, headroom) == expected
 
 
 def test_cache_initialization_captures_graphs_and_reallocation_invalidates_them(monkeypatch, device):
@@ -128,8 +132,11 @@ def test_cache_initialization_captures_graphs_and_reallocation_invalidates_them(
     worker = SimpleNamespace(
         device=device,
         model=model,
+        config=SimpleNamespace(runtime=SimpleNamespace(speculative_draft_tokens=0)),
         _infer_cache_spec=None,
         _decode_graphs={},
+        _verify_graphs={},
+        _draft_graphs={},
         _decode_graph_skipped_buckets=set(),
         _decode_graph_init_attempted=False,
         _prepare_actor_onloaded=lambda: None,
@@ -155,14 +162,13 @@ def test_cache_initialization_captures_graphs_and_reallocation_invalidates_them(
     assert len(captured) == 2 and worker._decode_graphs[1] is captured[1]
 
 
-@pytest.mark.parametrize("result", ["success", "eager", "memory", "local_oom", "peer_oom", "error"])
+@pytest.mark.parametrize("result", ["success", "eager", "memory", "peer_veto", "oom", "error"])
 def test_inference_graph_capture_and_failure_decisions(monkeypatch, device, result):
     events = []
 
     class Graph:
         def __init__(self, *args, **kwargs):
             events.append("create")
-            self.graph = SimpleNamespace(reset=lambda: events.append("reset"))
 
         def warmup(self):
             events.append("warmup")
@@ -170,22 +176,29 @@ def test_inference_graph_capture_and_failure_decisions(monkeypatch, device, resu
 
         def capture(self):
             events.append("capture")
-            if result == "local_oom":
+            if result == "oom":
                 raise torch.OutOfMemoryError("test capture OOM")
             if result == "error":
                 raise RuntimeError("test unsupported capture operation")
 
-    def vote(device, group, ready):
-        assert ready == (result != "local_oom")
-        return ready and result != "peer_oom"
+    def vote(device, group, local_ok):
+        # Every rank votes before warmup, so a peer veto skips the model entirely.
+        events.append("vote")
+        assert local_ok == (result != "memory")
+        return local_ok and result != "peer_veto"
 
-    api = SimpleNamespace(mem_get_info=lambda d: (1000, 2000), empty_cache=lambda: events.append("empty"))
+    api = SimpleNamespace(
+        mem_get_info=lambda d: (1000, 2000),
+        empty_cache=lambda: events.append("empty"),
+        memory_reserved=lambda d: 0,
+        graph_pool_handle=lambda: "pool",
+    )
     monkeypatch.setattr(torch, device.type, api)
     monkeypatch.setattr(inference, "DecodeGraph", Graph)
-    monkeypatch.setattr(inference, "get_tp_context", lambda: SimpleNamespace(group=None, is_rank0=True))
+    monkeypatch.setattr(inference, "get_tp_context", lambda: SimpleNamespace(group=None, rank=0, is_rank0=True))
     monkeypatch.setattr(inference, "sync_before_graph_capture", lambda *args: events.append("sync"))
-    monkeypatch.setattr(inference, "has_graph_capture_memory", lambda *args: result != "memory")
-    monkeypatch.setattr(inference, "all_ranks_graph_ready", vote)
+    monkeypatch.setattr(inference, "graph_capture_headroom", lambda *args: (result != "memory", 1000))
+    monkeypatch.setattr(inference, "agree_across_ranks", vote)
     runtime = RuntimeConfig(device_type=device.type, eager_decode=result == "eager", decode_graph_buckets=[1])
     worker = SimpleNamespace(
         device=device,
@@ -193,16 +206,24 @@ def test_inference_graph_capture_and_failure_decisions(monkeypatch, device, resu
         model=SimpleNamespace(training=False),
         _decode_graph_init_attempted=False,
         _decode_graphs={},
+        _verify_graphs={},
+        _draft_graphs={},
         _decode_graph_skipped_buckets=set(),
+        _decode_graph_pool=None,
+        _decode_graph_warmup_peak=0,
         _infer_batch_size=1,
         _max_blocks_per_seq=2,
         _scratch_block=9,
         _scratch_recurrent_slot=1,
     )
     manager = inference.InferenceManager(worker)
-    if result == "error":
-        with pytest.raises(RuntimeError, match="test unsupported capture operation"):
+    if result in ("oom", "error"):
+        # Past the unanimous vote no rank can drop out of the model's collectives.
+        match = "graph for decode bucket=1" if result == "oom" else "test unsupported capture operation"
+        with pytest.raises(RuntimeError, match=match):
             manager._init_decode_graphs()
+        if result == "oom":
+            assert events[-1] == "empty"
         return
     manager._init_decode_graphs()
     before = list(events)
@@ -211,13 +232,14 @@ def test_inference_graph_capture_and_failure_decisions(monkeypatch, device, resu
     if result == "eager":
         assert events == [] and not worker._decode_graph_init_attempted
     elif result == "success":
+        assert events == ["create", "sync", "vote", "warmup", "capture"]
         assert list(worker._decode_graphs) == [1]
         assert isinstance(manager._decode_graph_for_active_count(1), Graph)
+        assert worker._decode_graph_pool == "pool"
     else:
+        assert events == ["create", "sync", "vote"]
         assert not worker._decode_graphs and worker._decode_graph_skipped_buckets == {1}
         assert manager._decode_graph_for_active_count(1) is None
-        if result.endswith("oom"):
-            assert events[-3:] == ["reset", "empty", "sync"]
 
 
 def test_capture_guard_uses_tensor_device(monkeypatch, device):

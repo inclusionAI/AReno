@@ -19,6 +19,12 @@ JSON/JSONL, Parquet, CSV/TSV, Arrow, ``datasets.save_to_disk(...)`` directories,
 and Hugging Face dataset references. Loaders should keep tokenization out of the
 dataset layer; trainers own tokenizer-specific rendering and token limits.
 
+Loaders that need checkpoint assets may declare an optional keyword-only
+``model_path`` parameter. ``areno train`` passes the resolved local ``--ckpt``
+directory to training and validation loaders that explicitly declare it.
+Existing loaders, including ones that forward ``**kwargs``, keep their original
+helper arguments.
+
 SFT
 ---
 

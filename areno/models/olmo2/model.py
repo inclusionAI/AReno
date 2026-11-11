@@ -25,6 +25,7 @@ from areno.engine.layers.linear import mark_tensor_parallel_parameter
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
+from areno.engine.runtime.recompute import tokenwise_forward
 from areno.models.base import ModelAdapter
 from areno.models.olmo2.checkpoint import CHECKPOINT_SPEC
 from areno.models.olmo2.config import config_from_hf
@@ -107,7 +108,12 @@ class Olmo2DecoderLayer(QwenDecoderLayer):
         hidden_states = self.self_attn(hidden_states, position_ids, train_meta, infer_meta)
         hidden_states = post_norm_residual(residual, hidden_states, self.post_attention_layernorm)
         residual = hidden_states
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = tokenwise_forward(
+            self.mlp,
+            hidden_states,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
         return post_norm_residual(residual, hidden_states, self.post_feedforward_layernorm)
 
 

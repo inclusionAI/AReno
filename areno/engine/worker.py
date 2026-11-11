@@ -15,7 +15,9 @@ to the matching public method.
 
 from __future__ import annotations
 
+import gc
 import queue
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -34,6 +36,7 @@ from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weigh
 from areno.engine.protocol import (
     Command,
     ExportAdapterPayload,
+    ExportGGUFPayload,
     Op,
     PolicySyncPayload,
     RolloutCacheProbePayload,
@@ -43,7 +46,7 @@ from areno.engine.protocol import (
 )
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
-from areno.engine.runtime.device import accelerator_module
+from areno.engine.runtime.device import accelerator_module, configure_unified_memory_budget
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.training import TrainingManager
 from areno.models.registry import load_model_weights, save_model_weights
@@ -63,6 +66,7 @@ class ArenoWorker:
         self.config = config
         ctx = get_tp_context()
         self.device = ctx.device
+        configure_unified_memory_budget(self.device)
         # Build the actor model directly on the shard's device, then wrap in
         # torch.compile so subsequent forward calls use the compiled graph.
         self.model = build_model_on_device(config, self.device)
@@ -78,6 +82,10 @@ class ArenoWorker:
             if self.device.type != "cuda":
                 raise ValueError("QLoRA requires CUDA")
             initialize_qlora(self.model)
+        if config.runtime.decision_head is not None:
+            from areno.api.backend.cuda.decision import initialize_head
+
+            initialize_head(self)
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
@@ -86,6 +94,8 @@ class ArenoWorker:
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
         )
+        if config.runtime.decision_head is not None and self.adapter_registry is not None:
+            optimizer_parameters = (*optimizer_parameters, *self.model.score_head.parameters())
         self.optimizer = build_optimizer(optimizer_parameters, opt, ctx) if config.role == "train" else None
         self.grad_clip_norm = opt.grad_clip_norm
         self.base_lr = opt.lr
@@ -124,6 +134,13 @@ class ArenoWorker:
             },
         }
         self._global_step = 0
+        if config.runtime.decision_head is not None:
+            checkpoint = config.runtime.decision_head.get("checkpoint")
+            state_path = Path(checkpoint) / "jev_training_state.json" if checkpoint else None
+            if state_path is not None and state_path.is_file():
+                import json
+
+                self._global_step = json.loads(state_path.read_text())["completed_steps"]
         # Paged-KV state: refreshed when the rollout spec changes.
         self._infer_batch_size = 0  # max concurrent sequences supported
         self._infer_cache_blocks = 0  # num_blocks + 1 (extra is scratch)
@@ -133,8 +150,16 @@ class ArenoWorker:
         # Per-bucket captured decode CUDA graphs; buckets that OOM during
         # capture get tracked in `_skipped` and fall back to eager forward.
         self._decode_graphs: dict[int, DecodeGraph] = {}
+        # Speculative decoding graphs: verify by bucket, draft by (bucket, tokens_per_seq).
+        self._verify_graphs: dict[int, DecodeGraph] = {}
+        self._draft_graphs: dict[tuple[int, int], DecodeGraph] = {}
         self._decode_graph_skipped_buckets: set[int] = set()
         self._decode_graph_init_attempted = False
+        # Shared CUDA graph memory pool handle for every captured graph.
+        self._decode_graph_pool = None
+        # Largest warmup working set measured so far; the next bucket refuses to
+        # warm up when less HBM than that is free.
+        self._decode_graph_warmup_peak = 0
         # 5-tuple summarising the active cache config; used to decide whether
         # a new `_init_infer_cache` call can reuse the existing allocation.
         self._infer_cache_spec: tuple[int, int, int, int, int] | None = None
@@ -181,12 +206,22 @@ class ArenoWorker:
             return self.score_values(cmd.payload)
         if cmd.op is Op.SCORE_REWARDS:
             return self.score_rewards(cmd.payload)
+        if cmd.op is Op.DECISION_INFO:
+            from areno.api.backend.cuda.decision import parameter_counts
+
+            return parameter_counts(self)
+        if cmd.op is Op.SCORE_DECISIONS:
+            from areno.api.backend.cuda.decision import score_candidates
+
+            return score_candidates(self, cmd.payload)
         if cmd.op is Op.TRAIN_VALUES:
             return self.train_values(cmd.payload)
         if cmd.op is Op.SAVE_CHECKPOINT:
             return self.save_checkpoint(cmd.payload)
         if cmd.op is Op.EXPORT_ADAPTER:
             return self.export_adapter(cmd.payload)
+        if cmd.op is Op.EXPORT_GGUF:
+            return self.export_gguf(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PLAN:
             return self.policy_sync_plan(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PUBLISH:
@@ -593,24 +628,38 @@ class ArenoWorker:
         """Drop captured decode CUDA graphs and release their cached memory."""
 
         self._decode_graphs.clear()
+        self._verify_graphs.clear()
+        self._draft_graphs.clear()
         self._decode_graph_skipped_buckets.clear()
         self._decode_graph_init_attempted = False
+        # The pool's memory is freed with the last graph that used it; the next
+        # capture round starts from a fresh handle and re-measures the working set.
+        self._decode_graph_pool = None
+        self._decode_graph_warmup_peak = 0
         accelerator = accelerator_module(self.device)
         if accelerator is not None:
             accelerator.empty_cache()
 
     @torch.no_grad()
     def _drop_rollout_hbm(self) -> None:
-        """Release rollout-only GPU state while keeping CPU-reloadable handles."""
+        """Discard rollout-only state before returning to training."""
 
-        self._release_decode_graphs()
-        self.model.clear_infer_weights()
-        offload_kv = getattr(self.model, "offload_kv_caches", None)
-        if offload_kv is not None:
-            offload_kv()
-        self._train_state_ready = False
         accelerator = accelerator_module(self.device)
         if accelerator is not None:
+            # A completed HTTP response does not own every graph/cache write.
+            # Finish device work before destroying graph-owned storage.
+            accelerator.synchronize(self.device)
+        self._release_decode_graphs()
+        self.model.clear_infer_weights()
+        # A host copy still consumes the same physical RAM on unified-memory
+        # GPUs. These caches will be refilled for the next policy rollout.
+        self.model.clear_kv_caches()
+        self._infer_cache_spec = None
+        self._train_state_ready = False
+        # Graph wrappers may retain cycles after their registry is cleared.
+        gc.collect()
+        if accelerator is not None:
+            accelerator.synchronize(self.device)
             accelerator.empty_cache()
 
     @torch.inference_mode()
@@ -669,6 +718,10 @@ class ArenoWorker:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""
         self._prepare_actor_onloaded()
         path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
+        if self.config.runtime.decision_head is not None:
+            from areno.api.backend.cuda.decision import save_head
+
+            save_head(self, payload.path)
         return {"path": path} if path is not None else None
 
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
@@ -682,6 +735,17 @@ class ArenoWorker:
             payload.path,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
         )
+        if self.config.runtime.decision_head is not None:
+            from areno.api.backend.cuda.decision import save_head
+
+            save_head(self, payload.path)
+        return {"path": path} if path is not None else None
+
+    def export_gguf(self, payload: ExportGGUFPayload) -> dict | None:
+        from areno.export.cuda import export_worker
+
+        self._prepare_actor_onloaded()
+        path = export_worker(self, payload.output_dir, payload.file_type)
         return {"path": path} if path is not None else None
 
 

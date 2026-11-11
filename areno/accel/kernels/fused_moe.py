@@ -123,6 +123,7 @@ def _fused_moe_matmul_kernel(
     # write back via offs_token which is already a flat token-slot index.
     a_ptr,
     b_ptr,
+    bias_ptr,
     c_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
@@ -147,6 +148,7 @@ def _fused_moe_matmul_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     even_k: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
 ):
     # Linear program id is decomposed into a (pid_m, pid_n) tile coordinate
     # using a GROUP_SIZE_M swizzle. This reorders programs so that adjacent
@@ -209,6 +211,12 @@ def _fused_moe_matmul_kernel(
         acc += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    if HAS_BIAS:
+        # Match the storage dtype of a biased linear before activation/weighting.
+        acc = acc.to(compute_type).to(tl.float32)
+        bias = tl.load(bias_ptr + off_expert * N + offs_bn).to(tl.float32)
+        acc = (acc + bias[None, :]).to(compute_type).to(tl.float32)
 
     # Optionally fold the per-token routing weight into the accumulator. This
     # is enabled for the *second* matmul (down-proj) so the sum-reduce step
@@ -276,6 +284,7 @@ def _invoke_matmul(
     mul_routed_weight: bool,
     top_k: int,
     config: FusedMoeConfig,
+    bias: torch.Tensor | None = None,
 ) -> None:
     """Launch ``_fused_moe_matmul_kernel`` over the sorted token list.
 
@@ -295,6 +304,7 @@ def _invoke_matmul(
     _fused_moe_matmul_kernel[grid](
         a,
         b,
+        bias if bias is not None else b,
         c,
         topk_weights,
         sorted_token_ids,
@@ -319,6 +329,7 @@ def _invoke_matmul(
         top_k=top_k,
         compute_type=compute_type,
         even_k=b.shape[2] % config.block_size_k == 0,
+        HAS_BIAS=bias is not None,
         num_warps=4,
     )
 
@@ -355,6 +366,10 @@ def fused_experts(
     config: FusedMoeConfig,
     *,
     activation: str = "silu",
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
+    activation_alpha: float = 1.702,
+    activation_limit: float = 7.0,
 ) -> torch.Tensor:
     """End-to-end fused MoE forward.
 
@@ -413,10 +428,15 @@ def fused_experts(
         mul_routed_weight=False,
         top_k=top_k,
         config=config,
+        bias=bias1,
     )
     # Gated activation: out[:, i] = act(in[:, i]) * in[:, intermediate + i].
     if activation == "silu":
         areno_silu_and_mul(intermediate1.view(-1, w1.shape[1]), intermediate2)
+    elif activation == "limited_swiglu":
+        from areno.accel.grouped_bias import limited_swiglu
+
+        intermediate2 = limited_swiglu(intermediate1.view(-1, w1.shape[1]), activation_alpha, activation_limit)
     elif activation == "gelu_tanh":
         areno_gelu_tanh_and_mul(intermediate1.view(-1, w1.shape[1]), intermediate2)
     else:
@@ -435,6 +455,7 @@ def fused_experts(
         mul_routed_weight=True,
         top_k=1,
         config=config,
+        bias=bias2,
     )
 
     out = torch.empty_like(hidden_states)

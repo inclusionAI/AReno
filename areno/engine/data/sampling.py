@@ -122,9 +122,11 @@ def _sample(
     if suppress_ids or (eos_ids and sample_step < params.min_new_tokens):
         scores = scores.clone()
     if suppress_ids:
-        scores[:, torch.tensor(suppress_ids, device=scores.device, dtype=torch.long)] = float("-inf")
+        for token_id in suppress_ids:
+            scores[:, token_id] = float("-inf")
     if eos_ids and sample_step < params.min_new_tokens:
-        scores[:, torch.tensor(eos_ids, device=scores.device, dtype=torch.long)] = float("-inf")
+        for token_id in eos_ids:
+            scores[:, token_id] = float("-inf")
     if params.temperature == 0.0:
         return torch.argmax(scores, dim=-1)
     # Compute a deterministic fallback in case stochastic sampling sees a row
@@ -132,23 +134,51 @@ def _sample(
     fallback = torch.argmax(scores, dim=-1)
     probs = torch.softmax(scores / params.temperature, dim=-1)
     probs = _sanitize_probs(probs, fallback)
+    if (
+        (params.top_k > 0 or params.top_p < 1.0)
+        and 0.0 <= params.top_p <= 1.0
+        and _pivot_supported(probs, params.top_k)
+    ):
+        from areno.accel.kernels.sampling import truncate_probs
+
+        filtered = truncate_probs(probs, params.top_k, params.top_p)
+        return torch.multinomial(filtered, 1, generator=generator).squeeze(-1)
     if params.top_k > 0 or params.top_p < 1.0:
         # Sort then zero out tokens that fall outside top-k or top-p so the
         # remaining distribution is exactly the truncated one. The mask is
         # `prefix sum (excluding self) > top_p`, which keeps the smallest
         # prefix whose sum first exceeds `top_p`.
-        probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+        probs_sort, probs_idx = probs.sort(dim=-1, descending=True, stable=True)
         if params.top_k > 0:
             vocab = probs.shape[-1]
             k = min(params.top_k, vocab)
             probs_sort[:, k:] = 0.0
         if params.top_p < 1.0:
-            probs_sum = torch.cumsum(probs_sort, dim=-1)
-            probs_sort[(probs_sum - probs_sort) > params.top_p] = 0.0
+            probs_sum = torch.cumsum(probs_sort.double(), dim=-1)
+            probs_sort[(probs_sum - probs_sort.double()) > params.top_p] = 0.0
         probs_sort = _sanitize_sorted_probs(probs_sort)
         sampled = torch.multinomial(probs_sort, 1, generator=generator)
         return probs_idx.gather(-1, sampled).squeeze(-1)
     return torch.multinomial(probs, 1, generator=generator).squeeze(-1)
+
+
+def _pivot_supported(probs: torch.Tensor, top_k: int = 0) -> bool:
+    """Metadata-only dispatch; CPU/ROCm/large or strided inputs use reference."""
+    import importlib.util
+    import os
+
+    return (
+        os.environ.get("ARENO_SAMPLING_BACKEND", "auto") == "auto"
+        and probs.device.type == "cuda"
+        and torch.version.hip is None
+        and probs.dtype == torch.float32
+        and probs.ndim == 2
+        and probs.is_contiguous()
+        and probs.shape[0] > 0
+        and 1 < probs.shape[1] <= 262144
+        and (probs.shape[1] <= 4096 or 0 < top_k <= 256)
+        and importlib.util.find_spec("triton") is not None
+    )
 
 
 def _policy_token_logprobs(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from enum import Enum
 
-from areno.api.models import RolloutResult, RolloutSequence
+from areno.api.models import RolloutResult, RolloutSequence, TrainSequence
 
 
 class TrainMetric(str, Enum):
@@ -52,6 +52,32 @@ def accumulation_steps(microbatch_count: int, requested_steps: int | None) -> in
     if microbatch_count < 1:
         raise ValueError("microbatch_count must be positive")
     return microbatch_count if requested_steps is None else max(int(requested_steps), 1)
+
+
+def train_sequence_ids(rows: list[TrainSequence]) -> list[int]:
+    """Map training rows to dense logical sequence ids in first-seen order."""
+
+    ids = {}
+    result = []
+    for index, row in enumerate(rows):
+        key = ("row", index) if row.trajectory_id is None else ("trajectory", row.trajectory_id)
+        result.append(ids.setdefault(key, len(ids)))
+    return result
+
+
+def train_microbatches(rows: list[TrainSequence], mini_bs: int) -> list[list[TrainSequence]]:
+    """Batch whole trajectories without splitting their model-call contexts."""
+
+    if mini_bs < 1:
+        raise ValueError("mini_bs must be positive")
+    groups: dict[int, list[TrainSequence]] = {}
+    for sequence_id, row in zip(train_sequence_ids(rows), rows, strict=True):
+        groups.setdefault(sequence_id, []).append(row)
+    ordered_groups = list(groups.values())
+    return [
+        [row for group in ordered_groups[start : start + mini_bs] for row in group]
+        for start in range(0, len(ordered_groups), mini_bs)
+    ]
 
 
 def accumulation_group_size(index: int, microbatch_count: int, steps: int) -> int:
@@ -149,5 +175,7 @@ __all__ = [
     "metric_reduction",
     "MetricReduction",
     "reduce_microbatch_metrics",
+    "train_microbatches",
+    "train_sequence_ids",
     "TrainMetric",
 ]

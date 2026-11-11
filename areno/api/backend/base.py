@@ -98,6 +98,14 @@ class Backend(ABC):
 
         return None
 
+    def decision_parameters(self, ctx: Context) -> dict[str, int]:
+        """Canonical trainable parameter counts for a joint decision model."""
+        raise NotImplementedError("this backend does not support decision heads")
+
+    def decision_scores(self, ctx: Context, rows: list[TrainSequence]) -> list[float]:
+        """One unnormalized decision score per candidate, in input order."""
+        raise NotImplementedError("this backend does not support decision heads")
+
     def runtime_components(self) -> BackendRuntimeComponents:
         """Return backend-native tokenizer/processor overrides when required."""
 
@@ -138,6 +146,10 @@ class Backend(ABC):
         """Persist a standard adapter artifact, or raise when unsupported."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support adapter export")
+
+    def export_gguf(self, ctx: Context, output_dir: str, *, file_type: str = "f16") -> str:
+        """Export live policy weights to GGUF when implemented by the backend."""
+        raise NotImplementedError(f"{type(self).__name__} does not support GGUF export")
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         """Prepare backend-owned auxiliary model roles, or raise if unsupported."""

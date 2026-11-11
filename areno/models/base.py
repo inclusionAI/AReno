@@ -11,7 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 from torch import nn
@@ -32,12 +32,53 @@ class CausalLMOutput:
     logits_shard: torch.Tensor | None = None
     hidden_states: torch.Tensor | None = None
     values: torch.Tensor | None = None
+    # Vocab-sharded logits of the model's MTP layer(s), predicting token t+2
+    # at position t. Only populated during training when the model has MTP
+    # layers and `TrainMeta.mtp_enabled` is set.
+    mtp_logits_shard: torch.Tensor | None = None
+
+
+@runtime_checkable
+class SpeculativeDraftModel(Protocol):
+    """Model-side contract for MTP speculative decoding in the rollout engine.
+
+    The engine verifies ``k`` drafts per sequence with one decode forward at
+    ``InferMeta.tokens_per_seq = k + 1`` and then calls these hooks. Models
+    without an MTP head simply do not implement the protocol.
+    """
+
+    def enable_mtp_draft(self, *, max_rows: int, tokens_per_seq: int) -> None:
+        """Give the MTP layers inference caches and size the shared verify-state buffers.
+
+        Call before ``allocate_kv_caches``. ``max_rows`` bounds the active rows
+        of one verify forward and ``tokens_per_seq`` is ``k + 1``.
+        """
+
+    def mtp_draft_forward(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        infer_meta: Any,
+        logits_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the MTP layer as the draft model; return (logits_shard, hidden_states).
+
+        ``logits_indices`` selects the sequence positions to project to vocab
+        (all of them when None); the hidden states are always returned in full.
+        """
+
+    def commit_speculative_state(self, committed: torch.Tensor, *, infer_meta: Any) -> None:
+        """Keep recurrent state after the first ``committed[row]`` fed tokens of the verify run with ``infer_meta``."""
 
 
 class ModelAdapter(ABC):
     """Glue between HuggingFace checkpoints and areno's nn.Modules."""
 
     name: str
+    lora_initializer = None
+    supports_qlora = False
 
     @abstractmethod
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
@@ -53,7 +94,15 @@ class ModelAdapter(ABC):
 
     @abstractmethod
     def build(self, config: ModelConfig) -> nn.Module:
-        """Instantiate the nn.Module described by ``config`` (no weights yet)."""
+        """Instantiate the nn.Module described by ``config`` (no weights yet).
+
+        Causal models accept ``defer_lm_head=True`` during training and return
+        final normalized ``hidden_states`` with ``logits_shard=None``. The
+        shared runtime then scores packed targets through the model's
+        ``lm_head`` in bounded token chunks. Output transforms performed
+        outside the head must also be exposed to that scoring path (currently
+        ``final_logit_softcapping``).
+        """
 
         raise NotImplementedError
 

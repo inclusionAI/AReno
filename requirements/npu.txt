@@ -16,6 +16,7 @@ prompt-toolkit>=3.0
 rich>=13
 tensorboard
 pydantic>=2
+harbor==0.24.0; python_version >= '3.12'
 fastapi>=0.110
 click>=8.1
 tqdm>=4.66

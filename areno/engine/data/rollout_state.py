@@ -102,7 +102,9 @@ class InferenceBatchState:
         include enough block metadata for the model to write each prompt token
         into its paged KV cache slot.
         """
-        if not self._free_blocks or self._pending_seq_id >= len(self.prompts):
+        if self._pending_seq_id >= len(self.prompts):
+            return None
+        if not self._free_blocks and self._pending_seq_id not in self._seq_to_blocks:
             return None
         # Packed prefill layout: `input_ids` and `position_ids` are flat 1-D
         # tensors of total tokens; `cu_seqlens` is the prefix sum boundary
@@ -114,8 +116,10 @@ class InferenceBatchState:
         mrope_position_parts: list[torch.Tensor] = []
         has_mrope_positions = False
         feature_mask: list[bool] = []
+        audio_feature_mask: list[bool] = []
         image_features: list[dict] = []
         image_sequence_modes: list[bool] = []
+        audio_sequence_modes: list[bool] = []
         cu_seqlens = [0]
         sample_indices: list[int] = []
         block_table: list[list[int]] = []
@@ -159,8 +163,10 @@ class InferenceBatchState:
                             position_ids,
                             mrope_position_parts if has_mrope_positions else None,
                             feature_mask,
+                            audio_feature_mask,
                             image_features,
                             image_sequence_modes,
+                            audio_sequence_modes,
                             cu_seqlens,
                             sample_indices,
                             block_table,
@@ -175,14 +181,16 @@ class InferenceBatchState:
             chunk = prompt[cursor : cursor + chunk_len]
             prefill_seq_ids.append(seq_id)
             input_ids.extend(chunk)
-            local_mask, local_features = _slice_prompt_image_features(
+            local_mask, local_audio_mask, local_features = _slice_prompt_multimodal_features(
                 self.prompt_features[seq_id],
                 prompt,
                 cursor,
                 chunk_len,
             )
             feature_mask.extend(local_mask)
+            audio_feature_mask.extend(local_audio_mask)
             image_sequence_modes.append(_prompt_has_image(self.prompt_features[seq_id], prompt))
+            audio_sequence_modes.append(_prompt_has_audio(self.prompt_features[seq_id], prompt))
             if local_features is not None:
                 image_features.append(local_features)
             local_mrope_positions = _slice_prompt_mrope_positions(
@@ -226,8 +234,10 @@ class InferenceBatchState:
             position_ids,
             mrope_position_parts if has_mrope_positions else None,
             feature_mask,
+            audio_feature_mask,
             image_features,
             image_sequence_modes,
+            audio_sequence_modes,
             cu_seqlens,
             sample_indices,
             block_table,
@@ -244,8 +254,10 @@ class InferenceBatchState:
         position_ids: list[int],
         mrope_position_parts: list[torch.Tensor] | None,
         feature_mask: list[bool],
+        audio_feature_mask: list[bool],
         image_features: list[dict],
         image_sequence_modes: list[bool],
+        audio_sequence_modes: list[bool],
         cu_seqlens: list[int],
         sample_indices: list[int],
         block_table: list[list[int]],
@@ -276,12 +288,20 @@ class InferenceBatchState:
                 dtype=torch.int32,
             ),
         }
-        if any(feature_mask) or image_features or any(image_sequence_modes) or mrope_position_parts is not None:
+        if (
+            any(feature_mask)
+            or image_features
+            or any(image_sequence_modes)
+            or any(audio_sequence_modes)
+            or mrope_position_parts is not None
+        ):
             payload["features"] = _prefill_multimodal_features(
                 feature_mask,
                 image_features,
                 mrope_position_parts,
                 image_sequence_modes,
+                audio_sequence_modes,
+                audio_feature_mask,
             )
         return payload
 
@@ -318,8 +338,10 @@ class InferenceBatchState:
         mrope_position_parts: list[torch.Tensor] = []
         has_mrope_positions = False
         feature_mask: list[bool] = []
+        audio_feature_mask: list[bool] = []
         image_features: list[dict] = []
         image_sequence_modes: list[bool] = []
+        audio_sequence_modes: list[bool] = []
         cu_seqlens = [0]
         sample_indices: list[int] = []
         block_table: list[list[int]] = []
@@ -336,14 +358,17 @@ class InferenceBatchState:
                 raise RuntimeError("cache re-prefill is missing paged KV blocks")
             input_ids.extend(history)
             position_ids.extend(range(len(history)))
-            prompt_mask, prompt_image_features = _slice_prompt_image_features(
+            prompt_mask, prompt_audio_mask, prompt_image_features = _slice_prompt_multimodal_features(
                 self.prompt_features[seq_id], self.prompts[seq_id], 0, len(self.prompts[seq_id])
             )
             feature_mask.extend(prompt_mask)
             feature_mask.extend([False] * response_len)
+            audio_feature_mask.extend(prompt_audio_mask)
+            audio_feature_mask.extend([False] * response_len)
             if prompt_image_features is not None:
                 image_features.append(prompt_image_features)
             image_sequence_modes.append(_prompt_has_image(self.prompt_features[seq_id], self.prompts[seq_id]))
+            audio_sequence_modes.append(_prompt_has_audio(self.prompt_features[seq_id], self.prompts[seq_id]))
             prompt_mrope = _slice_prompt_mrope_positions(self.prompt_features[seq_id], 0, len(self.prompts[seq_id]))
             if prompt_mrope is not None:
                 has_mrope_positions = True
@@ -368,8 +393,10 @@ class InferenceBatchState:
             position_ids,
             mrope_position_parts if has_mrope_positions else None,
             feature_mask,
+            audio_feature_mask,
             image_features,
             image_sequence_modes,
+            audio_sequence_modes,
             cu_seqlens,
             sample_indices,
             block_table,
@@ -502,14 +529,30 @@ def _slice_prompt_image_features(
     cursor: int,
     chunk_len: int,
 ) -> tuple[list[bool], dict | None]:
+    """Backward-compatible image-only view of multimodal feature slicing."""
+
+    image_mask, _audio_mask, payload = _slice_prompt_multimodal_features(features, prompt, cursor, chunk_len)
+    return image_mask, payload
+
+
+def _slice_prompt_multimodal_features(
+    features: dict | None,
+    prompt: list[int],
+    cursor: int,
+    chunk_len: int,
+) -> tuple[list[bool], list[bool], dict | None]:
+    """Slice image and audio processor features for one prefill chunk."""
+
     if features is None:
-        return [False] * chunk_len, None
+        empty = [False] * chunk_len
+        return empty, empty.copy(), None
     image_embeds = _feature_tensor(features, "image_embeds")
     if image_embeds is None:
         image_embeds = _feature_tensor(features, "image_features")
     if image_embeds is None:
         image_embeds = _feature_tensor(features, "projected_image_embeds")
-    if image_embeds is None:
+    audio_embeds = _feature_tensor(features, "audio_embeds")
+    if image_embeds is None and audio_embeds is None:
         if not any(
             key in features
             for key in (
@@ -521,59 +564,72 @@ def _slice_prompt_image_features(
                 "target_sizes",
                 "pixel_values_videos",
                 "input_features",
+                "input_audio_embeds",
+                "audio_embeds",
+                "audio_embed_sizes",
+                "audio_attention_mask",
                 "multimodal_feature_rows",
             )
         ):
-            return [False] * chunk_len, None
-    full_mask = _prompt_image_mask(features, prompt)
-    local_mask = full_mask[cursor : cursor + chunk_len]
-    local_count = sum(local_mask)
-    if local_count == 0:
-        return local_mask, None
-    start = sum(full_mask[:cursor])
-    end = start + local_count
-    if image_embeds is None:
-        payload_features = dict(features)
-        modality_token_ids = dict(features.get("modality_token_ids") or {})
-        if features.get("image_token_id") is not None:
-            modality_token_ids.setdefault("image", int(features["image_token_id"]))
-        modality_offsets = {}
-        modality_counts = {}
-        chunk = prompt[cursor : cursor + chunk_len]
-        for modality, token_id in modality_token_ids.items():
-            token_id = int(token_id)
-            modality_offsets[modality] = sum(int(token) == token_id for token in prompt[:cursor])
-            modality_counts[modality] = sum(int(token) == token_id for token in chunk)
-        payload_features.update(
-            {
-                "multimodal_token_offset": start,
-                "multimodal_token_count": local_count,
-                "modality_token_offsets": modality_offsets,
-                "modality_token_counts": modality_counts,
-                "image_token_offset": start,
-                "image_token_count": local_count,
-            }
+            empty = [False] * chunk_len
+            return empty, empty.copy(), None
+
+    image_mask = _prompt_modality_mask(features, prompt, "image")
+    audio_mask = _prompt_modality_mask(features, prompt, "audio")
+    local_image_mask = image_mask[cursor : cursor + chunk_len]
+    local_audio_mask = audio_mask[cursor : cursor + chunk_len]
+    image_count = sum(local_image_mask)
+    audio_count = sum(local_audio_mask)
+    if image_count == 0 and audio_count == 0:
+        return local_image_mask, local_audio_mask, None
+
+    payload_features = dict(features)
+    modality_token_ids = dict(features.get("modality_token_ids") or {})
+    for modality in ("image", "audio"):
+        token_id = features.get(f"{modality}_token_id")
+        if token_id is not None:
+            modality_token_ids.setdefault(modality, int(token_id))
+    chunk = prompt[cursor : cursor + chunk_len]
+    modality_offsets = {
+        modality: sum(int(token) == int(token_id) for token in prompt[:cursor])
+        for modality, token_id in modality_token_ids.items()
+    }
+    modality_counts = {
+        modality: sum(int(token) == int(token_id) for token in chunk)
+        for modality, token_id in modality_token_ids.items()
+    }
+    payload_features["modality_token_offsets"] = modality_offsets
+    payload_features["modality_token_counts"] = modality_counts
+    payload_features["image_token_offset"] = modality_offsets.get("image", 0)
+    payload_features["image_token_count"] = modality_counts.get("image", 0)
+    payload_features["audio_token_offset"] = modality_offsets.get("audio", 0)
+    payload_features["audio_token_count"] = modality_counts.get("audio", 0)
+
+    if image_embeds is not None:
+        if image_embeds.ndim != 2:
+            raise ValueError("image_embeds must have shape (num_image_tokens, hidden_size)")
+        image_start = sum(image_mask[:cursor])
+        image_end = image_start + image_count
+        if int(image_embeds.shape[0]) < image_end:
+            raise ValueError("image_embeds has fewer rows than image placeholder tokens")
+        payload_features["image_embeds"] = (
+            image_embeds
+            if image_start == 0 and image_end == int(image_embeds.shape[0])
+            else image_embeds[image_start:image_end]
         )
-        for key in (
-            "pixel_values",
-            "input_image_embeds",
-            "image_sizes",
-            "image_attention_mask",
-            "image_grid_thw",
-            "target_sizes",
-            "num_patches_per_image",
-            "downsample_mode",
-            "processor_expanded_image_tokens",
-            "image_token_id",
-        ):
-            if features.get(key) is not None:
-                payload_features[key] = features[key]
-        return local_mask, payload_features
-    if image_embeds.ndim != 2:
-        raise ValueError("image_embeds must have shape (num_image_tokens, hidden_size)")
-    if int(image_embeds.shape[0]) < end:
-        raise ValueError("image_embeds has fewer rows than image placeholder tokens")
-    return local_mask, {"image_embeds": image_embeds[start:end]}
+    if audio_embeds is not None:
+        if audio_embeds.ndim != 2:
+            raise ValueError("audio_embeds must have shape (num_audio_tokens, hidden_size)")
+        audio_start = sum(audio_mask[:cursor])
+        audio_end = audio_start + audio_count
+        if int(audio_embeds.shape[0]) < audio_end:
+            raise ValueError("audio_embeds has fewer rows than audio placeholder tokens")
+        payload_features["audio_embeds"] = (
+            audio_embeds
+            if audio_start == 0 and audio_end == int(audio_embeds.shape[0])
+            else audio_embeds[audio_start:audio_end]
+        )
+    return local_image_mask, local_audio_mask, payload_features
 
 
 def _slice_prompt_mrope_positions(features: dict | None, cursor: int, chunk_len: int) -> torch.Tensor | None:
@@ -606,10 +662,14 @@ def _prefill_multimodal_features(
     image_features: list[dict],
     mrope_position_parts: list[torch.Tensor] | None = None,
     image_sequence_modes: list[bool] | None = None,
+    audio_sequence_modes: list[bool] | None = None,
+    audio_feature_mask: list[bool] | None = None,
 ) -> dict:
     features = {}
     if image_sequence_modes is not None and any(image_sequence_modes):
         features["image_sequence_mask"] = torch.tensor(image_sequence_modes, dtype=torch.bool)
+    if audio_sequence_modes is not None and any(audio_sequence_modes):
+        features["audio_sequence_mask"] = torch.tensor(audio_sequence_modes, dtype=torch.bool)
     if mrope_position_parts is not None:
         features["mrope_position_ids"] = torch.cat(mrope_position_parts, dim=1).to(dtype=torch.long)
     if not image_features:
@@ -622,8 +682,13 @@ def _prefill_multimodal_features(
         {
             "image_token_mask": torch.tensor(feature_mask, dtype=torch.bool),
             "image_feature_rows": image_features,
+            "audio_feature_rows": image_features,
         }
     )
+    if audio_feature_mask is not None:
+        audio_mask = torch.tensor(audio_feature_mask, dtype=torch.bool)
+        features["audio_token_mask"] = audio_mask
+        features["image_token_mask"] &= ~audio_mask
     return features
 
 
@@ -643,13 +708,12 @@ def _prompt_image_mask(features: dict, prompt: list[int]) -> list[bool]:
         if len(mask_list) != len(prompt):
             raise ValueError("image_token_mask length must match prompt length")
         return mask_list
-    token_ids = dict(features.get("modality_token_ids") or {})
-    if features.get("image_token_id") is not None:
-        token_ids.setdefault("image", int(features["image_token_id"]))
-    if not token_ids:
+    image_token_id = features.get("image_token_id")
+    if image_token_id is None:
+        image_token_id = (features.get("modality_token_ids") or {}).get("image")
+    if image_token_id is None:
         raise ValueError("multimodal features require a token mask or modality token ids")
-    values = {int(value) for value in token_ids.values()}
-    return [int(token) in values for token in prompt]
+    return [int(token) == int(image_token_id) for token in prompt]
 
 
 def _prompt_has_image(features: dict | None, prompt: list[int]) -> bool:
@@ -664,6 +728,35 @@ def _prompt_has_image(features: dict | None, prompt: list[int]) -> bool:
     return image_token_id is not None and any(int(token) == int(image_token_id) for token in prompt)
 
 
+def _prompt_has_audio(features: dict | None, prompt: list[int]) -> bool:
+    if features is None:
+        return False
+    mask = features.get("audio_token_mask")
+    if mask is not None:
+        return bool(torch.as_tensor(mask, dtype=torch.bool).any())
+    audio_token_id = features.get("audio_token_id")
+    if audio_token_id is None:
+        audio_token_id = (features.get("modality_token_ids") or {}).get("audio")
+    return audio_token_id is not None and any(int(token) == int(audio_token_id) for token in prompt)
+
+
+def _prompt_modality_mask(features: dict | None, prompt: list[int], modality: str) -> list[bool]:
+    if features is None:
+        return [False] * len(prompt)
+    mask = features.get(f"{modality}_token_mask")
+    if mask is not None:
+        values = [bool(item) for item in torch.as_tensor(mask).reshape(-1).tolist()]
+        if len(values) != len(prompt):
+            raise ValueError(f"{modality}_token_mask length must match prompt length")
+        return values
+    token_id = features.get(f"{modality}_token_id")
+    if token_id is None:
+        token_id = (features.get("modality_token_ids") or {}).get(modality)
+    if token_id is None:
+        return [False] * len(prompt)
+    return [int(token) == int(token_id) for token in prompt]
+
+
 def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
     """Move a scheduler payload to device and expose it as model metadata."""
 
@@ -673,12 +766,20 @@ def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
         # KV writer where each prompt token's KV should be stored.
         prefix_lengths = payload["position_ids"][payload["cu_seqlens"][:-1].long()].to(dtype=torch.int32)
         cached_prefix = prefix_lengths.to(device, non_blocking=True) if bool(prefix_lengths.any()) else None
+        kv_lengths = prefix_lengths + payload["cu_seqlens"].diff() if cached_prefix is not None else None
+        cu_seqlens_k = (
+            torch.cat((torch.zeros(1, dtype=torch.int32), kv_lengths.cumsum(0, dtype=torch.int32)))
+            if kv_lengths is not None
+            else None
+        )
         return InferMeta(
             mode="prefill",
             sample_indices=payload["sample_indices"].to(device, non_blocking=True),
             cu_seqlens=payload["cu_seqlens"].to(device, non_blocking=True),
             max_seqlen=int(payload["max_seqlen"]),
             cache_seqlens=cached_prefix,
+            cu_seqlens_k=cu_seqlens_k.to(device, non_blocking=True) if cu_seqlens_k is not None else None,
+            max_seqlen_k=int(kv_lengths.max()) if kv_lengths is not None else None,
             sequence_lengths=(
                 payload["sequence_lengths"].to(device, non_blocking=True)
                 if payload.get("sequence_lengths") is not None

@@ -66,11 +66,22 @@ class RuntimeConfig:
     compile_model: bool = True
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
+    decision_head: dict[str, Any] | None = None
     optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     rollout_routing_replay: bool = False
+    # Explicit opt-in: a positive value enables the auxiliary MTP loss on
+    # models that ship MTP layers. The checkpoint's `mtp_loss_scaling_factor`
+    # is never inherited, and the loss trains toward every response token, so
+    # it is meant for SFT / policy-gradient RL — not preference objectives
+    # like DPO whose packed rows include rejected samples.
+    mtp_loss_scale: float | None = None
+    # Rollout speculative decoding: draft this many tokens per step with the
+    # checkpoint's MTP layer and verify them in one target forward. 0 = off.
+    # Requires the flash attention backend and a model with MTP layers.
+    speculative_draft_tokens: int = 0
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
@@ -91,6 +102,8 @@ class RuntimeConfig:
             raise ValueError("runtime.optimizer_state_offload_dir is required for disk offload")
         if self.optimizer_state_offload_batch_size < 1:
             raise ValueError("runtime.optimizer_state_offload_batch_size must be positive")
+        if self.speculative_draft_tokens < 0:
+            raise ValueError("runtime.speculative_draft_tokens must be non-negative")
 
     def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Switch flash-attn unsupported hardware or model shapes to native attention."""
@@ -217,6 +230,10 @@ class ModelConfig:
     group_norm_size: int = 128
     num_nextn_predict_layers: int = 0
     mtp_loss_scaling_factor: float = 0.0
+    # Whether to build the checkpoint's MTP layers at all. EngineConfig turns
+    # this off unless the MTP loss or speculative decoding needs them, so idle
+    # partitions do not load, hold, or policy-sync unused parameters.
+    mtp_layers_enabled: bool = True
     qk_nope_head_dim: int = 0
     qk_rope_head_dim: int = 0
     v_head_dim: int = 0
@@ -308,8 +325,10 @@ class EngineConfig:
                 raise ValueError("QLoRA requires CUDA")
             if self.runtime.optimizer_state_offload != "none":
                 raise ValueError("QLoRA paged optimizer cannot combine with explicit optimizer state offload")
-            if self.model.model_type not in {"qwen3", "bailing_moe_v3"}:
-                raise ValueError("QLoRA currently supports Qwen3 dense and Bailing-MoE V3")
+            from areno.models.registry import _adapter
+
+            if not _adapter(self.model.model_type).supports_qlora:
+                raise ValueError(f"QLoRA is not supported for {self.model.model_type}")
             self.optimizer.paged = True
         if self.sequence_parallel is not None:
             self.model.sequence_parallel = bool(self.sequence_parallel)
@@ -365,6 +384,11 @@ class EngineConfig:
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
         self.runtime.resolve_eager_decode(model=self.model, lora=self.lora)
         self.model.attn_backend = self.runtime.attn_backend
+        # Train and rollout partitions share this runtime, so both sides agree
+        # on whether MTP tensors exist and the policy-sync plans stay aligned.
+        self.model.mtp_layers_enabled = self.model.num_nextn_predict_layers > 0 and (
+            self.runtime.mtp_loss_scale is not None or self.runtime.speculative_draft_tokens > 0
+        )
 
     @property
     def effective_sequence_parallel(self) -> bool:

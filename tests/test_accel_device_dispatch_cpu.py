@@ -81,7 +81,6 @@ def test_missing_npu_extension_does_not_fall_back_to_cuda(monkeypatch):
 
 
 def test_npu_extension_dependency_error_is_preserved(monkeypatch):
-
     def load(name):
         raise ModuleNotFoundError(name="torch_npu")
 
@@ -194,6 +193,18 @@ def test_public_operators_select_the_input_device(monkeypatch, native_tensors, d
 
         entry = op.removesuffix("_forward")
         monkeypatch.setattr(attention, entry, getattr(native, f"areno_{op}"))
+    if device.startswith("cuda") and op == "moe_unpermute_forward":
+        # CUDA now dispatches this reduction to an owned Triton kernel.
+        # Mock its boundary without importing a GPU dependency on CPU hosts.
+        def deterministic_unpermute(x, token_index, tokens, hidden):
+            assert x.device.type == token_index.device.type == "cuda"
+            raise NativeReached(f"areno_{op}")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "areno.accel.kernels.moe_unpermute",
+            SimpleNamespace(deterministic_unpermute=deterministic_unpermute),
+        )
     calls = forward_calls(lambda shape, dtype=torch.float32: make_tensor(shape, dtype, device))
     with mode, pytest.raises(NativeReached, match=f"^areno_{op}$"):
         calls[op]()
@@ -354,7 +365,8 @@ def test_npu_attention_selects_library_or_native_by_shape(
         cu_seqlens=cu,
         max_seqlen=2,
         block_table=tensor((1, 2), torch.int32),
-        cache_seqlens=tensor((1,), torch.int32),
+        # Fresh prefill has no cached prefix; lengths belong to decode.
+        cache_seqlens=tensor((1,), torch.int32) if mode_name == "decode" else None,
     )
     with mode, pytest.raises(NativeReached, match=f"^{expected_provider}:{expected_entry}$"):
         if mode_name == "packed":
@@ -427,7 +439,13 @@ def test_npu_native_selection_covers_train_prefill_and_decode(monkeypatch, nativ
         for phase in ("train", "prefill", "decode", "decode"):
             q = tensor((1, 1 if phase == "decode" else 2, 2, 64), torch.bfloat16)
             kv = tensor((*q.shape[:2], 1, 64), torch.bfloat16)
-            meta = SimpleNamespace(mode=phase, cu_seqlens=cu, max_seqlen=2, block_table=table, cache_seqlens=lengths)
+            meta = SimpleNamespace(
+                mode=phase,
+                cu_seqlens=cu,
+                max_seqlen=2,
+                block_table=table,
+                cache_seqlens=lengths if phase == "decode" else None,
+            )
             with pytest.raises(NativeReached):
                 if phase == "train":
                     FlashAttnTrainAttentionBackend(backend)(q, kv, kv, meta)
@@ -501,3 +519,23 @@ def test_kda_keeps_the_same_native_arguments(monkeypatch, native_tensors, device
     assert called["cu_seqlens"] is cu_seqlens
     assert called["lower_bound"] == -6.0
     assert called["use_qk_l2norm_in_kernel"] is True
+
+
+@pytest.mark.parametrize("backend", ["flash", "native"])
+def test_npu_chunked_prefill_is_rejected_before_cache_write(monkeypatch, native_tensors, backend):
+    from areno.engine.layers.attention_backend import infer
+    from areno.engine.runtime.metadata import InferMeta
+
+    mode, tensor = native_tensors
+    q = tensor((1, 2, 2, 64), torch.bfloat16)
+    cache = tensor((2, 256, 2, 64), torch.bfloat16)
+    meta = InferMeta(
+        mode="prefill",
+        cu_seqlens=tensor((2,), torch.int32),
+        max_seqlen=2,
+        block_table=tensor((1, 2), torch.int32),
+        cache_seqlens=tensor((1,), torch.int32),
+    )
+    monkeypatch.setattr(infer, "_store_prefill_cache", lambda *args: pytest.fail("unsupported prefix wrote cache"))
+    with mode, pytest.raises(ValueError, match="cached prefix is not supported on NPU"):
+        infer.FlashAttnInferBackend(backend)(q, q, q, cache, cache, meta)

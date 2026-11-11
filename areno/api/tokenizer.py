@@ -125,7 +125,7 @@ def normalize_token_ids(value: Any) -> list[int]:
 def _looks_chat_formatted(prompt: str) -> bool:
     # Heuristic: presence of any known turn marker is enough to skip the chat
     # template and avoid re-wrapping an already-formatted prompt.
-    markers = ("<|im_start|>", "<start_of_turn>", "<turn|>", "<|user|>", "<|assistant|>")
+    markers = ("<|start|>", "<|im_start|>", "<start_of_turn>", "<turn|>", "<|user|>", "<|assistant|>")
     return any(marker in prompt for marker in markers)
 
 

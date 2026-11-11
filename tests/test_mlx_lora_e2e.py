@@ -23,6 +23,88 @@ def _require_mlx_device(mx) -> None:
         raise
 
 
+@pytest.mark.parametrize("compile_step,checkpointing", [(False, False), (True, True)])
+def test_reduced_upstream_qwen3_all_targets_roundtrip(monkeypatch, tmp_path, compile_step, checkpointing):
+    if os.getenv("ARENO_E2E_MLX_SYNTHETIC") != "1":
+        pytest.skip("set ARENO_E2E_MLX_SYNTHETIC=1")
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+    from mlx_lm.models.cache import make_prompt_cache
+    from mlx_lm.models.qwen3 import Model, ModelArgs, TransformerBlock
+
+    from areno.api.backend.mlx.backend import MlxBackend
+    from areno.api.backend.mlx.provider import MlxModelProvider
+    from areno.api.context import Context
+
+    monkeypatch.setattr(TransformerBlock, "__call__", TransformerBlock.__call__)
+    mx.random.seed(42)
+    args = ModelArgs(
+        model_type="qwen3",
+        hidden_size=16,
+        num_hidden_layers=2,
+        intermediate_size=32,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        vocab_size=32,
+        rms_norm_eps=1e-6,
+        max_position_embeddings=128,
+        rope_theta=10000,
+        tie_word_embeddings=False,
+    )
+    model = Model(args)
+    base = list(tree_flatten(model.parameters()))
+    mx.eval(model.parameters())
+    tokenizer = type("Tokenizer", (), {"encode": lambda self, text, **kw: [1, 2], "eos_token_id": 0})()
+    row = TrainSequence(tokens=[1, 2, 3, 4, 5], prompt_mask=[True, True, False, False, False], eos_token_id=0)
+    tokens = mx.array([row.tokens])
+    initial = np.array(model(tokens))
+
+    def initialize(policy, adapter_path=None):
+        config = MlxConfig(
+            lora=LoraConfig(rank=2, alpha=4, adapter_path=adapter_path),
+            compile_train_step=compile_step,
+            gradient_checkpointing=checkpointing,
+            optimizer={"lr": 1e-3, "min_lr": 1e-3, "lr_decay_style": "constant", "weight_decay": 0.0},
+        )
+        provider = MlxModelProvider(policy, tokenizer, None, {"model_type": "qwen3"})
+        monkeypatch.setattr("areno.api.backend.mlx.backend.load_provider", lambda *a, **kw: provider)
+        ctx = Context(1, "synthetic-qwen", tokenizer, config)
+        backend = MlxBackend()
+        backend.initialize(ctx)
+        return backend, ctx
+
+    backend, ctx = initialize(model)
+    try:
+        assert len(backend._lora_state.slots) == 14
+        np.testing.assert_allclose(np.array(model(tokens)), initial, atol=1e-6, rtol=0)
+        for _ in range(2):
+            ctx.step()
+            metrics = backend.train(ctx, [row], sft_loss_fn, mini_bs=1)
+            assert np.isfinite(metrics["loss"]) and np.isfinite(metrics["grad_norm"]) and metrics["grad_norm"] > 0
+        for name, weight in tree_flatten(model.parameters()):
+            if not name.endswith((".lora_a", ".lora_b")):
+                np.testing.assert_array_equal(np.array(weight), np.array(dict(base)[name.replace(".linear.", ".")]))
+        trained = backend.score_logprobs(ctx, "actor", [row.tokens], microbatch_size=1)
+        assert not np.allclose(np.array(model(tokens)), initial)
+        exported = backend.export_adapter(ctx, str(tmp_path / "adapter"))
+        model.eval()
+        cache = make_prompt_cache(model)
+        incremental = mx.concatenate([model(tokens[:, i : i + 1], cache=cache) for i in range(5)], axis=1)
+        np.testing.assert_allclose(np.array(incremental), np.array(model(tokens)), atol=1e-5, rtol=1e-4)
+    finally:
+        backend.close()
+    restored = Model(args)
+    restored.load_weights(base)
+    backend, ctx = initialize(restored, exported)
+    try:
+        np.testing.assert_allclose(
+            backend.score_logprobs(ctx, "actor", [row.tokens], microbatch_size=1), trained, atol=1e-6, rtol=0
+        )
+    finally:
+        backend.close()
+
+
 def test_mlx_lora_backend_loads_peft_and_runs_two_synthetic_sft_steps(monkeypatch, tmp_path) -> None:
     if os.getenv("ARENO_E2E_MLX_SYNTHETIC") != "1":
         pytest.skip("set ARENO_E2E_MLX_SYNTHETIC=1 to run the Apple Silicon synthetic MLX LoRA E2E")

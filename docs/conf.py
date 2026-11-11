@@ -28,6 +28,7 @@ html_theme_options = {
         {"title": "Get Started", "url": "getting-started/welcome"},
         {"title": "Concepts", "url": "concepts/training-loop"},
         {"title": "Cookbook", "url": "cookbook/math-rlvr"},
+        {"title": "Integration", "url": "integrations/index"},
         {"title": "Reference", "url": "reference/cli"},
         {"title": "Troubleshooting", "url": "troubleshooting/index"},
     ],

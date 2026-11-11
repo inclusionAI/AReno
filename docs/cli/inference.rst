@@ -70,6 +70,14 @@ Options:
    This setting is CUDA only; MLX uses the attention implementation supplied
    by the loaded MLX model.
 
+``--speculative-draft-tokens INTEGER``
+   Speculative decoding: draft this many tokens per step with the checkpoint's
+   MTP layer and verify them in one target forward. Default: ``0`` (off).
+   Requires the CUDA backend, ``--attn-backend flash``, and a checkpoint that
+   ships MTP layers (``num_nextn_predict_layers > 0``, currently the bailing_v3
+   family); serve rejects the flag otherwise. ``2`` is the practical setting for
+   a single-layer MTP head.
+
 ``--disable-thinking``
    Pass ``enable_thinking=False`` to tokenizer chat templates when supported.
    Use this when serving a model whose chat template supports a thinking-mode

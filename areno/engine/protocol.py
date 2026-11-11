@@ -37,12 +37,15 @@ class Op(Enum):
     SCORE_LOGPROBS = auto()
     SCORE_VALUES = auto()
     SCORE_REWARDS = auto()
+    SCORE_DECISIONS = auto()
+    DECISION_INFO = auto()
     TRAIN_VALUES = auto()
     ROLLOUT_SESSION_BEGIN = auto()
     ROLLOUT_SESSION_SYNC = auto()
     ROLLOUT_SESSION_END = auto()
     SAVE_CHECKPOINT = auto()
     EXPORT_ADAPTER = auto()
+    EXPORT_GGUF = auto()
     POLICY_SYNC_PLAN = auto()
     POLICY_SYNC_PUBLISH = auto()
     POLICY_SYNC_RECEIVE = auto()
@@ -156,6 +159,14 @@ class SaveCheckpointPayload:
     """Typed payload for Op.SAVE_CHECKPOINT."""
 
     path: str
+
+
+@dataclass(slots=True)
+class ExportGGUFPayload:
+    """Native complete-model GGUF export, independent of checkpoint saving."""
+
+    output_dir: str
+    file_type: str = "f16"
 
 
 @dataclass(slots=True)

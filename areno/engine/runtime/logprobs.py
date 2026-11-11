@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
+from torch.func import functional_call
 from torch.utils.checkpoint import checkpoint
 
 from areno.engine.parallel.context import get_tp_context
@@ -41,6 +42,44 @@ def next_token_logprobs(
     return selected
 
 
+def _packed_action_sites(
+    tokens: torch.Tensor, cu_seqlens: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, int]:
+    """Action axis for packed varlen rows: one prediction site per non-tail token.
+
+    Returns `(flat_tokens, keep, positions, action_count)`. `keep` marks the
+    non-tail positions on the token axis and `positions` is their index list;
+    both are None when the axis is empty.
+    """
+
+    flat_tokens = tokens.reshape(-1)
+    cu_seqlens = cu_seqlens.to(device=tokens.device, dtype=torch.long)
+    # Training packs every row with at least one token, so the number of
+    # action sites is total_tokens minus one tail token per row. Keep this as
+    # shape arithmetic to avoid a GPU sync from `.item()`.
+    action_count = max(flat_tokens.numel() - (cu_seqlens.numel() - 1), 0)
+    if action_count == 0:
+        return flat_tokens, None, None, 0
+    keep = torch.ones(flat_tokens.numel(), device=tokens.device, dtype=torch.bool)
+    keep[cu_seqlens[1:] - 1] = False
+    positions = torch.arange(flat_tokens.numel(), device=tokens.device)[keep]
+    return flat_tokens, keep, positions, action_count
+
+
+def _chunked_selected_logprobs(
+    logits_shard: torch.Tensor, positions: torch.Tensor, labels: torch.Tensor, chunk_size: int
+) -> torch.Tensor:
+    """Run the TP selected-logprob kernel over `positions` in chunks."""
+
+    action_count = int(positions.numel())
+    selected = torch.empty(action_count, device=logits_shard.device, dtype=torch.float32)
+    for start in range(0, action_count, chunk_size):
+        end = min(start + chunk_size, action_count)
+        local_logits = logits_shard[:, positions[start:end]].squeeze(0)
+        selected[start:end] = vocab_parallel_selected_logprobs(local_logits, labels[start:end])
+    return selected
+
+
 def packed_next_token_logprobs(
     logits_shard: torch.Tensor,
     tokens: torch.Tensor,
@@ -49,33 +88,42 @@ def packed_next_token_logprobs(
 ) -> torch.Tensor:
     """Compute selected next-token logprobs for packed varlen train rows."""
 
-    # Packed layout: `tokens` is a flat sequence of all concatenated rows and
-    # `cu_seqlens` marks per-row boundaries. We materialize a flat `positions`
-    # tensor pointing at each prediction site and a matching `labels` tensor
-    # of the next token, then run the same TP kernel over those.
-    flat_tokens = tokens.reshape(-1)
-    cu_seqlens = cu_seqlens.to(device=tokens.device, dtype=torch.long)
-    # Training packs every row with at least one token, so the number of
-    # next-token action sites is total_tokens minus one tail token per row.
-    # Keep this as shape arithmetic to avoid a GPU sync from `.item()`.
-    action_count = max(flat_tokens.numel() - (cu_seqlens.numel() - 1), 0)
-    selected = torch.empty(action_count, device=logits_shard.device, dtype=torch.float32)
+    flat_tokens, _, positions, action_count = _packed_action_sites(tokens, cu_seqlens)
     if action_count == 0:
-        return selected
-
-    # `positions[k]` is the packed index whose logits predict `labels[k]`.
-    # Drop each sequence tail because it has no next-token target.
-    positions = torch.arange(flat_tokens.numel(), device=tokens.device)
-    keep = torch.ones(flat_tokens.numel(), device=tokens.device, dtype=torch.bool)
-    keep[cu_seqlens[1:] - 1] = False
-    positions = positions[keep]
+        return torch.empty(0, device=logits_shard.device, dtype=torch.float32)
     labels = flat_tokens[positions + 1]
+    return _chunked_selected_logprobs(logits_shard, positions, labels, chunk_size)
 
-    for start in range(0, action_count, chunk_size):
-        end = min(start + chunk_size, action_count)
-        local_logits = logits_shard[:, positions[start:end]].squeeze(0)
-        selected[start:end] = vocab_parallel_selected_logprobs(local_logits, labels[start:end])
-    return selected
+
+def packed_mtp_token_logprobs(
+    mtp_logits_shard: torch.Tensor,
+    tokens: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    chunk_size: int = 256,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute logprobs of token t+2 under the MTP logits at position t.
+
+    Uses the same action axis as `packed_next_token_logprobs` so callers can
+    align masks between the two. Returns `(logprobs, valid)`: `valid[k]` is
+    False for the final action site of each packed row, whose t+2 target
+    crosses the row boundary (the MTP input token stream is rolled across the
+    whole packed batch, so boundary sites see the next row's leading token and
+    must be excluded from the loss).
+    """
+
+    flat_tokens, keep, positions, action_count = _packed_action_sites(tokens, cu_seqlens)
+    if action_count == 0:
+        return (
+            torch.zeros(0, device=mtp_logits_shard.device, dtype=torch.float32),
+            torch.zeros(0, device=tokens.device, dtype=torch.bool),
+        )
+    # A site's t+2 label stays in-row iff the following position is also an
+    # action site; row tails are exactly the positions dropped from `keep`
+    # (the global maximum action position is total - 2, so no bounds clamp).
+    valid = keep[positions + 1]
+    labels = flat_tokens[(positions + 2).clamp(max=flat_tokens.numel() - 1)]
+    selected = _chunked_selected_logprobs(mtp_logits_shard, positions, labels, chunk_size)
+    return selected, valid
 
 
 def packed_next_token_logprobs_from_hidden(
@@ -108,9 +156,25 @@ def packed_next_token_logprobs_from_hidden(
     labels = flat_tokens[positions + 1]
     flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
     cap = float(logit_softcap or 0.0)
+    projection_parameters = None
+    if torch.is_grad_enabled() and lm_head.weight.dtype in (torch.bfloat16, torch.float16):
+        projection_dtype = lm_head(flat_hidden[:0].to(lm_head.weight.dtype).unsqueeze(0)).dtype
+        if projection_dtype == torch.float32:
+            # Some heads keep BF16 tied weights but project in FP32. Cast
+            # parameters once for the whole loss graph: casting inside each
+            # chunk would round every partial weight gradient back to BF16
+            # before summing it, unlike the full-sequence projection.
+            projection_parameters = {name: param.float() for name, param in lm_head.named_parameters()}
 
     def score_chunk(chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
-        logits = lm_head(chunk_hidden)
+        # Preserve the model forward's [batch, tokens, hidden] layout. Native
+        # parallel heads dispatch 2D inputs to a different fused linear path,
+        # which would change the backward arithmetic solely due to chunking.
+        states = chunk_hidden.to(lm_head.weight.dtype).unsqueeze(0)
+        if projection_parameters is None:
+            logits = lm_head(states).squeeze(0)
+        else:
+            logits = functional_call(lm_head, projection_parameters, (states,)).squeeze(0)
         if cap:
             logits = cap * torch.tanh(logits / cap)
         return vocab_parallel_selected_logprobs(logits, chunk_labels)
@@ -177,13 +241,23 @@ def _selected_logprobs_components_forward(
     if world_size > 1:
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
 
-    exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
-    for start in range(0, local_vocab, vocab_chunk_size):
-        end = min(start + vocab_chunk_size, local_vocab)
-        exp_sum += torch.exp(logits_shard[..., start:end].float() - global_max.unsqueeze(-1)).sum(dim=-1)
-    if world_size > 1:
-        dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
-    logsumexp = global_max + exp_sum.log()
+    if (
+        world_size == 1
+        and logits_shard.ndim == 2
+        and logits_shard.device.type == "cuda"
+        and logits_shard.dtype != torch.float64
+    ):
+        from areno.engine.runtime._logprob_kernels import row_logsumexp
+
+        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+    else:
+        exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
+        for start in range(0, local_vocab, vocab_chunk_size):
+            end = min(start + vocab_chunk_size, local_vocab)
+            exp_sum += torch.exp(logits_shard[..., start:end].float() - global_max.unsqueeze(-1)).sum(dim=-1)
+        if world_size > 1:
+            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
+        logsumexp = global_max + exp_sum.log()
 
     safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
     target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
@@ -223,14 +297,24 @@ def _selected_logprobs_components(
     if world_size > 1:
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
 
-    exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
-    for start in range(0, local_vocab, vocab_chunk_size):
-        end = min(start + vocab_chunk_size, local_vocab)
-        shifted = logits_shard[..., start:end].float() - global_max.unsqueeze(-1)
-        exp_sum += torch.exp(shifted).sum(dim=-1)
-    if world_size > 1:
-        dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
-    logsumexp = global_max + exp_sum.log()
+    if (
+        world_size == 1
+        and logits_shard.ndim == 2
+        and logits_shard.device.type == "cuda"
+        and logits_shard.dtype != torch.float64
+    ):
+        from areno.engine.runtime._logprob_kernels import row_logsumexp
+
+        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+    else:
+        exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
+        for start in range(0, local_vocab, vocab_chunk_size):
+            end = min(start + vocab_chunk_size, local_vocab)
+            shifted = logits_shard[..., start:end].float() - global_max.unsqueeze(-1)
+            exp_sum += torch.exp(shifted).sum(dim=-1)
+        if world_size > 1:
+            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
+        logsumexp = global_max + exp_sum.log()
 
     # Off-shard label indices are clamped to a valid local position; the
     # resulting target value is zeroed via `local_mask` so the SUM-reduce

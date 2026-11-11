@@ -22,6 +22,7 @@ import torch
 from areno.engine.checkpoints.common import (
     CheckpointSpec,
     DenseOrMoeSpec,
+    ExtraLayerListSpec,
     LayerSpec,
     MoeSpec,
     ReplicatedTensorSpec,
@@ -173,4 +174,26 @@ BAILING_LAYER_SPEC = LayerSpec(
     save_handlers=(save_bailing_v3_attention,),
     prefetch_layer=True,
 )
-CHECKPOINT_SPEC = CheckpointSpec(top_level=TOP_LEVEL_SPEC, layer=BAILING_LAYER_SPEC)
+# MTP layers live at HF indices ``num_hidden_layers + i`` and reuse the trunk
+# layer layout plus the DeepSeek-style projection tensors. ``eh_proj`` and the
+# extra norms are small, so they stay replicated across TP ranks.
+MTP_LAYER_SPEC = LayerSpec(
+    prefix="model.layers.{layer}",
+    replicated=LAYER_NORM_SPECS
+    + (
+        ReplicatedTensorSpec("{prefix}.enorm.weight", "enorm.weight"),
+        ReplicatedTensorSpec("{prefix}.hnorm.weight", "hnorm.weight"),
+        ReplicatedTensorSpec("{prefix}.eh_proj.weight", "eh_proj.weight"),
+        ReplicatedTensorSpec("{prefix}.final_layernorm.weight", "final_layernorm.weight"),
+    ),
+    load_ops=(MLP_SPEC,),
+    save_ops=(MLP_SPEC,),
+    load_handlers=(load_bailing_v3_attention,),
+    save_handlers=(save_bailing_v3_attention,),
+    prefetch_layer=True,
+)
+CHECKPOINT_SPEC = CheckpointSpec(
+    top_level=TOP_LEVEL_SPEC,
+    layer=BAILING_LAYER_SPEC,
+    extra_layers=(ExtraLayerListSpec(attr="mtp_layers", layer=MTP_LAYER_SPEC),),
+)

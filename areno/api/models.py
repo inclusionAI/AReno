@@ -96,3 +96,6 @@ class TrainSequence(BaseModel):
     reward: float = Field(default=0.0)
     eos_token_id: int = Field(default=0)
     routed_experts: Any | None = Field(default=None)
+    # Rows may have different causal contexts while sharing one sequence loss.
+    # The id is local to a train() call; mini_bs counts these trajectories.
+    trajectory_id: int | None = Field(default=None)

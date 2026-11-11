@@ -66,10 +66,31 @@ def areno_kda_recurrent_update(
     dt_bias: torch.Tensor,
     lower_bound: float | None,
     use_qk_l2norm_in_kernel: bool = True,
+    intermediate_states: torch.Tensor | None = None,
+    intermediate_state_indices: torch.Tensor | None = None,
+    disable_state_update: bool = False,
 ) -> torch.Tensor:
+    """Recurrent KDA step over ``cu_seqlens`` segments, updating ``state`` in place.
+
+    Speculative verify passes ``intermediate_states`` shaped
+    ``(rows, steps, heads, head_dim, v_head_dim)`` to receive the state after
+    every token and ``disable_state_update=True`` to leave ``state`` untouched;
+    the caller commits the state of the last accepted token afterwards.
+    """
     if not on_kernel_device(q, k, v, raw_gate, beta, state, state_indices, cu_seqlens, a_log, dt_bias):
         raise RuntimeError("areno_kda_recurrent_update requires CUDA or NPU tensors on the same device")
+    # Only the CUDA kernel takes the speculative-verify arguments; the NPU
+    # adapter keeps its plain recurrent signature.
+    speculative = {}
+    if intermediate_states is not None or disable_state_update:
+        speculative = {
+            "disable_state_update": disable_state_update,
+            "intermediate_states_buffer": intermediate_states,
+            "intermediate_state_indices": intermediate_state_indices,
+        }
     if q.device.type == "npu":
+        if speculative:
+            raise NotImplementedError("speculative KDA verify is not supported on NPU")
         from areno.accel.npu.kda import fused_sigmoid_gating_delta_rule_update
     else:
         from areno.accel.kernels.kda_fla.fused_sigmoid_gating_recurrent import fused_sigmoid_gating_delta_rule_update
@@ -91,6 +112,7 @@ def areno_kda_recurrent_update(
         cu_seqlens=cu_seqlens,
         is_kda=True,
         lower_bound=lower_bound,
+        **speculative,
     )
 
 

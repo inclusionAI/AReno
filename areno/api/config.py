@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from importlib.util import find_spec
 from typing import Any, Literal
 
-from areno.adapters.config import LoraConfig
+from areno.adapters.config import LoraConfig, read_adapter_quantization
 from areno.api.models import BackendType
 
 
@@ -46,6 +46,11 @@ class CudaConfig:
     reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def __post_init__(self) -> None:
+        if self.lora is not None and self.lora.dropout != 0.0:
+            raise ValueError("native CUDA/NPU LoRA currently requires dropout=0; nonzero dropout requires MLX")
+        metadata = read_adapter_quantization(self.lora.adapter_path) if self.lora is not None else None
+        if metadata is not None and metadata["format"] != "nf4-dq-v1":
+            raise ValueError("CUDA requires NF4 QLoRA metadata; MLX affine adapters require the MLX backend")
         if self.lora is not None and self.lora.qlora and self.resolved_rollout_tp_size() != self.tp_size:
             raise ValueError("QLoRA requires matching train and rollout TP sizes for identical base quantization")
 
@@ -83,12 +88,21 @@ class MlxConfig:
     logits_chunk_size: int = 4096
     compile_train_step: bool = True
     gradient_checkpointing: bool = True
+    seed: int | None = field(default=None, kw_only=True)
+    quantization_bits: int | None = field(default=None, kw_only=True)
+    quantization_group_size: int = field(default=64, kw_only=True)
+    inference_only: bool = field(default=False, kw_only=True)
     lora: LoraConfig | None = None
     reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def __post_init__(self) -> None:
-        if self.lora is not None and self.lora.qlora:
-            raise ValueError("QLoRA requires CUDA")
+        if self.quantization_bits is not None:
+            from areno.api.backend.mlx.quantization import validate_quantization
+
+            validate_quantization(self.quantization_bits, self.quantization_group_size)
+        metadata = read_adapter_quantization(self.lora.adapter_path) if self.lora is not None else None
+        if metadata is not None and metadata["format"] != "mlx-affine-v1":
+            raise ValueError("MLX requires affine QLoRA metadata; CUDA NF4 adapters are not supported")
         if self.adapter_path is not None and self.lora is not None:
             raise ValueError("MlxConfig.adapter_path cannot be combined with MlxConfig.lora")
         if self.reference_mode != "independent":

@@ -13,6 +13,7 @@ from areno.api.backend.common import (
     accumulation_group_size,
     accumulation_steps,
     reduce_microbatch_metrics,
+    train_microbatches,
 )
 from areno.api.backend.mlx.checkpoint import save_checkpoint
 from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig
@@ -21,8 +22,14 @@ from areno.api.backend.mlx.losses import mlx_loss
 from areno.api.backend.mlx.numerics import selected_token_logprobs
 from areno.api.backend.mlx.optimizer import apply_optimizer_update, build_optimizer, set_group_learning_rates
 from areno.api.backend.mlx.provider import MlxModelProvider, load_provider
+from areno.api.backend.mlx.quantization import validate_quantized_base
 from areno.api.backend.mlx.roles import MlxRole, load_language_role, load_value_role, role_output
-from areno.api.backend.mlx.training import clip_grad_norm, make_train_batch, sft_target_token_count
+from areno.api.backend.mlx.training import (
+    clip_grad_norm,
+    make_train_batch,
+    sft_target_token_count,
+    trajectory_loss_inputs,
+)
 from areno.api.config import MlxConfig
 from areno.api.context import Context
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
@@ -53,7 +60,7 @@ class MlxBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
         )
@@ -74,8 +81,33 @@ class MlxBackend(Backend):
             raise RuntimeError("MLX backend requires an Apple Silicon AReno installation") from exc
 
         self.config = config
+        if config.seed is not None:
+            mx.random.seed(config.seed)
         model_path = self.config.model_path or ctx.model_path
-        self.provider = load_provider(model_path, adapter_path=self.config.adapter_path)
+        provider_kwargs = {"adapter_path": self.config.adapter_path}
+        from areno.api.backend.mlx.quantization import adapter_quantization
+
+        quantization = None
+        if self.config.lora is not None and self.config.lora.adapter_path:
+            quantization = adapter_quantization(self.config.lora.adapter_path)
+        if self.config.quantization_bits is not None:
+            requested = {"bits": self.config.quantization_bits, "group_size": self.config.quantization_group_size}
+            if quantization and any(requested[k] != quantization[k] for k in requested):
+                raise ValueError("online quantization conflicts with the adapter's saved quantization")
+            quantization = requested
+        if quantization is not None:
+            if self.config.lora is not None and self.config.lora.qlora:
+                raise ValueError(
+                    "MLX --qlora requires a preconverted checkpoint; cannot combine with online quantization"
+                )
+            provider_kwargs["quantization"] = quantization
+        if getattr(self.config, "decision_head", False):
+            provider_kwargs["text_only"] = True
+        self.provider = load_provider(model_path, **provider_kwargs)
+        if not self.config.inference_only:
+            from areno.api.backend.mlx.gated_delta import install_parallel_gated_delta
+
+            install_parallel_gated_delta()
         self.model = self.provider.model
         self.tokenizer = self.provider.tokenizer
         self.processor = self.provider.processor
@@ -87,10 +119,23 @@ class MlxBackend(Backend):
             # A unified rollout/training process cannot let Metal retain all
             # temporary generation buffers for reuse across the phase change.
             mx.set_cache_limit(0)
-        if self.model_config.get("quantization") is not None:
-            raise ValueError(
-                "MLX training requires a non-quantized checkpoint so saved weights remain loadable by Transformers"
-            )
+        try:
+            # Online quantization uses its own provider metadata and supports
+            # ordinary LoRA. Only explicit QLoRA binds an adapter to base files.
+            quantization = None
+            if self.config.lora is not None and self.config.lora.qlora:
+                quantization = validate_quantized_base(self.model, self.model_config, self.config.lora, model_path)
+            elif (
+                self.model_config.get("quantization") is not None
+                and self.config.lora is None
+                and not self.config.inference_only
+            ):
+                raise ValueError(
+                    "MLX training on a quantized base requires LoRA; full quantized-weight training is unsupported"
+                )
+        except Exception:
+            self.close()
+            raise
         self._validate_tokenizer(ctx.tokenizer)
         optimizer_config = self.config.optimizer
         if self.config.lora is None:
@@ -104,6 +149,7 @@ class MlxBackend(Backend):
                     self.config.lora,
                     model_type=str(self.model_config.get("model_type", "")),
                     model_config=self.model_config,
+                    quantization=quantization,
                 )
             except Exception:
                 self.close()
@@ -114,7 +160,16 @@ class MlxBackend(Backend):
         )
         if self.config.gradient_checkpointing:
             self._enable_gradient_checkpointing()
-        self.model.train()
+        if getattr(self.config, "decision_head", False):
+            from areno.api.backend.mlx.decision import initialize_head
+
+            initialize_head(self)
+            if self.config.inference_only:
+                self.model.eval()
+                self.model.set_dtype(mx.float32)
+                mx.eval(self.model.parameters())
+        if not self.config.inference_only:
+            self.model.train()
         mx.eval(self.model.parameters(), self.optimizer.state)
 
     def runtime_components(self) -> BackendRuntimeComponents:
@@ -223,6 +278,8 @@ class MlxBackend(Backend):
         """Apply native MLX gradients to the same model used for rollout."""
 
         self._require_runtime()
+        if self.config.inference_only:
+            raise RuntimeError("this MLX runtime is inference-only")
         if self._rollout_active:
             raise RuntimeError("cannot update MLX policy during an active rollout session")
         if not batch_data:
@@ -234,7 +291,15 @@ class MlxBackend(Backend):
         from mlx.utils import tree_map
 
         spec = describe_loss_fn(loss_fn)
-        microbatches = [batch_data[start : start + mini_bs] for start in range(0, len(batch_data), mini_bs)]
+        if spec.name == "jev":
+            from areno.api.backend.mlx.decision import train_questions
+            from areno.api.backend.mlx.training import training_allocator_cache
+
+            with training_allocator_cache():
+                return train_questions(self, ctx, batch_data, mini_bs=mini_bs, **spec.kwargs)
+        if self._lora_state is not None and self._lora_state.quantization is not None and spec.name != "sft":
+            raise ValueError("MLX QLoRA currently supports SFT only")
+        microbatches = train_microbatches(batch_data, mini_bs)
         accumulation = accumulation_steps(len(microbatches), gradient_accumulation_steps)
 
         self.model.train()
@@ -296,6 +361,16 @@ class MlxBackend(Backend):
                 result[f"{group}_lr"] = rate
         return result
 
+    def decision_parameters(self, ctx):
+        from areno.api.backend.mlx.decision import parameter_counts
+
+        return parameter_counts(self)
+
+    def decision_scores(self, ctx, rows):
+        from areno.api.backend.mlx.decision import score_candidates
+
+        return score_candidates(self, rows)
+
     def save_checkpoint(self, ctx: Context, path: str) -> str:
         """Save full MLX weights, or a standard PEFT artifact in LoRA mode."""
 
@@ -317,17 +392,32 @@ class MlxBackend(Backend):
         self._require_runtime()
         if self._lora_state is None:
             raise RuntimeError("export_adapter requires MLX LoRA")
-        return export_peft_adapter(
+        result = export_peft_adapter(
             self._lora_state,
             path,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path or ctx.model_path),
         )
+        quantization = self.model_config.get("areno_online_quantization")
+        if quantization is not None:
+            import json
+            from pathlib import Path
+
+            from areno.api.backend.mlx.quantization import METADATA_FILE
+
+            (Path(path) / METADATA_FILE).write_text(json.dumps(quantization, indent=2) + "\n")
+        if getattr(self.config, "decision_head", False):
+            from areno.api.backend.mlx.decision import save_head
+
+            save_head(self, path)
+        return result
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         """Load PPO/DPO auxiliary roles with MLX-native modules."""
 
         del ctx
         self._require_runtime()
+        if self._lora_state is not None and self._lora_state.quantization is not None and set(roles) - {"actor"}:
+            raise ValueError("MLX QLoRA auxiliary roles are not supported yet; use SFT")
         unsupported = set(roles) - self.capabilities().model_roles
         if unsupported:
             names = ", ".join(sorted(unsupported))
@@ -383,18 +473,28 @@ class MlxBackend(Backend):
                 raise RuntimeError(f"MLX model role {role!r} is not initialized")
             provider = loaded.provider
 
-        results: list[list[float]] = []
-        for start in range(0, len(token_rows), microbatch_size):
-            row_features = features[start : start + microbatch_size] if features is not None else None
-            results.extend(
-                _score_token_rows(
-                    provider,
-                    token_rows[start : start + microbatch_size],
-                    self.tokenizer,
-                    row_features,
+        # Preserve existing scoring kernels for configurations without LoRA
+        # dropout. Ling changes KDA kernels between train and eval modes.
+        disable_dropout = self._lora_state is not None and self._lora_state.config.dropout > 0
+        was_training = provider.model.training
+        if disable_dropout:
+            provider.model.eval()
+        try:
+            results: list[list[float]] = []
+            for start in range(0, len(token_rows), microbatch_size):
+                row_features = features[start : start + microbatch_size] if features is not None else None
+                results.extend(
+                    _score_token_rows(
+                        provider,
+                        token_rows[start : start + microbatch_size],
+                        self.tokenizer,
+                        row_features,
+                    )
                 )
-            )
-        return results
+            return results
+        finally:
+            if disable_dropout:
+                provider.model.train(was_training)
 
     def score_values(
         self,
@@ -532,7 +632,8 @@ class MlxBackend(Backend):
                 targets,
                 chunk_size=self.config.logits_chunk_size,
             )
-            return mlx_loss(name, batch, selected, **kwargs)
+            loss_batch, selected = trajectory_loss_inputs(batch, selected)
+            return mlx_loss(name, loss_batch, selected, **kwargs)
 
         value_and_grad = nn.value_and_grad(self.model, loss)
         if self.config.compile_train_step and not self.provider.is_multimodal:

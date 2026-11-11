@@ -29,6 +29,7 @@ def test_qlora_cli_enables_default_rank_without_explicit_lora():
     cfg = _trainer_config_from_options(**_options(qlora=True, lora_rank=None, lora_adapter_path=None))
     assert cfg.lora.qlora and cfg.lora.rank == 8
     assert cfg.cuda_config().lora.qlora
+    assert cfg.mlx_config().lora.qlora
 
 
 def test_train_config_requires_dataset_path():
@@ -179,6 +180,19 @@ def test_train_config_validates_dpo_positive_fields(field, value, message):
 def test_train_config_validates_ppo_positive_fields(field, value, message):
     with pytest.raises(UsageError, match=message):
         _trainer_config_from_options(**_options(algo="ppo", **{field: value}))
+
+
+def test_mtp_options_reach_the_engine_runtime():
+    policy = _trainer_config_from_options(**_options(algo="gspo", mtp_loss_scale=0.1, speculative_draft_tokens=2))
+    runtime = policy.cuda_config().runtime
+    assert runtime["mtp_loss_scale"] == 0.1
+    assert runtime["speculative_draft_tokens"] == 2
+
+    sft = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0, mtp_loss_scale=0.5)
+    )
+    assert sft.cuda_config().runtime["mtp_loss_scale"] == 0.5
+    assert "speculative_draft_tokens" not in sft.cuda_config().runtime
 
 
 def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
@@ -1021,6 +1035,8 @@ def _options(**overrides):
         activation_checkpointing=True,
         drop_rollout_state=False,
         eager_decode=False,
+        speculative_draft_tokens=0,
+        mtp_loss_scale=None,
         attn_backend="flash",
         disable_thinking=False,
         metrics_log_dir=None,
@@ -1048,3 +1064,136 @@ def _options(**overrides):
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
         defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
     return defaults
+
+
+@pytest.mark.parametrize("fraction", [None, "0.55", "0.82"])
+def test_train_cli_passes_mst_budget_and_restores_environment(monkeypatch, fraction):
+    import os
+
+    seen = []
+    monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.33")
+    monkeypatch.setattr(train_cli, "_trainer_config_from_options", lambda **kwargs: object())
+
+    def run(config, options):
+        seen.append(float(os.environ["ARENO_MST_MEM_FRAC"]))
+        raise RuntimeError("test exit")
+
+    monkeypatch.setattr(train_cli, "_run_train_command", run)
+    result = CliRunner().invoke(train_cli.train_command, [] if fraction is None else ["--mem-frac", fraction])
+    assert isinstance(result.exception, RuntimeError)
+    assert seen == [0.9 if fraction is None else float(fraction)]
+    assert os.environ["ARENO_MST_MEM_FRAC"] == "0.33"
+
+
+def test_q4_cli_selects_online_quantization_for_mlx(tmp_path):
+    loader = tmp_path / "custom_loader.py"
+    loader.write_text("def load_training_dataset(path, **kwargs):\n    return []\n")
+    config = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            backend="mlx",
+            world_size=1,
+            tp_size=1,
+            save_path="runs/online-quant",
+            dataset_loader_fn=str(loader),
+            lora_rank=32,
+            lora_alpha=64,
+            q4=True,
+            reward_fn_path=None,
+            reward_ckpt=None,
+        )
+    )
+    assert config.backend_config().quantization_bits == 4
+    assert config.backend_config().quantization_group_size == 64
+
+
+@pytest.mark.parametrize("q4", [False, True])
+def test_jev_cli_uses_offline_decision_config_and_joint_lora(tmp_path, q4):
+    from areno.api.jev import JevMlxConfig, JevTrainerConfig
+
+    loader = tmp_path / "custom_jev_loader.py"
+    loader.write_text("def load_training_dataset(path, **kwargs):\n    return []\n")
+    config = _trainer_config_from_options(
+        **_options(
+            algo="jev",
+            q4=q4,
+            backend="mlx",
+            world_size=1,
+            tp_size=1,
+            save_path="runs/jev",
+            dataset_loader_fn=str(loader),
+            lora_rank=32,
+            lora_alpha=64,
+            reward_fn_path=None,
+            reward_ckpt=None,
+        )
+    )
+    assert isinstance(config, JevTrainerConfig)
+    assert isinstance(config.backend_config(), JevMlxConfig)
+    assert config.lora.rank == 32
+
+    assert config.backend_config().quantization_bits == (4 if q4 else None)
+
+
+@pytest.mark.parametrize("backend", ["mlx", "cuda"])
+@pytest.mark.parametrize("head_lr", [None, 2e-5])
+def test_jev_head_lr_reaches_backend_and_summary(backend, head_lr):
+    config = _trainer_config_from_options(
+        **_options(
+            algo="jev",
+            backend=backend,
+            world_size=1,
+            tp_size=1,
+            save_path="runs/jev",
+            lora_rank=128,
+            head_lr=head_lr,
+            lr=1e-6,
+        )
+    )
+    expected = 2e-4 if head_lr is None else head_lr
+    assert config.head_lr == expected
+    assert config.backend_config().head_lr == expected
+    assert config.optimizer_lr == 1e-6
+    summary = _format_training_config_summary(config)
+    assert re.search(rf"(?m)^  head_lr\s+{re.escape(str(expected))}$", summary)
+
+
+@pytest.mark.parametrize("head_lr", [0, -1e-5, float("nan"), float("inf"), -float("inf")])
+def test_jev_head_lr_rejects_invalid_values(head_lr):
+    with pytest.raises(UsageError, match="--head-lr must be finite and positive"):
+        _trainer_config_from_options(**_options(algo="jev", head_lr=head_lr))
+
+
+def test_head_lr_rejects_non_jev_algorithm():
+    with pytest.raises(UsageError, match="--head-lr requires --algo jev"):
+        _trainer_config_from_options(**_options(algo="sft", head_lr=2e-5))
+
+
+def test_jev_head_lr_cli_parsing(monkeypatch):
+    captured = []
+    monkeypatch.setattr(train_cli, "_run_train_command", lambda config, options: captured.append(config))
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "jev",
+            "--backend",
+            "mlx",
+            "--ckpt",
+            "model",
+            "--dataset-path",
+            "data.parquet",
+            "--save-path",
+            "runs/jev",
+            "--world-size",
+            "1",
+            "--tp-size",
+            "1",
+            "--lora-rank",
+            "128",
+            "--head-lr",
+            "2e-5",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured[0].mlx_config().head_lr == 2e-5

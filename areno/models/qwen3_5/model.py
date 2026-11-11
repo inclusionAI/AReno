@@ -37,7 +37,6 @@ from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
 from areno.engine.parallel.collectives import (
     all_reduce,
-    copy_to_tensor_parallel_region,
     gather_from_sequence_parallel_region,
     is_sequence_parallel_active,
     scatter_to_sequence_parallel_region,
@@ -45,7 +44,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_softmax_routes
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
@@ -202,7 +201,7 @@ class Qwen35FullAttention(nn.Module):
         return None
 
 
-class Qwen35ReplicatedKVQKVLinear(nn.Module):
+class Qwen35ReplicatedKVQKVLinear(MergedColumnParallelLinear):
     """Q-sharded QKV projection with K/V heads replicated across TP ranks."""
 
     def __init__(
@@ -214,7 +213,9 @@ class Qwen35ReplicatedKVQKVLinear(nn.Module):
         *,
         attn_output_gate: bool,
     ):
-        super().__init__()
+        nn.Module.__init__(self)
+        self.lora_slots = nn.ModuleDict()
+        self._lora_component_indices: dict[str, int | tuple[int, ...]] = {}
         ctx = get_tp_context()
         q_size = num_heads * head_dim * (2 if attn_output_gate else 1)
         kv_size = num_kv_heads * head_dim
@@ -226,18 +227,11 @@ class Qwen35ReplicatedKVQKVLinear(nn.Module):
         self.out_features = (q_size, kv_size, kv_size)
         self.local_out_features = [q_range[1] - q_range[0], head_dim, head_dim]
         self.shard_ranges = (q_range, kv_range, kv_range)
+        self.bias = None
         self.weight = nn.Parameter(torch.empty(sum(self.local_out_features), hidden_size))
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         self._kv_grad_group, self._kv_grad_replication = _replicated_kv_grad_group(num_kv_heads)
         self.weight.register_hook(self._sync_replicated_kv_grad)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = (
-            gather_from_sequence_parallel_region(x)
-            if is_sequence_parallel_active()
-            else copy_to_tensor_parallel_region(x)
-        )
-        return _areno_linear_no_compile(x, self.weight)
 
     def _sync_replicated_kv_grad(self, grad: torch.Tensor) -> torch.Tensor:
         if self._kv_grad_group is None or self._kv_grad_replication <= 1:
@@ -510,7 +504,12 @@ class Qwen35DecoderLayer(nn.Module):
         normed = self.input_layernorm(hidden_states).to(dtype=residual.dtype)
         hidden_states = residual + self.attention(normed, position_ids, train_meta, infer_meta)
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype))
+        hidden_states = residual + tokenwise_forward(
+            self.mlp,
+            self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype),
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
         return hidden_states
 
 
@@ -548,7 +547,16 @@ class Qwen35MoeMLP(nn.Module):
             routed_scaling_factor=config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, *, train_meta: TrainMeta | None = None) -> torch.Tensor:
+        # Routed, router and shared-expert VJPs meet at this boundary. Sum
+        # them in FP32 before the single cast back to the decoder dtype;
+        # otherwise checkpoint scheduling changes BF16 addition order.
+        if (
+            torch.is_grad_enabled()
+            and hidden_states.requires_grad
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+        ):
+            hidden_states = hidden_states.float()
         moe_sequence_parallel = is_sequence_parallel_active()
         sequence_parallel_hidden_states = hidden_states
         if moe_sequence_parallel:
@@ -567,7 +575,13 @@ class Qwen35MoeMLP(nn.Module):
                 renormalize=self.norm_topk_prob,
             )
             if self.training:
-                out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
+                out = tokenwise_forward(
+                    self.experts,
+                    flat.to(dtype=self.experts.gate_up_weight.dtype),
+                    topk_idx.to(torch.long),
+                    topk_weight,
+                    train_meta=train_meta,
+                )
             else:
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight)
         out = out.view(batch, seqlen, hidden)
@@ -575,9 +589,14 @@ class Qwen35MoeMLP(nn.Module):
             out = scatter_to_sequence_parallel_region(out)
         if self.shared_expert is not None:
             shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
-            shared = self.shared_expert(shared_input)
+            shared = tokenwise_forward(
+                self.shared_expert,
+                shared_input.to(dtype=self.shared_expert.gate_proj.weight.dtype),
+                train_meta=train_meta,
+            )
             if self.shared_expert_gate is not None:
-                shared = shared * torch.sigmoid(F.linear(shared_input, self.shared_expert_gate.unsqueeze(0)))
+                gate_input = shared_input.to(dtype=self.shared_expert_gate.dtype)
+                shared = shared * torch.sigmoid(F.linear(gate_input, self.shared_expert_gate.unsqueeze(0)))
             out = out + shared
         return out
 
@@ -676,7 +695,10 @@ class Qwen35MoeDecoderLayer(Qwen35DecoderLayer):
             infer_meta=infer_meta,
         )
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype))
+        hidden_states = residual + self.mlp(
+            self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype),
+            train_meta=train_meta if infer_meta is None else None,
+        )
         return hidden_states
 
 
@@ -1155,6 +1177,7 @@ class Qwen35ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
@@ -1166,7 +1189,7 @@ class Qwen35ForCausalLM(nn.Module):
         )
         if feature_position_ids is not None:
             position_ids = feature_position_ids
-        return self.forward_from_embeddings(hidden_states, position_ids, train_meta, infer_meta)
+        return self.forward_from_embeddings(hidden_states, position_ids, train_meta, infer_meta, defer_lm_head)
 
     def forward_from_embeddings(
         self,
@@ -1174,6 +1197,7 @@ class Qwen35ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = (
@@ -1199,7 +1223,7 @@ class Qwen35ForCausalLM(nn.Module):
                         infer_meta=infer_meta,
                     )
             hidden_states = self.norm(hidden_states).to(dtype=hidden_states.dtype)
-            logits_shard = self.lm_head(hidden_states)
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     @torch._dynamo.disable
@@ -1425,6 +1449,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         return self.language_model(
             input_ids,
@@ -1432,6 +1457,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             train_meta=train_meta,
             infer_meta=infer_meta,
             features=self._project_pixel_values(features, input_ids.device, input_ids.shape[0]),
+            defer_lm_head=defer_lm_head,
         )
 
     @torch._dynamo.disable
@@ -1543,6 +1569,13 @@ def _mrope_section(rope: dict[str, Any]) -> tuple[int, int, int] | None:
 
 class Qwen35Adapter(ModelAdapter):
     name = "qwen3_5"
+    supports_qlora = True
+
+    @property
+    def lora_initializer(self):
+        from areno.models.qwen3_5.lora import initialize_qwen35_lora
+
+        return initialize_qwen35_lora
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         architectures = set(hf_config.get("architectures") or [])

@@ -6,10 +6,11 @@ The backend serves two distinct modes signalled by `InferMeta.mode`:
   rows are scattered into the paged KV cache by ``(block_id, offset)``
   index puts, then `flash_attn_varlen_func` runs causal attention over the
   packed segments using `cu_seqlens` boundaries.
-- decode: each active sequence contributes one new token. The new K/V row
-  is appended at the next slot inside the last block of each sequence's
-  block table, and `flash_attn_with_kvcache` reads the full history for
-  each sequence directly from the paged cache.
+- decode: each active sequence contributes ``tokens_per_seq`` new tokens
+  (one for plain decode, ``k + 1`` for speculative verify). The new K/V rows
+  are appended after the sequence's current length, and
+  `flash_attn_with_kvcache` reads the full history for each sequence
+  directly from the paged cache with a causal mask over the new rows.
 
 The ``native`` backend selects the areno_accel native attention path that
 shares forward math with training attention for logprob diagnostics.
@@ -70,14 +71,12 @@ class FlashAttnInferBackend(nn.Module):
         if meta.mode == "prefill":
             if meta.cu_seqlens is None or meta.max_seqlen is None or meta.block_table is None:
                 raise ValueError("prefill inference requires cu_seqlens, max_seqlen, block_table")
+            if meta.cache_seqlens is not None and call.q.device.type == "npu":
+                raise ValueError("chunked prefill with a cached prefix is not supported on NPU")
             # Persist freshly computed K/V for the prompt into paged cache.
             if update_cache:
                 _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
-            # The cached-prefix path uses paged KV indexing that is currently
-            # implemented for CUDA.  NPU prefill still dispatches through its
-            # regular varlen/native selector; passing the cache metadata must
-            # not force CUDA-only indexing on an NPU tensor.
-            if meta.cache_seqlens is not None and call.q.device.type != "npu":
+            if meta.cache_seqlens is not None:
                 out = _prefill_with_cached_prefix(
                     call.q,
                     call.k,
@@ -123,6 +122,7 @@ class FlashAttnInferBackend(nn.Module):
         if meta.mode == "decode":
             if meta.cache_seqlens is None or meta.block_table is None:
                 raise ValueError("decode inference requires cache_seqlens and block_table")
+            steps = getattr(meta, "tokens_per_seq", 1)
             # flash-attn's num_splits=0 heuristic enables split-KV for small
             # decode batches. For local/sliding attention, many splits can be
             # fully outside the window and some flash-attn builds produce NaNs
@@ -136,6 +136,8 @@ class FlashAttnInferBackend(nn.Module):
             if use_native_attention(self.attn_backend, call.q, block_size=k_cache.shape[1]):
                 if not update_cache:
                     raise ValueError("native decode requires update_cache=True")
+                if steps != 1:
+                    raise ValueError("native decode attention supports one token per sequence")
                 out = _native_decode(
                     q=q_flat,
                     k_update=k_flat,
@@ -149,18 +151,23 @@ class FlashAttnInferBackend(nn.Module):
                 out = call.trim_value_dim(out)
                 return out.view(q.shape[0], q.shape[1], q.shape[2], call.value_dim)
             require_flash_attention_supported(call, mode="decode attention")
+            # flash-attn's kvcache entry takes (rows, new_tokens, heads, dim):
+            # regroup the flat sequence-major token axis by active row.
+            rows = int(meta.cache_seqlens.shape[0])
+            if q_flat.shape[0] != rows * steps:
+                raise ValueError(
+                    f"decode attention got {q_flat.shape[0]} tokens for {rows} rows x {steps} tokens per sequence"
+                )
             # When value head dim < cache head dim we pad to match the cache
             # layout that was sized to the QK head dim at prefill time.
-            v_update = (
-                pad_last_dim(v_flat, v_cache_dim).unsqueeze(1) if v_cache_dim != call.value_dim else v_flat.unsqueeze(1)
-            )
-            cache_seqlens = meta.cache_seqlens if update_cache else meta.cache_seqlens + 1
-            k_update = k_flat.unsqueeze(1) if update_cache else None
-            v_update = v_update if update_cache else None
-            # flash-attn appends the new token in-place inside the paged cache
+            v_update = pad_last_dim(v_flat, v_cache_dim) if v_cache_dim != call.value_dim else v_flat
+            cache_seqlens = meta.cache_seqlens if update_cache else meta.cache_seqlens + steps
+            k_update = k_flat.view(rows, steps, *k_flat.shape[1:]) if update_cache else None
+            v_update = v_update.view(rows, steps, *v_update.shape[1:]) if update_cache else None
+            # flash-attn appends the new tokens in-place inside the paged cache
             # using cache_seqlens (current length) and block_table mapping.
             out = _flash_attn_with_kvcache_no_compile(
-                q_flat.unsqueeze(1),
+                q_flat.view(rows, steps, *q_flat.shape[1:]),
                 k_cache,
                 v_cache,
                 k=k_update,
@@ -259,23 +266,30 @@ def _prefill_with_cached_prefix(
     require_flash_attention_supported(
         build_attention_call(q, k, v, window_size, softmax_scale), mode="prefill attention"
     )
-    offsets = meta.cu_seqlens.cpu().tolist()
-    outputs = []
-    for row, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
-        outputs.append(
-            _flash_attn_with_kvcache_no_compile(
-                q[start:end].unsqueeze(0),
-                k_cache,
-                v_cache,
-                cache_seqlens=(meta.cache_seqlens[row : row + 1] + end - start).to(dtype=torch.int32),
-                block_table=meta.block_table[row : row + 1],
-                causal=True,
-                window_size=window_size,
-                softmax_scale=softmax_scale,
-                num_splits=1,
-            ).squeeze(0)
-        )
-    return torch.cat(outputs, dim=0)
+    # Build this once on the scheduler's CPU metadata path. A manual caller
+    # may omit it; only that compatibility path needs a device synchronization.
+    cu_k, max_k = meta.cu_seqlens_k, meta.max_seqlen_k
+    if cu_k is None or max_k is None:
+        kv_lengths = meta.cache_seqlens + lengths
+        cu_k = torch.cat((meta.cu_seqlens.new_zeros(1), kv_lengths.cumsum(0, dtype=torch.int32)))
+        max_k = int(kv_lengths.max().item())
+    # Paged varlen attention accepts different Q and KV lengths. Its causal
+    # mask is bottom-right aligned: query i sees prefix_length + i keys.
+    # One call handles mixed prefix/chunk lengths without copying cached KV
+    # or a CPU synchronization and separate launch for every sequence/layer.
+    return _flash_attn_varlen_no_compile(
+        q,
+        k_cache,
+        v_cache,
+        cu_seqlens_q=meta.cu_seqlens,
+        cu_seqlens_k=cu_k,
+        max_seqlen_q=meta.max_seqlen,
+        max_seqlen_k=max_k,
+        block_table=meta.block_table,
+        causal=True,
+        window_size=window_size,
+        softmax_scale=softmax_scale,
+    )
 
 
 @torch._dynamo.disable

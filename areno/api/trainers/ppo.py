@@ -30,6 +30,7 @@ from areno.api.advantages import compute_gae
 from areno.api.dashboard import record_dashboard_state
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
+from areno.api.trainers.export import export_gguf_if_configured
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
 logger = logging.getLogger(__name__)
@@ -520,6 +521,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._ensure_roles()
         try:
             self._fit_initialized()
+            export_gguf_if_configured(self)
         finally:
             self.areno.close()
 

@@ -206,6 +206,7 @@ class _CudaServeRuntime:
         world_size: int,
         eager_decode: bool,
         attn_backend: str,
+        speculative_draft_tokens: int,
         lora: LoraConfig | None,
         base_model_name_or_path: str | None,
         device_type: str = "cuda",
@@ -222,7 +223,10 @@ class _CudaServeRuntime:
             dp_size=world_size // tp_size,
             devices=list(range(world_size)),
             runtime_config=RuntimeConfig(
-                eager_decode=bool(eager_decode), attn_backend=attn_backend, device_type=device_type
+                eager_decode=bool(eager_decode),
+                attn_backend=attn_backend,
+                speculative_draft_tokens=int(speculative_draft_tokens),
+                device_type=device_type,
             ),
             role="rollout",
             lora_config=lora,
@@ -263,8 +267,13 @@ class _MlxServeRuntime:
         decode_progress_interval_s: float,
         lora: LoraConfig | None,
         base_model_name_or_path: str | None,
+        quantization_bits: int | None = None,
+        quantization_group_size: int = 64,
     ) -> None:
         config = MlxConfig(
+            quantization_bits=quantization_bits,
+            quantization_group_size=quantization_group_size,
+            inference_only=True,
             model_path=model_path,
             base_model_name_or_path=base_model_name_or_path,
             max_running_prompts=max_running_prompts,
@@ -319,8 +328,11 @@ def _create_serve_runtime(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: str,
+    speculative_draft_tokens: int = 0,
     lora: LoraConfig | None,
     base_model_name_or_path: str | None,
+    quantization_bits: int | None = None,
+    quantization_group_size: int = 64,
 ) -> _CudaServeRuntime | _MlxServeRuntime:
     if backend_type == MLX:
         if world_size != 1 or tp_size != 1:
@@ -331,6 +343,11 @@ def _create_serve_runtime(
             decode_progress_interval_s=decode_progress_interval_s,
             lora=lora,
             base_model_name_or_path=base_model_name_or_path,
+            **(
+                {"quantization_bits": quantization_bits, "quantization_group_size": quantization_group_size}
+                if quantization_bits is not None
+                else {}
+            ),
         )
     del max_running_prompts
     return _CudaServeRuntime(
@@ -340,6 +357,7 @@ def _create_serve_runtime(
         world_size=world_size,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        speculative_draft_tokens=speculative_draft_tokens,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
     )
@@ -356,9 +374,13 @@ def create_app(
     backend_type: BackendType | None = None,
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
+    speculative_draft_tokens: int = 0,
     chat_template_enable_thinking: bool | None = None,
     lora: LoraConfig | None = None,
     base_model_name_or_path: str | None = None,
+    decision_checkpoint: str | None = None,
+    mlx_quantize_bits: int | None = None,
+    mlx_quantize_group_size: int = 64,
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -369,6 +391,33 @@ def create_app(
         raise ValueError("world_size must be divisible by tp_size")
 
     backend_type = backend_type or default_backend_type()
+    if mlx_quantize_bits is not None:
+        from areno.api.backend.mlx.quantization import validate_quantization
+
+        if backend_type != MLX:
+            raise ValueError("--q4 requires --backend mlx")
+        validate_quantization(mlx_quantize_bits, mlx_quantize_group_size)
+    if decision_checkpoint is not None:
+        if backend_type == MLX and (tp_size != 1 or world_size != 1):
+            raise ValueError("MLX JEV serving requires --tp-size 1 --world-size 1")
+        if lora is not None:
+            raise ValueError("--decision-checkpoint includes its LoRA; do not combine with separate LoRA options")
+        from areno.api.jev.serve import create_decision_app
+
+        return create_decision_app(
+            model_path,
+            decision_checkpoint,
+            **(
+                {"backend_type": backend_type, "tp_size": tp_size, "world_size": world_size}
+                if backend_type != MLX
+                else {}
+            ),
+            **(
+                {"quantization_bits": mlx_quantize_bits, "quantization_group_size": mlx_quantize_group_size}
+                if mlx_quantize_bits is not None
+                else {}
+            ),
+        )
     tokenizer = load_tokenizer(model_path)
     processor = load_processor(model_path)
     configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
@@ -378,6 +427,12 @@ def create_app(
     )
     if attn_warning is not None:
         warnings.warn(attn_warning, RuntimeWarning, stacklevel=2)
+    _check_serve_speculative(
+        model_path=model_path,
+        speculative_draft_tokens=speculative_draft_tokens,
+        attn_backend=attn_backend,
+        backend_type=backend_type,
+    )
     parser_trainer = _ToolParserTrainerShim(model_path=model_path, tokenizer=tokenizer)
     engine = _create_serve_runtime(
         model_path=model_path,
@@ -388,8 +443,14 @@ def create_app(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        speculative_draft_tokens=speculative_draft_tokens,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
+        **(
+            {"quantization_bits": mlx_quantize_bits, "quantization_group_size": mlx_quantize_group_size}
+            if mlx_quantize_bits is not None
+            else {}
+        ),
     )
     if backend_type == MLX:
         tokenizer = engine.tokenizer
@@ -534,6 +595,40 @@ def _resolve_serve_attn_backend(
         "AReno will use attn_backend='native'. Native attention is a compatibility path and may be slower."
     )
     return "native", warning
+
+
+def _check_serve_speculative(
+    *,
+    model_path: str,
+    speculative_draft_tokens: int,
+    attn_backend: Literal["flash", "native"],
+    backend_type: BackendType = BackendType.CUDA,
+) -> None:
+    """Reject a speculative-decoding request the serve runtime cannot honour.
+
+    Runs before workers start so the caller gets one clear error instead of the
+    same failure raised inside every rank at the first request.
+    """
+
+    if speculative_draft_tokens <= 0:
+        return
+    if backend_type == MLX:
+        raise ValueError("--speculative-draft-tokens requires the CUDA backend")
+    if attn_backend != "flash":
+        raise ValueError(
+            "--speculative-draft-tokens requires the flash attention backend "
+            f"(resolved attn_backend={attn_backend!r}); the native backend verifies one token per step"
+        )
+    try:
+        model_config = config_from_hf(model_path)
+    except Exception:
+        # Engine startup still owns config loading errors.
+        return
+    if int(getattr(model_config, "num_nextn_predict_layers", 0) or 0) <= 0:
+        raise ValueError(
+            "--speculative-draft-tokens needs a checkpoint that ships MTP layers "
+            f"(num_nextn_predict_layers=0 in {model_path})"
+        )
 
 
 async def _run_request_task(app: FastAPI, item: PendingRequest) -> None:
@@ -940,7 +1035,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
 @click.command(
     name="serve",
     context_settings={"help_option_names": ["-h", "--help"]},
-    help="Serve an OpenAI-compatible /v1/chat/completions API with areno.",
+    help="Serve chat completions or typed JEV decisions with areno.",
 )
 @click.option("--model-path", required=True, help="Local checkpoint/tokenizer path or remote model repo ID.")
 @click.option(
@@ -983,11 +1078,19 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     help="Attention backend. Use native for slower areno_accel attention compatibility/logprob diagnostics.",
 )
 @click.option(
+    "--speculative-draft-tokens",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Speculative decoding: draft this many tokens per step with the checkpoint's MTP layer (0 = off).",
+)
+@click.option(
     "--disable-thinking",
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
 @click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
+@click.option("--q4", is_flag=True, help="Load with MLX 4-bit online quantization; source weights stay unchanged.")
 @click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
 @click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")
 @click.option(
@@ -1000,6 +1103,12 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter to serve.")
+@click.option(
+    "--decision-checkpoint",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="JEV checkpoint containing LoRA, decision head and calibration; serves typed decisions.",
+)
 @click.option("--backend", type=click.Choice(["cuda", "mlx", "npu"]), default=None)
 def serve_command(
     backend: str | None,
@@ -1015,12 +1124,15 @@ def serve_command(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
+    speculative_draft_tokens: int,
     disable_thinking: bool,
     lora_rank: int | None,
     lora_alpha: float,
     lora_dropout: float,
     lora_target_modules: str,
     lora_adapter_path: str | None,
+    decision_checkpoint: str | None,
+    q4: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
@@ -1053,6 +1165,7 @@ def serve_command(
             "default_max_tokens": default_max_tokens,
             "eager_decode": eager_decode,
             "attn_backend": attn_backend,
+            "speculative_draft_tokens": speculative_draft_tokens,
         },
         metrics_dir=None,
     )
@@ -1066,9 +1179,13 @@ def serve_command(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        speculative_draft_tokens=speculative_draft_tokens,
         chat_template_enable_thinking=False if disable_thinking else None,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
+        decision_checkpoint=decision_checkpoint,
+        mlx_quantize_bits=4 if q4 else None,
+        mlx_quantize_group_size=64,
     )
     uvicorn.run(app, host=host, port=port)
 

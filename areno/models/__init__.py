@@ -74,7 +74,15 @@ def _register_olmo2() -> None:
     register_adapter(Olmo2Adapter())
 
 
+def _register_gpt_oss() -> None:
+    from areno.models.gpt_oss import GptOssAdapter
+    from areno.models.registry import register_adapter
+
+    register_adapter(GptOssAdapter())
+
+
 _GROUPS = {
+    "gpt_oss": _register_gpt_oss,
     "llama": _register_llama,
     "qwen3": _register_qwen3,
     "qwen3_5": _register_qwen35,

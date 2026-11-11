@@ -209,6 +209,22 @@ def _load_sft_trainer() -> type:
     return SFTTrainer
 
 
+def _load_jev_trainer() -> type:
+    from areno.api.trainers.jev import JevTrainer
+
+    return JevTrainer
+
+
+def jev_loss_fn(target, logits, *, brier_weight: float = 0.5):
+    from areno.api.jev.loss import jev_loss_fn as decision_loss
+
+    return decision_loss(target, logits, brier_weight=brier_weight)
+
+
+def _bind_jev_loss(config: TrainerConfig, loss_fn: Callable) -> Callable:
+    return partial(loss_fn, brier_weight=getattr(config, "brier_weight", 0.5))
+
+
 def _load_dpo_trainer() -> type:
     from areno.api.trainers.dpo import DPOTrainer
 
@@ -234,6 +250,15 @@ def _bind_grpo_loss(config: TrainerConfig, loss_fn: Callable) -> Callable:
 
 
 def _register_builtin_algorithms() -> None:
+    register_algorithm(
+        AlgorithmSpec(
+            name="jev",
+            trainer_cls=_load_jev_trainer,
+            default_loss_fn=jev_loss_fn,
+            requires_rollout=False,
+            loss_fn_factory=_bind_jev_loss,
+        )
+    )
     register_algorithm(
         AlgorithmSpec(
             name="sft",

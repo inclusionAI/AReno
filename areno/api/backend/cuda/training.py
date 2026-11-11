@@ -7,7 +7,7 @@ from collections.abc import Callable
 import torch
 
 from areno.api.algorithms import sft_loss_fn
-from areno.api.backend.common import accumulation_steps
+from areno.api.backend.common import accumulation_steps, train_sequence_ids
 from areno.api.context import Context
 from areno.api.models import TrainSequence
 
@@ -34,6 +34,8 @@ def make_train_pack(seqs: list[TrainSequence], *, include_routing_replay: bool =
     }
     if loss_mask is not None:
         pack["loss_mask"] = loss_mask
+    if any(seq.trajectory_id is not None for seq in seqs):
+        pack["loss_sequence_ids"] = torch.tensor(train_sequence_ids(seqs), dtype=torch.int64)
     for key, values in (
         ("returns", [seq.returns for seq in seqs]),
         ("values", [seq.values for seq in seqs]),

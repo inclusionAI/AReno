@@ -98,9 +98,10 @@ def _adamw(
         "weight_decay": float(config.get("weight_decay", 1e-2)),
     }
     if not config.get("adam_8bit"):
-        return optim.AdamW(**kwargs, bias_correction=True)
+        return optim.AdamW(**kwargs, bias_correction=bool(config.get("bias_correction", True)))
     return _quantized_adamw_class()(
         **kwargs,
+        bias_correction=bool(config.get("bias_correction", True)),
         state_precision_for_parameter=state_precision_for_parameter,
     )
 
@@ -121,6 +122,7 @@ def _quantized_adamw_class():
             block_size: int = 128,
             update_blocks: int = 8192,
             state_precision_for_parameter: Callable[[str, Any], str] | None = None,
+            bias_correction: bool = True,
         ) -> None:
             super().__init__()
             self._maybe_schedule("learning_rate", learning_rate)
@@ -130,6 +132,7 @@ def _quantized_adamw_class():
             self.block_size = int(block_size)
             self.update_blocks = int(update_blocks)
             self.state_precision_for_parameter = state_precision_for_parameter
+            self.bias_correction = bool(bias_correction)
 
         def init_single(self, parameter, state: dict) -> None:
             size = int(parameter.size)
@@ -140,8 +143,8 @@ def _quantized_adamw_class():
             beta1, beta2 = self.betas
             lr = self.learning_rate.astype(mx.float32)
             step = self.step.astype(mx.float32)
-            bias_correction1 = 1.0 - beta1**step
-            bias_correction2_sqrt = mx.sqrt(1.0 - beta2**step)
+            bias_correction1 = 1.0 - beta1**step if self.bias_correction else 1.0
+            bias_correction2_sqrt = mx.sqrt(1.0 - beta2**step) if self.bias_correction else 1.0
             size = int(state["size"])
             initialized = bool(state["initialized"])
             precision = str(state.get("precision", "8bit"))
