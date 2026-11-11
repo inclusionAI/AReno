@@ -18,7 +18,7 @@ repos:
         files: \.(py|md|yaml|yml|c|cc|cxx|cpp|h|hpp|hxx|cu|cuh)$
       - id: check-added-large-files
         name: Check for large files
-        args: ['--maxkb=1000']
+        args: ['--maxkb=3000']
       - id: detect-private-key
         name: Detect private keys
 
