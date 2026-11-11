@@ -8,9 +8,11 @@ cumulative return. Load both from the same task file with ``--agent-fn`` and
 
 The CLI executes the task file once per hook, so ``run_agent`` and ``reward_fn``
 end up in separate module instances. Episode statistics therefore travel on the
-sample record -- ``run_agent`` writes them under :data:`EPISODE_STATS_KEY` and
-``reward_fn`` reads them back from ``record.source_record`` -- instead of
-closure state.
+sample record -- ``run_agent`` writes them under :data:`EPISODE_STATS_KEY` on a
+per-episode copy of the record and ``reward_fn`` reads them back from
+``record.source_record`` -- instead of closure state. The trainer expands one
+prompt into ``n_samples`` items that share a single record dict, so each
+episode's stats must ride its own copy to stay isolated.
 
 The environment must follow the Gymnasium API (``reset(seed=...) -> (obs, info)``
 and ``step(action) -> (obs, reward, terminated, truncated, info)``). This
@@ -84,13 +86,18 @@ def make_gymnasium_rollout(
                 messages.append({"role": "assistant", "content": _response_text(response)})
                 messages.append({"role": "user", "content": encode_observation(obs)})
         finally:
-            item.record[EPISODE_STATS_KEY] = {
-                "episode_return": float(episode_return),
-                "length": int(length),
-                "seed": seed,
-                "terminated": bool(terminated),
-                "truncated": bool(truncated or (length >= max_episode_steps and not terminated)),
-                "invalid_action": bool(invalid_action),
+            # The batch hands the n_samples items of a prompt one shared record
+            # dict, so stats ride a per-episode copy instead of mutating it.
+            item.record = {
+                **item.record,
+                EPISODE_STATS_KEY: {
+                    "episode_return": float(episode_return),
+                    "length": int(length),
+                    "seed": seed,
+                    "terminated": bool(terminated),
+                    "truncated": bool(truncated or (length >= max_episode_steps and not terminated)),
+                    "invalid_action": bool(invalid_action),
+                },
             }
             env.close()
         return turns

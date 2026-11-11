@@ -297,6 +297,44 @@ def test_sample_isolation_seeded_resets_and_per_item_stats():
     assert item_c.record[EPISODE_STATS_KEY] == item_a.record[EPISODE_STATS_KEY]
 
 
+def test_shared_record_samples_keep_independent_stats():
+    # The trainer's AgentBatch yields one shared record dict for the n_samples
+    # items of a prompt; per-episode stats must not overwrite each other there.
+    shared = {"prompt": "gymnasium episode", "seed": 22}
+    scripts = iter(
+        [
+            [{"reward": 1.0}],
+            [{"reward": 2.0}, {"reward": 3.0, "terminated": True}],
+        ]
+    )
+    run_agent, reward_fn = make_gymnasium_rollout(
+        make_env=lambda: ScriptedEnv(next(scripts)),
+        encode_observation=lambda obs: f"obs {obs['step']}",
+        decode_action=lambda text: int(text),
+        max_episode_steps=16,
+    )
+    item_a = SimpleNamespace(prompt="gymnasium episode", record=shared, prompt_index=0, sample_index=0)
+    item_b = SimpleNamespace(prompt="gymnasium episode", record=shared, prompt_index=0, sample_index=1)
+    # Episode A decodes one action and then fails to parse "bad"; episode B
+    # runs two steps and terminates.
+    _run_batch(run_agent, [item_a, item_b], [_response("0"), _response("bad"), _response("0"), _response("0")])
+
+    assert EPISODE_STATS_KEY not in shared  # the shared dict is never mutated
+    assert item_a.record is not shared and item_b.record is not shared
+    assert item_a.record is not item_b.record
+    stats_a = item_a.record[EPISODE_STATS_KEY]
+    stats_b = item_b.record[EPISODE_STATS_KEY]
+    assert stats_a["episode_return"] == pytest.approx(1.0)
+    assert stats_a["length"] == 1
+    assert stats_a["invalid_action"] is True
+    assert stats_b["episode_return"] == pytest.approx(5.0)
+    assert stats_b["length"] == 2
+    assert stats_b["terminated"] is True
+    assert stats_b["invalid_action"] is False
+    assert reward_fn(SimpleNamespace(source_record=dict(item_a.record))) == pytest.approx(1.0)
+    assert reward_fn(SimpleNamespace(source_record=dict(item_b.record))) == pytest.approx(5.0)
+
+
 def test_reward_fn_scores_episode_return_and_rejects_missing_stats():
     _, reward_fn = make_gymnasium_rollout(
         make_env=lambda: ScriptedEnv([]),
