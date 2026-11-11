@@ -1,0 +1,32 @@
+scripts/sft/v4/run_areno_sft_fp32_v4_v1_3_refined_aig.py
+  s_f34a8ea9e558a1::t_202f7485d74fc1 1-14,19-32,34-35,37-73
+  s_f34a8ea9e558a1::t_e0608236bbee9f 15
+  s_f34a8ea9e558a1::t_afff05d5694cec 16-18,33,36
+scripts/sft/README.md
+  s_f34a8ea9e558a1::t_fccba059f5761d 5-6
+tests/test_sft_v4_refined_aig_launcher_cpu.py
+  s_f34a8ea9e558a1::t_afff05d5694cec 1-107
+scripts/sft/v4/run_areno_sft_fp32-v4-v1-3-refined-aig.conf
+  s_f34a8ea9e558a1::t_8ea420751f2dd2 1-15
+scripts/sft/v4/run_areno_sft_fp32-v4-v1-3-refined-aig.sh
+  s_f34a8ea9e558a1::t_8ea420751f2dd2 1-10
+scripts/sft/v4/run_areno_sft_fp32-v4-v1-3-refined-aig.md
+  s_f34a8ea9e558a1::t_fccba059f5761d 1-80
+  s_f34a8ea9e558a1::t_2f67f1fc78ab52 81-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c10253da50f27553fa9ac942fcfe9e1bb1c785e5",
+  "prompts": {},
+  "sessions": {
+    "s_f34a8ea9e558a1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a177ec-4e8e-7bc0-b517-6de497cded00",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "成闲 <kyrie.wc@antgroup.com>"
+    }
+  }
+}
