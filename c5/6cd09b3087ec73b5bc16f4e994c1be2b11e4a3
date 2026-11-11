@@ -1,0 +1,19 @@
+pyproject.toml
+  s_d6bc6106d6e880::t_a986256174feed 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c56cd09b3087ec73b5bc16f4e994c1be2b11e4a3",
+  "prompts": {},
+  "sessions": {
+    "s_d6bc6106d6e880": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c9cb-2f9f-78e0-aece-f1257a53bf80",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Boris <coolhzb@gmail.com>"
+    }
+  }
+}
