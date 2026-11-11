@@ -79,7 +79,7 @@ Use our official [AReno image](https://ghcr.io/inclusionai/areno) `inclusionai/a
 ```bash
 # Please make sure the host has an NVIDIA driver and NVIDIA Container Toolkit.
 docker run --gpus all --rm -it \
-  ghcr.io/inclusionai/areno:v0.10.0 \
+  ghcr.io/inclusionai/areno:v0.11.0 \
   areno check
 ```
 
