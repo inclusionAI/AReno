@@ -1,0 +1,14 @@
+README.md
+  h_8e00c54f303cea 32-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ab18b7eb69594dcde5cafef3891ccf582f8980d8",
+  "prompts": {},
+  "humans": {
+    "h_8e00c54f303cea": {
+      "author": "Boris <coolhzb@gmail.com>"
+    }
+  }
+}
