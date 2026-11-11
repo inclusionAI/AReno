@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import click
+import pytest
 import torch
 from click.testing import CliRunner
 
@@ -407,12 +408,13 @@ class ConfigAndDataTest(unittest.TestCase):
         model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
         runtime = RuntimeConfig(attn_backend="flash")
 
+        # assertWarnsRegex probes all imported modules and triggers optional lazy imports.
         with (
             patch("areno.engine.config.torch.cuda.is_available", return_value=True),
             patch("areno.engine.config.torch.cuda.device_count", return_value=1),
             patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(7, 5)),
             patch("areno.engine.config.torch.cuda.get_device_name", return_value="Tesla T4"),
-            self.assertWarnsRegex(RuntimeWarning, "falling back to attn_backend='native'.*slower"),
+            pytest.warns(RuntimeWarning, match="falling back to attn_backend='native'.*slower"),
         ):
             cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
 
@@ -435,7 +437,7 @@ class ConfigAndDataTest(unittest.TestCase):
             patch("areno.engine.config.torch.cuda.device_count", return_value=1),
             patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(7, 5)),
             patch("areno.engine.config.torch.cuda.get_device_name", return_value="Tesla T4"),
-            self.assertWarnsRegex(RuntimeWarning, "torch.compile.*falling back to eager"),
+            pytest.warns(RuntimeWarning, match="torch.compile.*falling back to eager"),
         ):
             cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
 
@@ -507,7 +509,7 @@ class ConfigAndDataTest(unittest.TestCase):
         )
         runtime = RuntimeConfig(attn_backend="flash")
 
-        with self.assertWarnsRegex(RuntimeWarning, "qk head dim 512.*attn_backend='native'"):
+        with pytest.warns(RuntimeWarning, match="qk head dim 512.*attn_backend='native'"):
             cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
 
         self.assertEqual(cfg.runtime.attn_backend, "native")
