@@ -1,5 +1,5 @@
 Selective activation recompute for Ling v3
-========================================
+==========================================
 
 CUDA Ling v3 supports selecting decoder recompute by module and zero-based
 layer index, independently from SFT vocabulary projection/logprobs recompute.
