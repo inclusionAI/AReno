@@ -44,6 +44,11 @@ class LoraConfig:
 
     When ``adapter_path`` is set, its standard PEFT metadata is authoritative
     for rank, alpha, dropout, and targets.
+
+    ``full_param_modules`` is an AReno hybrid-training extension that PEFT
+    metadata does not carry: parameter-name substrings whose base parameters
+    train in full-parameter mode alongside the LoRA slots (for example MoE
+    routers or gating layers).
     """
 
     rank: int = 8
@@ -52,6 +57,7 @@ class LoraConfig:
     target_modules: tuple[str, ...] = QWEN3_DENSE_TARGETS
     adapter_path: str | None = None
     qlora: bool = False
+    full_param_modules: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.adapter_path is not None:
@@ -63,6 +69,9 @@ class LoraConfig:
             if read_adapter_quantization(self.adapter_path) is not None:
                 object.__setattr__(self, "qlora", True)
         object.__setattr__(self, "target_modules", tuple(self.target_modules))
+        object.__setattr__(self, "full_param_modules", tuple(self.full_param_modules))
+        if any(not pattern for pattern in self.full_param_modules):
+            raise ValueError("full_param_modules patterns must be non-empty strings")
         if self.rank < 1:
             raise ValueError("lora rank must be >= 1")
         if self.alpha <= 0:

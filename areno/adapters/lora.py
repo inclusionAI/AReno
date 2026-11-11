@@ -203,11 +203,14 @@ class AdapterRegistry:
         slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
         config: LoraConfig,
         runtime_state: _AdapterRuntimeState,
+        *,
+        full_params: dict[str, nn.Parameter] | None = None,
     ) -> None:
         self.slots = slots
         self.config = config
         self._runtime_state = runtime_state
         self.version = 0
+        self.full_params = dict(full_params or {})
 
     def named_parameters(self):
         for name, slot in self.slots.items():
@@ -216,6 +219,9 @@ class AdapterRegistry:
 
     def parameters(self) -> tuple[nn.Parameter, ...]:
         return tuple(parameter for _, parameter in self.named_parameters())
+
+    def full_parameters(self) -> tuple[nn.Parameter, ...]:
+        return tuple(self.full_params.values())
 
     def increment_version(self) -> int:
         self.version += 1
@@ -259,7 +265,39 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
     missing = requested - matched
     if missing:
         raise ValueError(f"target_modules are not present in {model_type}: {', '.join(sorted(missing))}")
-    return AdapterRegistry(slots, config, runtime_state)
+    full_params = _select_full_parameters(model, config.full_param_modules)
+    for parameter in full_params.values():
+        parameter.requires_grad_(True)
+    return AdapterRegistry(slots, config, runtime_state, full_params=full_params)
+
+
+def _select_full_parameters(model: nn.Module, patterns: tuple[str, ...]) -> dict[str, nn.Parameter]:
+    """Pick hybrid-training base parameters outside any LoRA-managed projection."""
+
+    if not patterns:
+        return {}
+    slot_owners = [
+        f"{module_name}."
+        for module_name, module in model.named_modules()
+        if getattr(module, "lora_slot", None) is not None or getattr(module, "lora_slots", None)
+    ]
+    selected: dict[str, nn.Parameter] = {}
+    matched_patterns: set[str] = set()
+    for name, parameter in model.named_parameters():
+        hits = {pattern for pattern in patterns if pattern in name}
+        if not hits:
+            continue
+        if any(name.startswith(prefix) for prefix in slot_owners):
+            raise ValueError(
+                f"full_param_modules {sorted(hits)} overlap LoRA-managed parameter {name}; "
+                "drop it from one of the two sets"
+            )
+        matched_patterns |= hits
+        selected[name] = parameter
+    unmatched = [pattern for pattern in patterns if pattern not in matched_patterns]
+    if unmatched:
+        raise ValueError(f"full_param_modules matched no parameters: {', '.join(sorted(unmatched))}")
+    return selected
 
 
 def _initialize_qwen3_lora(

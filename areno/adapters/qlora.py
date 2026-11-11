@@ -23,7 +23,9 @@ def initialize_qlora(model):
             continue
         weight = module.weight
         if weight.requires_grad:
-            raise ValueError("initialize native LoRA before quantizing the frozen base")
+            # Hybrid PEFT keeps its full-parameter subset in the original
+            # precision to train it, so only frozen bases are packed into NF4.
+            continue
         total_original += weight.numel() * weight.element_size()
         module.quantized_weight = NF4Weight(weight)
         module.weight = None

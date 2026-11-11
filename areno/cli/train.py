@@ -157,6 +157,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lora_dropout",
             "lora_target_modules",
             "lora_adapter_path",
+            "full_param_modules",
             "reference_mode",
             "lr",
             "head_lr",
@@ -499,11 +500,15 @@ def _require_positive_float(value: float, option_name: str) -> None:
 def _lora_config_from_options(args):
     rank = getattr(args, "lora_rank", None)
     adapter_path = getattr(args, "lora_adapter_path", None)
+    full_param_modules = getattr(args, "full_param_modules", None)
     if rank is None and adapter_path is None and not getattr(args, "qlora", False):
+        if full_param_modules is not None:
+            raise click.UsageError("--full-param-modules requires LoRA (--lora-rank, --lora-adapter-path, or --qlora)")
         return None
     from areno.adapters import LoraConfig
 
     targets = tuple(item.strip() for item in args.lora_target_modules.split(",") if item.strip())
+    full_targets = tuple(item.strip() for item in (full_param_modules or "").split(",") if item.strip())
     try:
         return LoraConfig(
             rank=8 if rank is None else rank,
@@ -512,6 +517,7 @@ def _lora_config_from_options(args):
             target_modules=targets,
             adapter_path=adapter_path,
             qlora=getattr(args, "qlora", False),
+            full_param_modules=full_targets,
         )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -633,6 +639,10 @@ def _format_training_config_summary(
                 (
                     "lora_adapter_path",
                     _format_optional(config.lora.adapter_path) if config.lora is not None else "n/a",
+                ),
+                (
+                    "full_param_modules",
+                    ",".join(config.lora.full_param_modules) if config.lora is not None else "n/a",
                 ),
                 (
                     "optimizer",
@@ -1931,6 +1941,14 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter used to initialize native LoRA.")
+@click.option(
+    "--full-param-modules",
+    default=None,
+    help=(
+        "Comma-separated parameter-name substrings trained in full-parameter mode alongside LoRA "
+        "(hybrid PEFT, for example MoE routers: 'router,gate'); requires LoRA."
+    ),
+)
 @click.option(
     "--reference-mode",
     type=click.Choice(["independent", "reuse_actor_base"]),

@@ -13,6 +13,7 @@ from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot
 from areno.engine.parallel.context import get_tp_context
 
 _PREFIX = "base_model.model.model."
+_FULL_PARAMS_FILE = "areno_full_params.safetensors"
 
 
 @torch.no_grad()
@@ -61,6 +62,26 @@ def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
         slot.lora_A.copy_(local_A.to(device=slot.lora_A.device, dtype=slot.lora_A.dtype))
         slot.lora_B.copy_(local_B.to(device=slot.lora_B.device, dtype=slot.lora_B.dtype))
 
+    full_params_path = input_path / _FULL_PARAMS_FILE
+    if registry.full_params:
+        if not full_params_path.exists():
+            raise ValueError(
+                f"hybrid registry expects {_FULL_PARAMS_FILE} in the PEFT adapter directory; "
+                "re-export with the same full_param_modules configuration"
+            )
+        full_tensors = load_file(full_params_path, device="cpu")
+        if set(full_tensors) != set(registry.full_params):
+            missing = sorted(set(registry.full_params) - set(full_tensors))
+            unexpected = sorted(set(full_tensors) - set(registry.full_params))
+            raise ValueError(
+                "hybrid full-parameter tensor keys do not match the registry: "
+                f"missing={missing[:3]}, unexpected={unexpected[:3]}"
+            )
+        for name, parameter in registry.full_params.items():
+            parameter.copy_(full_tensors[name].to(device=parameter.device, dtype=parameter.dtype))
+    elif full_params_path.exists():
+        raise ValueError(f"{_FULL_PARAMS_FILE} is present but the registry has no full_param_modules")
+
 
 @torch.no_grad()
 def export_peft_adapter(
@@ -69,7 +90,14 @@ def export_peft_adapter(
     *,
     base_model_name_or_path: str | None,
 ) -> str | None:
-    """Gather the authoritative DP0 TP shards and write a PEFT adapter."""
+    """Gather the authoritative DP0 TP shards and write a PEFT adapter.
+
+    Hybrid registries additionally store their full_param_modules subset in
+    ``areno_full_params.safetensors``; the PEFT-standard files stay standard.
+    Full-parameter tensors are written from the rank-0 copy, so under tensor
+    parallelism the subset must be replicated (norms, routers/gates) —
+    shard-aware export for sharded subsets is not implemented yet.
+    """
 
     ctx = get_tp_context()
     if ctx.dp_rank != 0:
@@ -138,6 +166,17 @@ def export_peft_adapter(
     elif quantization_path.exists():
         quantization_path.unlink()
     save_file(state, output_path / "adapter_model.safetensors")
+    full_params_path = output_path / _FULL_PARAMS_FILE
+    if registry.full_params:
+        save_file(
+            {
+                name: parameter.detach().float().cpu().contiguous()
+                for name, parameter in registry.full_params.items()
+            },
+            full_params_path,
+        )
+    elif full_params_path.exists():
+        full_params_path.unlink()
     return str(output_path)
 
 
