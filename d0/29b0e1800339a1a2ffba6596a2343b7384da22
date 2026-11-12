@@ -1,0 +1,27 @@
+examples/label_jev/README.md
+  s_c00737e59a0146::t_05e2e6ea26ed6b 1-90
+areno/api/backend/mlx/backend.py
+  s_c00737e59a0146::t_3f44d5496bff1c 5,380-383
+areno/api/jev/labels/mlx.py
+  s_c00737e59a0146::t_3d28420baca805 14
+examples/label_jev/sglang_ling/__init__.py
+  s_c00737e59a0146::t_c766cffcaee8f6 1
+examples/label_jev/sglang_ling/model.py
+  s_c00737e59a0146::t_939d5db8f6c338 1-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d029b0e1800339a1a2ffba6596a2343b7384da22",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
