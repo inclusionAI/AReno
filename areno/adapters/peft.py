@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 from safetensors.torch import load_file, save_file
 
+from areno.adapters.config import LORA_FA_CONFIG_NAME
 from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot
 from areno.engine.parallel.context import get_tp_context
 
@@ -137,6 +138,12 @@ def export_peft_adapter(
         )
     elif quantization_path.exists():
         quantization_path.unlink()
+    lora_fa_path = output_path / LORA_FA_CONFIG_NAME
+    if registry.config.lora_fa:
+        lora_fa = {"frozen": "lora_A", "grad_correction": registry.config.lora_fa_grad_correction}
+        lora_fa_path.write_text(json.dumps(lora_fa, indent=2) + "\n", encoding="utf-8")
+    elif lora_fa_path.exists():
+        lora_fa_path.unlink()
     save_file(state, output_path / "adapter_model.safetensors")
     return str(output_path)
 
