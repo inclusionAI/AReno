@@ -269,8 +269,37 @@ class InferenceManager:
         )
         if self.config.runtime.speculative_draft_tokens > 0:
             self._enable_speculative_draft()
-        caches = self.model.allocate_kv_caches(self._infer_cache_blocks, block_size, self.device)
-        self.model.set_kv_caches(caches, num_slots=max_running_seqs + 1)
+        runtime = self.config.runtime
+        if runtime.kv_cache_dtype == "auto":
+            caches = self.model.allocate_kv_caches(self._infer_cache_blocks, block_size, self.device)
+            self.model.set_kv_caches(caches, num_slots=max_running_seqs + 1)
+        else:
+            from areno.engine.layers.attention_backend.kivi import KIVI_BITS, KiviSpec, attach_kivi_kv_caches
+
+            # KIVI keeps the paged block budget and adds one residual ring per
+            # rollout slot, including the scratch slot used by padded graph rows.
+            kivi_caches = attach_kivi_kv_caches(
+                self.model,
+                KiviSpec(
+                    bits=KIVI_BITS[runtime.kv_cache_dtype],
+                    group_size=runtime.kivi_group_size,
+                    residual_length=runtime.kivi_residual_length,
+                ),
+                num_blocks=self._infer_cache_blocks,
+                block_size=block_size,
+                num_slots=max_running_seqs + 1,
+                device=self.device,
+                dtype=self.config.model.dtype,
+            )
+            logger.info(
+                "KIVI KV cache: dtype=%s group_size=%d residual_length=%d blocks=%d slots=%d bytes=%d",
+                runtime.kv_cache_dtype,
+                runtime.kivi_group_size,
+                runtime.kivi_residual_length,
+                self._infer_cache_blocks,
+                max_running_seqs + 1,
+                sum(cache.nbytes() for cache in kivi_caches),
+            )
         self._train_state_ready = False
         # Materialise infer weights from train weights (e.g. dequantize / fuse),
         # then drop the train copies for the rollout's duration.
