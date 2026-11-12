@@ -1,0 +1,19 @@
+examples/label_jev/benchmark_jevbench.py
+  s_c00737e59a0146::t_96fb7c4ef7472b 22,51-53,55-58,130,173,207,213,218-219,221-222,237-239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "33510ed2800fe1eed9f024ac3c85e2a2c1216b86",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
