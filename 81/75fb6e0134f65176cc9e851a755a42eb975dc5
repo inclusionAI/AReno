@@ -1,0 +1,21 @@
+examples/label_jev/compare_sglang.py
+  s_c00737e59a0146::t_79ce66521429e2 42-62
+examples/label_jev/probe_model.py
+  s_c00737e59a0146::t_2a98306eb82f77 1-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8175fb6e0134f65176cc9e851a755a42eb975dc5",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
