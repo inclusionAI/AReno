@@ -44,6 +44,8 @@ class Op(Enum):
     ROLLOUT_SESSION_SYNC = auto()
     ROLLOUT_SESSION_END = auto()
     SAVE_CHECKPOINT = auto()
+    SAVE_OPTIMIZER_STATE = auto()
+    LOAD_OPTIMIZER_STATE = auto()
     EXPORT_ADAPTER = auto()
     EXPORT_GGUF = auto()
     POLICY_SYNC_PLAN = auto()
@@ -157,6 +159,13 @@ class TrainValuesPayload:
 @dataclass(slots=True)
 class SaveCheckpointPayload:
     """Typed payload for Op.SAVE_CHECKPOINT."""
+
+    path: str
+
+
+@dataclass(slots=True)
+class OptimizerStatePayload:
+    """Typed payload for Op.SAVE_OPTIMIZER_STATE and Op.LOAD_OPTIMIZER_STATE."""
 
     path: str
 
