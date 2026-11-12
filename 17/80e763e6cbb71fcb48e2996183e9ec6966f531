@@ -1,0 +1,44 @@
+areno/api/jev/labels/config.py
+  s_c00737e59a0146::t_7b547768579d01 6,12-25,28-41
+  s_c00737e59a0146::t_3012d584cdd0ca 26-27
+areno/cli/train.py
+  s_c00737e59a0146::t_7b547768579d01 88,253-256,1068,1130-1133,1351-1354,1362,1563,1588-1589,1744-1748
+tests/test_label_jev_cpu.py
+  s_c00737e59a0146::t_c296a672ac4c0b 103-179
+areno/api/jev/labels/serve.py
+  s_c00737e59a0146::t_1a727b972d1f61 1-268
+areno/api/jev/labels/trainer.py
+  s_c00737e59a0146::t_7b547768579d01 1-9,13-24,26-48,51-57,60-105
+areno/api/jev/labels/merge.py
+  s_c00737e59a0146::t_c296a672ac4c0b 39
+tests/test_label_jev_serve_cpu.py
+  s_c00737e59a0146::t_c1db28cdcbac07 16-18
+  s_c00737e59a0146::t_3012d584cdd0ca 1-15,19-123
+  s_c00737e59a0146::t_c296a672ac4c0b 124-145
+examples/label_jev/README.md
+  s_c00737e59a0146::t_c296a672ac4c0b 17-21,38-53
+  s_c00737e59a0146::t_ddb9fbb440a442 54
+areno/cli/serve.py
+  s_c00737e59a0146::t_1a727b972d1f61 382,401,404-420,1133-1137,1161,1214
+  s_c00737e59a0146::t_c296a672ac4c0b 402-403
+areno/api/jev/labels/protocol.py
+  s_c00737e59a0146::t_b55400d5f3248e 125-157
+tests/test_train_cli_config_cpu.py
+  s_c00737e59a0146::t_c5673284e65585 1237-1265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1780e763e6cbb71fcb48e2996183e9ec6966f531",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
