@@ -1,0 +1,23 @@
+areno/api/backend/cuda/backend.py
+  s_c00737e59a0146::t_9ef95322ac40e9 571-574
+areno/engine/training.py
+  s_c00737e59a0146::t_2ea9ac94cc2475 132,308-311
+examples/label_jev/train_corpus.py
+  s_c00737e59a0146::t_b3ae06d87c030f 33,130-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "25a2c906eb795ab9d7970f5101d4b9d43ea7ba94",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
