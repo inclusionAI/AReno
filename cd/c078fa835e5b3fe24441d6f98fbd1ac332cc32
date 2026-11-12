@@ -1,0 +1,19 @@
+examples/label_jev/compare_sglang_checkpoint.py
+  s_c00737e59a0146::t_1145c5c04223f7 35-42,80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "cdc078fa835e5b3fe24441d6f98fbd1ac332cc32",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
