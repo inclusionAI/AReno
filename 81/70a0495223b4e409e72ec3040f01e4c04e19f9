@@ -1,0 +1,34 @@
+docs/concepts/jev.rst
+  s_c00737e59a0146::t_f6f67ae0c4e08b 12-15
+docs/index.rst
+  s_c00737e59a0146::t_f6f67ae0c4e08b 48
+README.md
+  s_c00737e59a0146::t_f6f67ae0c4e08b 39
+docs/cookbook/sglang-label-jev.rst
+  s_c00737e59a0146::t_f23a3501fdfcb6 2,158
+  s_c00737e59a0146::t_f6f67ae0c4e08b 1,3-157,159-193
+docs/cli/inference.rst
+  s_c00737e59a0146::t_1f7ae83a25619e 30-35
+docs/cli/training.rst
+  s_c00737e59a0146::t_f6f67ae0c4e08b 46-50
+areno/api/jev/labels/merge.py
+  s_c00737e59a0146::t_ad01d9c24d22e5 154,192
+areno/cli/train.py
+  s_c00737e59a0146::t_ad01d9c24d22e5 1133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8170a0495223b4e409e72ec3040f01e4c04e19f9",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
