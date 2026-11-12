@@ -1,0 +1,20 @@
+examples/label_jev/make_hard_reasoning_corpus.py
+  s_c00737e59a0146::t_a5d16eef74900f 1-10,12-19,21-74,76-95,97-430,432-518
+  s_c00737e59a0146::t_59a7f02bd07f9b 11,20,75,96,431
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6b5f6993c9a9d734264ce52ce4312f7da8beed92",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
