@@ -170,6 +170,10 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "adam_bias_correction",
             "adam_8bit",
             "adam_4bit",
+            "galore",
+            "galore_rank",
+            "galore_refresh_interval",
+            "galore_alpha",
             "optimizer_state_offload",
             "optimizer_state_offload_dir",
             "optimizer_state_offload_batch_size",
@@ -268,6 +272,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.galore = getattr(args, "galore", False)
+    args.galore_rank = getattr(args, "galore_rank", 128)
+    args.galore_refresh_interval = getattr(args, "galore_refresh_interval", 200)
+    args.galore_alpha = getattr(args, "galore_alpha", 1.0)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
@@ -973,6 +981,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.galore = getattr(args, "galore", False)
+    args.galore_rank = getattr(args, "galore_rank", 128)
+    args.galore_refresh_interval = getattr(args, "galore_refresh_interval", 200)
+    args.galore_alpha = getattr(args, "galore_alpha", 1.0)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -1032,6 +1044,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
             adam_4bit=args.adam_4bit,
+            galore=args.galore,
+            galore_rank=args.galore_rank,
+            galore_refresh_interval=args.galore_refresh_interval,
+            galore_alpha=args.galore_alpha,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1096,6 +1112,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
             adam_4bit=args.adam_4bit,
+            galore=args.galore,
+            galore_rank=args.galore_rank,
+            galore_refresh_interval=args.galore_refresh_interval,
+            galore_alpha=args.galore_alpha,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1195,6 +1215,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
             adam_4bit=args.adam_4bit,
+            galore=args.galore,
+            galore_rank=args.galore_rank,
+            galore_refresh_interval=args.galore_refresh_interval,
+            galore_alpha=args.galore_alpha,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1269,6 +1293,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         grad_clip_norm=args.grad_clip_norm,
         adam_8bit=args.adam_8bit,
         adam_4bit=args.adam_4bit,
+        galore=args.galore,
+        galore_rank=args.galore_rank,
+        galore_refresh_interval=args.galore_refresh_interval,
+        galore_alpha=args.galore_alpha,
         unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
         unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
         multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1972,6 +2000,10 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--adam-beta2", type=float, default=0.999, show_default=True, help="Policy optimizer Adam beta2.")
 @click.option("--adam-8bit", is_flag=True, help="Use 8-bit Adam moment states instead of FP32 Adam states.")
 @click.option("--adam-4bit", is_flag=True, help="Use packed block-wise 4-bit Adam moment states.")
+@click.option("--galore", is_flag=True, help="Use GaLore low-rank gradient projection optimizer states.")
+@click.option("--galore-rank", type=int, default=128, show_default=True, help="GaLore projection rank.")
+@click.option("--galore-refresh-interval", type=int, default=200, show_default=True, help="Steps between GaLore projector SVD refreshes.")
+@click.option("--galore-alpha", type=float, default=1.0, show_default=True, help="Scale factor applied to the GaLore update.")
 @click.option("--unfreeze-mm-tower", "unfreeze_multimodal_tower", is_flag=True, help="Train multimodal encoder towers.")
 @click.option(
     "--unfreeze-mm-projector",

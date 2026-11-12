@@ -97,6 +97,22 @@ def canonical_model_path(path: str | None) -> str | None:
 def build_optimizer(params, optimizer_config, ctx, *, lr: float | None = None):
     """Construct the configured DP-sharded optimizer implementation."""
 
+    if optimizer_config.galore:
+        from areno.engine.optim.galore import GaloreAdamW
+
+        return GaloreAdamW(
+            params,
+            lr=optimizer_config.lr if lr is None else float(lr),
+            betas=optimizer_config.betas,
+            weight_decay=optimizer_config.weight_decay,
+            bucket_numel=optimizer_config.fp32_master_bucket_numel,
+            dp_rank=ctx.dp_rank,
+            dp_size=ctx.dp_size,
+            dp_group=ctx.dp_group,
+            galore_rank=optimizer_config.galore_rank,
+            galore_refresh_interval=optimizer_config.galore_refresh_interval,
+            galore_alpha=optimizer_config.galore_alpha,
+        )
     if optimizer_config.adam_4bit:
         optimizer_cls = AdamW4bit
     elif optimizer_config.adam_8bit:

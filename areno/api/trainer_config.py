@@ -66,6 +66,10 @@ class TrainerConfig:
     mlx_compile_train_step: bool = field(default=True, kw_only=True)
     adam_8bit: bool = False
     adam_4bit: bool = False
+    galore: bool = False
+    galore_rank: int = 128
+    galore_refresh_interval: int = 200
+    galore_alpha: float = 1.0
     unfreeze_multimodal_tower: bool = False
     unfreeze_multimodal_projector: bool = False
     multimodal_tower_lr: float | None = None
@@ -145,6 +149,10 @@ class TrainerConfig:
             raise ValueError("adam_4bit and adam_8bit are mutually exclusive")
         if self.adam_4bit and self.backend not in {"cuda", "npu"}:
             raise ValueError("adam_4bit is only supported by the CUDA and NPU backends")
+        if self.galore and (self.adam_8bit or self.adam_4bit):
+            raise ValueError("galore is mutually exclusive with adam_8bit and adam_4bit")
+        if self.galore and self.backend == "mlx":
+            raise ValueError("galore is only supported by the CUDA backend")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
@@ -211,6 +219,10 @@ class TrainerConfig:
             "grad_clip_norm": self.grad_clip_norm if self.clip_gradients else None,
             "adam_8bit": self.adam_8bit,
             "adam_4bit": self.adam_4bit,
+            "galore": self.galore,
+            "galore_rank": self.galore_rank,
+            "galore_refresh_interval": self.galore_refresh_interval,
+            "galore_alpha": self.galore_alpha,
             "unfreeze_multimodal_tower": self.unfreeze_multimodal_tower,
             "unfreeze_multimodal_projector": self.unfreeze_multimodal_projector,
             "multimodal_tower_lr": self.multimodal_tower_lr,
