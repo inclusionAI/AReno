@@ -1,0 +1,21 @@
+examples/label_jev/compare_sglang.py
+  s_c00737e59a0146::t_edb0da84496e02 1-66
+tests/test_label_jev_merge_cpu.py
+  s_c00737e59a0146::t_e56b06eba2f9f0 1-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1e39f4eafad01ec1af997c8e589aa96a6c4fbc9d",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
