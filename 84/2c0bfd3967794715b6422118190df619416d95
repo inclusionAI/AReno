@@ -1,0 +1,19 @@
+examples/label_jev/benchmark_endpoint.py
+  s_c00737e59a0146::t_3d8466cedf0ed5 1-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "842c0bfd3967794715b6422118190df619416d95",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
