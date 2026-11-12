@@ -1,0 +1,25 @@
+areno/api/jev/labels/merge.py
+  s_c00737e59a0146::t_a51544084f60de 1-203
+areno/api/jev/labels/serving.py
+  s_c00737e59a0146::t_a51544084f60de 1-39
+areno/api/backend/cuda/backend.py
+  s_c00737e59a0146::t_71168f7ecda8cf 547-553
+examples/label_jev/train_corpus.py
+  s_c00737e59a0146::t_4f5b82be27ff9c 1-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "60f122848b593030cd971b12f62ee85863bad53f",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
