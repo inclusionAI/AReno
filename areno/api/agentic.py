@@ -6,9 +6,12 @@ client. Agent code returns explicit trajectories, which are converted into the
 same token/logprob rows consumed by existing trainers.
 
 The first implementation intentionally supports non-streaming
-``/v1/chat/completions``. The public data model already keeps trace, messages,
-tool calls, tool results, and loss masks explicit so streaming and richer tool
-coverage can be added without changing trainer boundaries.
+``/v1/chat/completions``. ``stream=true`` is accepted and answered with an
+OpenAI-style SSE chunk stream that replays the completed generation, so OpenAI
+clients that require streaming work unchanged. The public data model already
+keeps trace, messages, tool calls, tool results, and loss masks explicit so
+true incremental streaming and richer tool coverage can be added without
+changing trainer boundaries.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ from areno.api.multimodal import encode_multimodal_prompt, encode_processor_mess
 from areno.api.openai_chat import (
     build_chat_completion_response,
     first_user_text,
+    format_sse_data,
+    iter_chat_completion_chunks,
     messages_to_prompt_tokens,
     messages_to_text,
     normalize_messages,
@@ -482,16 +487,22 @@ class RolloutSession:
         except json.JSONDecodeError as exc:
             _write_json(handler, 400, {"error": {"message": f"invalid json: {exc}"}})
             return
-        if body.get("stream"):
-            _write_json(handler, 400, {"error": {"message": "streaming chat completions are not supported yet"}})
-            return
         if self._loop is None:
             _write_json(handler, 500, {"error": {"message": "agent rollout proxy is not running"}})
             return
         try:
             future = asyncio.run_coroutine_threadsafe(self._complete_chat(body), self._loop)
             response = future.result()
-            _write_json(handler, 200, response)
+            if body.get("stream"):
+                include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+                _write_sse_chat(
+                    handler,
+                    response,
+                    tokenizer=self._trainer.get_tokenizer(),
+                    include_usage=include_usage,
+                )
+            else:
+                _write_json(handler, 200, response)
         except ValueError as exc:
             _write_json(handler, 400, {"error": {"message": str(exc)}})
         except Exception as exc:
@@ -1148,6 +1159,37 @@ def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str,
         handler.wfile.write(data)
     except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
         logger.debug("agentic proxy client disconnected before response write")
+
+
+def _write_sse_chat(
+    handler: BaseHTTPRequestHandler,
+    response: dict[str, Any],
+    *,
+    tokenizer: Any,
+    include_usage: bool,
+) -> None:
+    """Write `response` as an OpenAI-style SSE chat stream terminated by `[DONE]`."""
+
+    metadata_tokens = (response.get("areno") or {}).get("response_tokens")
+    response_ids = [list(metadata_tokens)] if isinstance(metadata_tokens, list) else None
+    chunks = iter_chat_completion_chunks(
+        response,
+        tokenizer=tokenizer,
+        response_ids=response_ids,
+        include_usage=include_usage,
+    )
+    try:
+        handler.send_response(200)
+        handler.send_header("content-type", "text/event-stream")
+        handler.send_header("cache-control", "no-cache")
+        handler.send_header("connection", "close")
+        handler.end_headers()
+        for chunk in chunks:
+            handler.wfile.write(format_sse_data(chunk))
+        handler.wfile.write(format_sse_data("[DONE]"))
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+        logger.debug("agentic proxy client disconnected mid-stream")
 
 
 async def maybe_await(value):
