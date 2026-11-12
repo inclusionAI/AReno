@@ -1,0 +1,98 @@
+docs/concepts/jev.rst
+  s_c00737e59a0146::t_54ab164b793c71 13-18
+  s_c00737e59a0146::t_f6f67ae0c4e08b 12,19
+tests/test_label_jev_mlx_cpu.py
+  s_c00737e59a0146::t_03578f75a7489d 1-45
+areno/api/algorithms.py
+  s_c00737e59a0146::t_3fb795916b1b53 266-271
+  s_c00737e59a0146::t_a5199889916f95 252-263,265,272
+areno/api/jev/labels/mlx.py
+  s_c00737e59a0146::t_cbe2a888df0731 38-39
+  s_c00737e59a0146::t_a5199889916f95 1-13,15-37,40-49
+  s_c00737e59a0146::t_3d28420baca805 14
+areno/api/jev/labels/cuda.py
+  s_c00737e59a0146::t_f8e93f6040a26b 1-13
+areno/api/jev/labels/serve.py
+  s_c00737e59a0146::t_1a727b972d1f61 1-268
+areno/engine/training.py
+  s_c00737e59a0146::t_b3ad994145d635 163,183,185-189,197
+  s_c00737e59a0146::t_19b8ea4b1632f4 184,191-196
+  s_c00737e59a0146::t_2ea9ac94cc2475 132,308-311
+  s_c00737e59a0146::t_e876ce76da1cd8 160-162,190
+docs/cli/inference.rst
+  s_c00737e59a0146::t_1f7ae83a25619e 30-32,35
+  s_c00737e59a0146::t_2945c757c7d9f5 33-34
+areno/cli/serve.py
+  s_c00737e59a0146::t_c296a672ac4c0b 402-403
+  s_c00737e59a0146::t_1a727b972d1f61 382,401,404-420,1133-1137,1161,1214
+areno/api/jev/labels/serving.py
+  s_c00737e59a0146::t_a51544084f60de 1-39
+areno/api/jev/labels/__init__.py
+  s_c00737e59a0146::t_a5199889916f95 1
+docs/cli/training.rst
+  s_c00737e59a0146::t_f6f67ae0c4e08b 46-48,50
+  s_c00737e59a0146::t_e557778c198175 49
+areno/cli/train.py
+  s_c00737e59a0146::t_ad01d9c24d22e5 1133
+  s_c00737e59a0146::t_7b547768579d01 88,253-256,1068,1130-1132,1351-1354,1362,1563,1588-1589,1744-1748
+areno/api/jev/labels/config.py
+  s_c00737e59a0146::t_7b547768579d01 6,12-20,22-26,31-44
+  s_c00737e59a0146::t_090583a478071c 21,29-30
+  s_c00737e59a0146::t_a5199889916f95 1-5,7-11
+  s_c00737e59a0146::t_3012d584cdd0ca 27-28
+areno/api/jev/labels/protocol.py
+  s_c00737e59a0146::t_b55400d5f3248e 125-157
+  s_c00737e59a0146::t_a5199889916f95 1-124
+areno/api/jev/labels/trainer.py
+  s_c00737e59a0146::t_7b547768579d01 1-9,13-24,26-48,53-59,63-67,80-86,89-110,112-122
+  s_c00737e59a0146::t_a5199889916f95 10-12,25,51-52,61-62,123-124
+  s_c00737e59a0146::t_3b14d69ccafcf0 69-78
+  s_c00737e59a0146::t_090583a478071c 49-50,60,68,79,87-88,111
+tests/test_train_cli_config_cpu.py
+  s_c00737e59a0146::t_c5673284e65585 1237-1265
+areno/api/backend/cuda/backend.py
+  s_c00737e59a0146::t_9ef95322ac40e9 571-574
+  s_c00737e59a0146::t_94a195c319a491 105
+  s_c00737e59a0146::t_b3ad994145d635 530-537
+  s_c00737e59a0146::t_71168f7ecda8cf 547-553
+areno/api/backend/mlx/backend.py
+  s_c00737e59a0146::t_39052a3550579d 352,356-357,359-360
+  s_c00737e59a0146::t_a5199889916f95 354,681
+  s_c00737e59a0146::t_847b02a7670a05 64
+  s_c00737e59a0146::t_e876ce76da1cd8 100-104,353,355,358,680,682-683
+  s_c00737e59a0146::t_c415e0889537fa 331-336
+  s_c00737e59a0146::t_3f44d5496bff1c 5,380-383
+  s_c00737e59a0146::t_29a2adeb784eb1 377,627
+tests/test_algorithms_cpu.py
+  s_c00737e59a0146::t_f6b565df490e37 25
+README.md
+  s_c00737e59a0146::t_3cf67396b290c8 39
+tests/test_label_jev_cpu.py
+  s_c00737e59a0146::t_7bb37c9a34c2c6 83-102
+  s_c00737e59a0146::t_3b14d69ccafcf0 180-240
+  s_c00737e59a0146::t_e2aee3bb131faf 1-82
+  s_c00737e59a0146::t_c296a672ac4c0b 103-179
+tests/test_label_jev_serve_cpu.py
+  s_c00737e59a0146::t_c296a672ac4c0b 124-145
+  s_c00737e59a0146::t_c1db28cdcbac07 16-18
+  s_c00737e59a0146::t_3012d584cdd0ca 1-15,19-123
+areno/api/jev/labels/loss.py
+  s_c00737e59a0146::t_a5199889916f95 1-19,21-54
+  s_c00737e59a0146::t_83338c2c5a17f2 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "dff52b22100f0e452ed52f9014b6816291994a0f",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
