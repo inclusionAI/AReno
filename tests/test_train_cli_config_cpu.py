@@ -1234,3 +1234,32 @@ def test_jev_head_lr_cli_parsing(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert captured[0].mlx_config().head_lr == 2e-5
+
+
+@pytest.mark.parametrize("backend", ["cuda", "mlx"])
+def test_sgl_jev_flag_selects_label_training_cpu(backend):
+    from areno.api.jev.labels.config import LabelJevTrainerConfig
+
+    config = _trainer_config_from_options(**_options(sgl_jev=True, backend=backend, q4=backend == "mlx"))
+    assert isinstance(config, LabelJevTrainerConfig)
+    assert config.algo == "label_jev"
+    assert config.world_size == config.tp_size == 1
+    if backend == "mlx":
+        assert config.mlx_config().label_jev
+        assert config.mlx_config().quantization_bits == 4
+    else:
+        assert "decision_head" not in config.cuda_config().runtime
+
+
+def test_sgl_jev_rejects_conflicting_algorithm_cpu():
+    with pytest.raises(UsageError, match="another training algorithm"):
+        _trainer_config_from_options(**_options(sgl_jev=True, algo="sft"))
+
+
+def test_sgl_jev_keeps_scalar_head_jev_distinct_cpu():
+    from areno.api.jev import JevTrainerConfig
+
+    original = _trainer_config_from_options(**_options(algo="jev"))
+    label = _trainer_config_from_options(**_options(algo="jev", sgl_jev=True))
+    assert isinstance(original, JevTrainerConfig) and original.algo == "jev"
+    assert label.algo == "label_jev"

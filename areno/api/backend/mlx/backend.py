@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from functools import partial
@@ -60,7 +61,7 @@ class MlxBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
         )
@@ -96,7 +97,11 @@ class MlxBackend(Backend):
                 raise ValueError("online quantization conflicts with the adapter's saved quantization")
             quantization = requested
         qat_quantization = None
-        if quantization is not None and getattr(config, "decision_head", False) and config.lora is None:
+        if (
+            quantization is not None
+            and (getattr(config, "decision_head", False) or getattr(config, "label_jev", False))
+            and config.lora is None
+        ):
             qat_quantization, quantization = quantization, None
         if quantization is not None:
             if self.config.lora is not None and self.config.lora.qlora:
@@ -323,8 +328,12 @@ class MlxBackend(Backend):
 
             with training_allocator_cache():
                 return train_questions(self, ctx, batch_data, mini_bs=mini_bs, **spec.kwargs)
-        if self._lora_state is not None and self._lora_state.quantization is not None and spec.name != "sft":
-            raise ValueError("MLX QLoRA currently supports SFT only")
+        if (
+            self._lora_state is not None
+            and self._lora_state.quantization is not None
+            and spec.name not in {"sft", "label_jev"}
+        ):
+            raise ValueError("MLX QLoRA currently supports SFT and label JEV only")
         microbatches = train_microbatches(batch_data, mini_bs)
         accumulation = accumulation_steps(len(microbatches), gradient_accumulation_steps)
 
@@ -340,7 +349,15 @@ class MlxBackend(Backend):
         value_and_grad = self._value_and_grad(spec.name, spec.kwargs)
 
         for index, rows in enumerate(microbatches):
-            batch = self.provider.prepare_train_batch(make_train_batch(rows), rows)
+            batch = make_train_batch(rows)
+            if spec.name == "label_jev":
+                from areno.api.jev.labels.mlx import prepare_batch
+
+                if self.provider.is_multimodal:
+                    raise ValueError("label JEV initially requires a text-only model")
+                batch = prepare_batch(batch, rows)
+            else:
+                batch = self.provider.prepare_train_batch(batch, rows)
             if spec.name == "sft":
                 group_size = accumulation_group_size(index, len(microbatches), accumulation)
                 group_start = (index // accumulation) * accumulation
@@ -357,9 +374,13 @@ class MlxBackend(Backend):
             if should_step:
                 mx.eval(loss, grad_accum)
                 mx.clear_cache()
-                grads = tree_map(lambda value: value / group_count, grad_accum)
+                grads = grad_accum if group_count == 1 else tree_map(lambda value: value / group_count, grad_accum)
                 grads, grad_norm = clip_grad_norm(grads, self.config.optimizer.get("grad_clip_norm"))
                 mx.eval(grad_norm)
+                if spec.name == "label_jev" and (
+                    not math.isfinite(float(loss.item())) or not math.isfinite(float(grad_norm.item()))
+                ):
+                    raise FloatingPointError("nonfinite label JEV loss or gradient; update was not applied")
                 apply_optimizer_update(self.model, self.optimizer, grads)
                 grad_norms.append(float(grad_norm.item()))
                 grad_accum = None
@@ -603,7 +624,7 @@ class MlxBackend(Backend):
             grad_accum = grads if grad_accum is None else tree_map(lambda left, right: left + right, grad_accum, grads)
             group_count += 1
             if group_count == accumulation or index + 1 == len(microbatches):
-                grads = tree_map(lambda value: value / group_count, grad_accum)
+                grads = grad_accum if group_count == 1 else tree_map(lambda value: value / group_count, grad_accum)
                 grads, grad_norm = clip_grad_norm(grads, self.config.optimizer.get("grad_clip_norm"))
                 loaded.optimizer.update(loaded.module, grads)
                 mx.eval(loaded.module.parameters(), loaded.optimizer.state, loss, grad_norm)
@@ -656,6 +677,10 @@ class MlxBackend(Backend):
             return cached
 
         def loss(model, batch):
+            if name == "label_jev":
+                from areno.api.jev.labels.mlx import label_loss
+
+                return label_loss(self.provider, batch)
             targets = batch["input_ids"][:, 1:]
             selected = self.provider.selected_token_logprobs(
                 batch,

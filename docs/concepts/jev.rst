@@ -9,6 +9,14 @@ training and serving path.
 
 For a runnable Qwen3-4B example, see :doc:`../cookbook/jev-training`.
 
+For SGLang-compatible label-token scoring through the original LM head,
+use ``train/serve --sgl-jev``. That mode uses CUDA or MLX, reads label-token
+logits through the pretrained LM head, and trains label-only cross-entropy.
+It accepts raw request/target JSONL; oversized prompts are rejected. Choice
+uses A–Z, noul uses yes/no, and score uses 0–9. Exported LoRA adapters may be
+merged with model-compatible tools for native SGLang serving. It does not use
+the scalar head described below.
+
 Objective and backbone updates
 ------------------------------
 

@@ -249,7 +249,27 @@ def _bind_grpo_loss(config: TrainerConfig, loss_fn: Callable) -> Callable:
     return partial(loss_fn, clip_eps=getattr(config, "grpo_clip_eps"))
 
 
+def label_jev_loss_fn(data_pack, logits):
+    from areno.api.jev.labels.loss import label_jev_loss_fn as label_loss
+
+    return label_loss(data_pack, logits)
+
+
+def _load_label_jev_trainer() -> type:
+    from areno.api.jev.labels.trainer import LabelJevTrainer
+
+    return LabelJevTrainer
+
+
 def _register_builtin_algorithms() -> None:
+    register_algorithm(
+        AlgorithmSpec(
+            name="label_jev",
+            trainer_cls=_load_label_jev_trainer,
+            default_loss_fn=label_jev_loss_fn,
+            requires_rollout=False,
+        )
+    )
     register_algorithm(
         AlgorithmSpec(
             name="jev",

@@ -43,6 +43,11 @@ Basic
 
 Inputs, dataset loader, the algorithm and run length, and device counts.
 
+``--sgl-jev``
+   Train SGLang-compatible LM-label JEV on CUDA or MLX, equivalent to
+   ``--algo label_jev``. Uses the existing LM head without a scalar decision
+   head. See :doc:`../concepts/jev`.
+
 ``--ckpt TEXT``
    Actor model/tokenizer checkpoint path or remote model repo ID.
 
