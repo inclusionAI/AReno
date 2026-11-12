@@ -1,0 +1,25 @@
+README.md
+  s_c00737e59a0146::t_3cf67396b290c8 39
+docs/cli/inference.rst
+  s_c00737e59a0146::t_2945c757c7d9f5 33-34
+docs/cli/training.rst
+  s_c00737e59a0146::t_e557778c198175 49
+docs/concepts/jev.rst
+  s_c00737e59a0146::t_54ab164b793c71 13-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "fffdfcd1c4e0b683748841c3ee03f579725b0216",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
