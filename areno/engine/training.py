@@ -8,6 +8,7 @@ import warnings
 import torch
 import torch.distributed as dist
 
+from areno.accel.utils import warn_once
 from areno.engine.data import to_device
 from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
@@ -205,8 +206,15 @@ class TrainingManager:
                     # tokenwise block schedule; widening it would regress memory.
                     chunk_size=output_chunk_size,
                     recompute=output_recompute is not False,
+                    cut_cross_entropy=bool(getattr(worker.config.runtime, "cut_cross_entropy", False)),
                 )
             else:
+                if getattr(worker.config.runtime, "cut_cross_entropy", False):
+                    warn_once(
+                        "cut-cross-entropy-needs-deferred-head",
+                        "runtime.cut_cross_entropy requires the deferred LM-head path "
+                        "(CUDA training at tp_size=1); this run scores materialized logits instead.",
+                    )
                 logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
             loss_out = worker.loss_fn(data_pack, logprobs)
             metrics = None
