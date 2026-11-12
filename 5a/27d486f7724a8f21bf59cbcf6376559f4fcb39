@@ -1,0 +1,21 @@
+areno/api/jev/labels/loss.py
+  s_c00737e59a0146::t_83338c2c5a17f2 20
+examples/label_jev/validate_mlx.py
+  s_c00737e59a0146::t_3334ea2a5db971 74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "5a27d486f7724a8f21bf59cbcf6376559f4fcb39",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
