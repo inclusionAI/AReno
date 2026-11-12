@@ -27,6 +27,12 @@ Serve chat completions.
 
 Options:
 
+``--sgl-jev``
+   Serve SGLang-compatible typed decisions through the existing LM head on
+   CUDA or MLX. Cannot be combined with the scalar-head
+   ``--decision-checkpoint`` option. See :doc:`../concepts/jev`
+   for the distinction from scalar-head JEV.
+
 ``--model-path TEXT``
    Local checkpoint/tokenizer path or remote model repo ID. Required.
 

@@ -379,6 +379,7 @@ def create_app(
     lora: LoraConfig | None = None,
     base_model_name_or_path: str | None = None,
     decision_checkpoint: str | None = None,
+    sgl_jev: bool = False,
     mlx_quantize_bits: int | None = None,
     mlx_quantize_group_size: int = 64,
 ) -> FastAPI:
@@ -397,6 +398,26 @@ def create_app(
         if backend_type != MLX:
             raise ValueError("--q4 requires --backend mlx")
         validate_quantization(mlx_quantize_bits, mlx_quantize_group_size)
+    if sgl_jev:
+        if backend_type not in {BackendType.CUDA, BackendType.MLX}:
+            raise ValueError("--sgl-jev serving requires CUDA or MLX")
+        if decision_checkpoint is not None:
+            raise ValueError("--sgl-jev cannot be combined with --decision-checkpoint")
+        if tp_size != 1 or world_size != 1:
+            raise ValueError("--sgl-jev currently requires --tp-size 1 --world-size 1")
+        if speculative_draft_tokens:
+            raise ValueError("--sgl-jev scores labels without speculative decoding")
+        from areno.api.jev.labels.serve import create_label_decision_app
+
+        return create_label_decision_app(
+            model_path,
+            backend_type=backend_type,
+            lora=lora,
+            quantization_bits=mlx_quantize_bits,
+            quantization_group_size=mlx_quantize_group_size,
+            attn_backend=attn_backend,
+            eager_decode=eager_decode,
+        )
     if decision_checkpoint is not None:
         if backend_type == MLX and (tp_size != 1 or world_size != 1):
             raise ValueError("MLX JEV serving requires --tp-size 1 --world-size 1")
@@ -1109,6 +1130,11 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     default=None,
     help="JEV checkpoint containing LoRA, decision head and calibration; serves typed decisions.",
 )
+@click.option(
+    "--sgl-jev",
+    is_flag=True,
+    help="Serve LM-label JEV decisions using the training prompt and original LM head (CUDA/MLX).",
+)
 @click.option("--backend", type=click.Choice(["cuda", "mlx", "npu"]), default=None)
 def serve_command(
     backend: str | None,
@@ -1132,6 +1158,7 @@ def serve_command(
     lora_target_modules: str,
     lora_adapter_path: str | None,
     decision_checkpoint: str | None,
+    sgl_jev: bool,
     q4: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
@@ -1184,6 +1211,7 @@ def serve_command(
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
         decision_checkpoint=decision_checkpoint,
+        sgl_jev=sgl_jev,
         mlx_quantize_bits=4 if q4 else None,
         mlx_quantize_group_size=64,
     )

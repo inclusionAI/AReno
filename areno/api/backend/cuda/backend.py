@@ -102,7 +102,7 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
             distributed=True,
@@ -527,6 +527,14 @@ class CudaBackend(Backend):
         for seqs in train_microbatches(batch_data, mini_bs):
             pack = make_train_pack(seqs)
             pack["_loss_fn"] = loss_fn
+            label_features = [seq.features.get("label_jev") if isinstance(seq.features, dict) else None for seq in seqs]
+            if any(feature is not None for feature in label_features):
+                if not all(feature is not None for feature in label_features):
+                    raise ValueError("label questions cannot be mixed with other training rows")
+                if engine.config.tp_size != 1:
+                    raise ValueError("label JEV initially requires TP=1")
+                pack.pop("features", None)
+                pack["_label_questions"] = label_features
             packs.append(pack)
             if is_sft:
                 sft_target_counts.append(sft_target_token_count(seqs))
@@ -536,6 +544,13 @@ class CudaBackend(Backend):
                 sft_target_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
+        if packs and "_label_questions" in packs[0]:
+            group_size = len(packs) if gradient_accumulation_steps is None else max(1, int(gradient_accumulation_steps))
+            for start in range(0, len(packs), group_size):
+                group = packs[start : start + group_size]
+                count = sum(len(pack["_label_questions"]) for pack in group)
+                for pack in group:
+                    pack["_label_weight"] = len(pack["_label_questions"]) * len(group) / count
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
         if self._separate_rollout and any(bool(stats.stepped) for stats in stats_list):
             adapter_versions = [stats.adapter_version for stats in stats_list if stats.adapter_version is not None]
@@ -553,6 +568,10 @@ class CudaBackend(Backend):
         if stats_list and stats_list[-1].adapter_version is not None:
             result["adapter_version"] = stats_list[-1].adapter_version
         result.update(metrics)
+        for name in ("label_peak_allocated_bytes", "label_peak_reserved_bytes"):
+            values = [row[name] for row in metric_rows if name in row]
+            if values:
+                result[name] = max(values)
         result.update(self._pending_policy_sync_metrics)
         self._pending_policy_sync_metrics = {}
         if self._step_e2e_start is not None:

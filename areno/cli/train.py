@@ -85,6 +85,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Basic",
         (
             "algo",
+            "sgl_jev",
             "backend",
             "ckpt",
             "base_model_name_or_path",
@@ -249,6 +250,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     """Build a typed trainer config from Click option values."""
 
     args = SimpleNamespace(**options)
+    if getattr(args, "sgl_jev", False):
+        if args.algo not in {"gspo", "jev", "label_jev"}:
+            raise click.UsageError("--sgl-jev cannot be combined with another training algorithm")
+        args.algo = "label_jev"
     backend = getattr(args, "backend", None)
     if backend is None:
         from areno.api.config import default_backend_type
@@ -1060,7 +1065,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             reference_mode=args.reference_mode,
             **runtime_options,
         )
-    if algorithm.name in {"sft", "jev"}:
+    if algorithm.name in {"sft", "jev", "label_jev"}:
         config = TrainerConfig(
             algo=algorithm.name,
             ckpt=args.ckpt,
@@ -1122,6 +1127,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             reference_mode=args.reference_mode,
             **runtime_options,
         )
+        if algorithm.name == "label_jev":
+            from areno.api.jev.labels.config import LabelJevTrainerConfig
+
+            return LabelJevTrainerConfig(**{field.name: getattr(config, field.name) for field in fields(config)})
         if algorithm.name == "jev":
             from areno.api.jev import JevTrainerConfig
 
@@ -1339,6 +1348,10 @@ def run(trainer_config: TrainerConfig):
         custom_config=trainer_config.backend_config(),
         score_micro_bs=trainer_config.score_micro_bs,
     )
+    algorithm_loader = getattr(
+        _algorithm_for_cli(trainer_config.algo).resolve_trainer_cls(), "load_training_dataset", None
+    )
+    dataset_options = {"algorithm_loader": algorithm_loader} if algorithm_loader is not None else {}
     dataset = _load_dataset_for_training(
         trainer_config.dataset_path,
         dataset_loader_fn=trainer_config.dataset_loader_fn,
@@ -1346,6 +1359,7 @@ def run(trainer_config: TrainerConfig):
         model_hub=trainer_config.model_hub,
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
+        **dataset_options,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     if isinstance(trainer_config, SFTTrainerConfig) and trainer_config.validation_dataset_path:
@@ -1546,6 +1560,7 @@ def _load_dataset_for_training(
     load_dataset,
     load_from_disk,
     model_path: str | None = None,
+    algorithm_loader=None,
 ):
     def default_loader(path):
         return _load_dataset_from_path(
@@ -1570,6 +1585,8 @@ def _load_dataset_for_training(
         ):
             options["model_path"] = model_path
         return loader_fn(dataset_path, **options)
+    if algorithm_loader is not None:
+        return algorithm_loader(dataset_path, default_loader=default_loader)
     return default_loader(dataset_path)
 
 
@@ -1724,6 +1741,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Run a registered training algorithm with the areno backend.",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
+@click.option(
+    "--sgl-jev",
+    is_flag=True,
+    help="Train SGLang-compatible LM-label JEV (CUDA or MLX); equivalent to --algo label_jev.",
+)
 @click.option(
     "--seed",
     type=click.IntRange(0, 2**32 - 1),

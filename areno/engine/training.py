@@ -129,7 +129,7 @@ class TrainingManager:
             pack_loss_fn = data_pack.get("_loss_fn")
             auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
             accelerator = accelerator_module(worker.device)
-            if auto_tune_probe and accelerator is not None:
+            if (auto_tune_probe or "_label_questions" in data_pack) and accelerator is not None:
                 accelerator.synchronize(worker.device)
                 accelerator.reset_peak_memory_stats(worker.device)
             data_pack = to_device(data_pack, worker.device)
@@ -157,7 +157,10 @@ class TrainingManager:
             )
             output_recompute = getattr(worker.config.runtime, "sft_output_recompute", None)
             defer_lm_head = (
-                existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0)) or output_recompute is not None
+                existing_chunked_head
+                or bool(getattr(train_meta, "mst_chunk_size", 0))
+                or output_recompute is not None
+                or "_label_questions" in data_pack
             )
             output_chunk_size = 256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256)
             if not self._recompute_plan_written:
@@ -177,7 +180,21 @@ class TrainingManager:
                 model_kwargs["defer_lm_head"] = True
             with routing_replay_context(train_meta):
                 out = train_model(**model_kwargs)
-            if defer_lm_head:
+            if "_label_questions" in data_pack:
+                from areno.api.jev.labels.cuda import answer_logits
+                from areno.engine.runtime.heads import gather_packed_hidden
+
+                hidden = gather_packed_hidden(out.hidden_states, train_meta)
+                hidden = hidden.reshape(-1, hidden.shape[-1])
+                count = len(data_pack["_label_questions"])
+                positions = data_pack["train_cu_seqlens"][1 : count + 1].long() - 1
+                logprobs = answer_logits(
+                    hidden,
+                    positions,
+                    train_model.lm_head,
+                    logit_softcap=getattr(train_model, "final_logit_softcapping", None),
+                )
+            elif defer_lm_head:
                 logprobs = packed_next_token_logprobs_from_hidden(
                     out.hidden_states,
                     tokens,
@@ -288,6 +305,10 @@ class TrainingManager:
             current_lr = worker.optimizer.lr
             multimodal_lrs = self._current_multimodal_lrs()
         if ctx.is_rank0:
+            if "_label_questions" in data_pack and accelerator is not None:
+                metrics = dict(metrics or {})
+                metrics["label_peak_allocated_bytes"] = accelerator.max_memory_allocated(worker.device)
+                metrics["label_peak_reserved_bytes"] = accelerator.max_memory_reserved(worker.device)
             if auto_tune_probe and accelerator is not None:
                 accelerator.synchronize(worker.device)
                 total = accelerator.get_device_properties(worker.device).total_memory
