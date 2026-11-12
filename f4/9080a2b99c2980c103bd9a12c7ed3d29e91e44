@@ -1,0 +1,21 @@
+docs/concepts/selective-recompute.rst
+  s_d6bc6106d6e880::t_50edd0b7e62f42 2
+tests/test_config_data_cpu.py
+  s_d6bc6106d6e880::t_50edd0b7e62f42 13,411,417,440,512
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f49080a2b99c2980c103bd9a12c7ed3d29e91e44",
+  "prompts": {},
+  "sessions": {
+    "s_d6bc6106d6e880": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c9cb-2f9f-78e0-aece-f1257a53bf80",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Boris <coolhzb@gmail.com>"
+    }
+  }
+}

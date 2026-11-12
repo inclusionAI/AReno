@@ -1,0 +1,23 @@
+.pre-commit-config.yaml
+  s_80daf73f0259bb::t_0f65c8b5002e30 21
+blog/ASystem_AReno_Pi_Harness_EN.md
+  s_80daf73f0259bb::t_f02a0bf2f40357 1-70
+blog/ASystem_AReno_Pi_Harness_CN.md
+  s_80daf73f0259bb::t_d9e098ad1b6c36 1-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "53bf976317361026bad1ec52f0b947c53cbedee6",
+  "prompts": {},
+  "sessions": {
+    "s_80daf73f0259bb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c9f3-36c7-7a63-81ea-bf52d738064f",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Boris <coolhzb@gmail.com>"
+    }
+  }
+}
