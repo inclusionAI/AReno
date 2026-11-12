@@ -1,0 +1,29 @@
+docs/index.rst
+  s_c00737e59a0146::t_606528c2db3792 35
+docs/cli/inference.rst
+  s_c00737e59a0146::t_606528c2db3792 33
+docs/cli/training.rst
+  s_c00737e59a0146::t_606528c2db3792 49
+docs/concepts/sglang-label-jev.rst
+  s_c00737e59a0146::t_606528c2db3792 1-191
+docs/concepts/jev.rst
+  s_c00737e59a0146::t_606528c2db3792 13
+README.md
+  s_c00737e59a0146::t_606528c2db3792 39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "bc87c27007e917afb0157c2fd6fa9eac5072fecc",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
