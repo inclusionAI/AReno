@@ -86,6 +86,9 @@ class TrainerConfig:
     # Opt-in auxiliary MTP loss for checkpoints that ship MTP layers; None keeps
     # the layers unbuilt unless speculative decoding needs them.
     mtp_loss_scale: float | None = None
+    # Fused vocabulary projection for the deferred LM-head loss path: streams
+    # vocab tiles instead of materializing [chunk, vocab] logits (single-GPU).
+    cce_vocab_projection: bool = False
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     agent_fn: str | None = None
     train_tool_results: bool = False
@@ -264,6 +267,7 @@ class TrainerConfig:
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
                 "mtp_loss_scale": self.mtp_loss_scale,
+                "cce_vocab_projection": self.cce_vocab_projection,
             },
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -339,6 +343,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
                 "mtp_loss_scale": self.mtp_loss_scale,
+                "cce_vocab_projection": self.cce_vocab_projection,
                 "speculative_draft_tokens": self.speculative_draft_tokens,
                 # R3 is the default CUDA path for rollout-based MoE training.
                 # EngineConfig disables it again when the checkpoint is dense.

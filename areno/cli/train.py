@@ -147,6 +147,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "activation_checkpointing",
             "mlx_compile_train_step",
             "mtp_loss_scale",
+            "cce_vocab_projection",
             "lora_rank",
             "q4",
             "qlora",
@@ -263,6 +264,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.cce_vocab_projection = getattr(args, "cce_vocab_projection", False)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
@@ -950,6 +952,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.cce_vocab_projection = getattr(args, "cce_vocab_projection", False)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -1017,6 +1020,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            cce_vocab_projection=args.cce_vocab_projection,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1081,6 +1085,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            cce_vocab_projection=args.cce_vocab_projection,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1180,6 +1185,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            cce_vocab_projection=args.cce_vocab_projection,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1254,6 +1260,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
         multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
         activation_checkpointing=args.activation_checkpointing,
+        cce_vocab_projection=args.cce_vocab_projection,
         keep_rollout_state=not args.drop_rollout_state,
         optimizer_state_offload=args.optimizer_state_offload,
         optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1397,6 +1404,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "speculative_draft_tokens",
                 "mtp_loss_scale",
                 "activation_checkpointing",
+                "cce_vocab_projection",
                 "keep_rollout_state",
                 "optimizer_state_offload",
                 "optimizer_state_offload_dir",
@@ -2040,6 +2048,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     type=float,
     default=None,
     help="Weight of the auxiliary MTP (t+2) loss for checkpoints with MTP layers; unset leaves the layers unbuilt.",
+)
+@click.option(
+    "--cce-vocab-projection",
+    is_flag=True,
+    help="Fuse the LM-head projection into the loss: stream vocab tiles instead of materializing [chunk, vocab] logits (single-GPU).",
 )
 @click.option(
     "--attn-backend",

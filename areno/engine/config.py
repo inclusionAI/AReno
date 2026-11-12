@@ -78,6 +78,11 @@ class RuntimeConfig:
     # it is meant for SFT / policy-gradient RL — not preference objectives
     # like DPO whose packed rows include rejected samples.
     mtp_loss_scale: float | None = None
+    # Opt-in fused vocabulary projection for the deferred LM-head loss path:
+    # stream vocab tiles instead of materializing [chunk, vocab] logits.
+    # First delivery is single-GPU with bias-free linear heads; other shapes
+    # fall back to the checkpointed scoring path.
+    cce_vocab_projection: bool = False
     # Rollout speculative decoding: draft this many tokens per step with the
     # checkpoint's MTP layer and verify them in one target forward. 0 = off.
     # Requires the flash attention backend and a model with MTP layers.

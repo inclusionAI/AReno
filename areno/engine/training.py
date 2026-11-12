@@ -13,6 +13,7 @@ from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.device import accelerator_module
+from areno.engine.runtime.cce_logprobs import packed_next_token_logprobs_from_hidden_fused
 from areno.engine.runtime.logprobs import (
     packed_mtp_token_logprobs,
     packed_next_token_logprobs,
@@ -159,7 +160,18 @@ class TrainingManager:
             with routing_replay_context(train_meta):
                 out = train_model(**model_kwargs)
             if defer_lm_head:
-                logprobs = packed_next_token_logprobs_from_hidden(
+                # The fused path streams vocab tiles and never materializes
+                # [chunk, vocab] logits; TP vocab shards fall back to the
+                # checkpointed path until the fused reduction supports them.
+                fused_vocab_projection = (
+                    getattr(worker.config.runtime, "cce_vocab_projection", False) and ctx.world_size == 1
+                )
+                head_scorer = (
+                    packed_next_token_logprobs_from_hidden_fused
+                    if fused_vocab_projection
+                    else packed_next_token_logprobs_from_hidden
+                )
+                logprobs = head_scorer(
                     out.hidden_states,
                     tokens,
                     data_pack["train_cu_seqlens"],
@@ -167,7 +179,16 @@ class TrainingManager:
                     logit_softcap=getattr(train_model, "final_logit_softcapping", None),
                     # Retain the pre-existing head bound independently of the
                     # tokenwise block schedule; widening it would regress memory.
-                    chunk_size=256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256),
+                    # The fused path streams [chunk, vocab_tile] tiles instead of
+                    # [chunk, vocab] rows, so a wider token chunk is safe there
+                    # and amortizes the per-chunk launch overhead (issue #588
+                    # scorer sweep on RTX 3090: 2048/32768 was the balanced
+                    # throughput/peak-memory corner).
+                    chunk_size=(
+                        2048
+                        if fused_vocab_projection
+                        else 256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256)
+                    ),
                 )
             else:
                 logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
