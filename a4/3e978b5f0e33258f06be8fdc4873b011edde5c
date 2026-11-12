@@ -1,0 +1,23 @@
+areno/api/backend/cuda/backend.py
+  s_c00737e59a0146::t_94a195c319a491 105
+areno/api/backend/mlx/backend.py
+  s_c00737e59a0146::t_847b02a7670a05 63
+examples/label_jev/validate_mlx.py
+  s_c00737e59a0146::t_d7e00b8e47b854 30-31,53,98-108,114-115,174-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a43e978b5f0e33258f06be8fdc4873b011edde5c",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
