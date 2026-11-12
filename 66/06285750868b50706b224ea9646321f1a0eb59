@@ -1,0 +1,30 @@
+areno/api/jev/labels/trainer.py
+  s_c00737e59a0146::t_3b14d69ccafcf0 69-78
+  s_c00737e59a0146::t_090583a478071c 49-50,60,68,79,87-88,111
+areno/cli/train.py
+  s_c00737e59a0146::t_3b14d69ccafcf0 1922-1925
+  s_c00737e59a0146::t_090583a478071c 258-259,1136-1139,1921,1926-1927
+  s_c00737e59a0146::t_5e8dc0bf023c7a 93
+examples/label_jev/README.md
+  s_c00737e59a0146::t_09f529138ff17b 55-59
+areno/api/jev/labels/config.py
+  s_c00737e59a0146::t_090583a478071c 21,29-30
+tests/test_label_jev_cpu.py
+  s_c00737e59a0146::t_3b14d69ccafcf0 180-240
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6606285750868b50706b224ea9646321f1a0eb59",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
