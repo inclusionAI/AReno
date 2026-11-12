@@ -1,0 +1,44 @@
+examples/label_jev/validate_mlx.py
+  s_c00737e59a0146::t_3fb795916b1b53 1-173
+areno/api/backend/cuda/backend.py
+  s_c00737e59a0146::t_b3ad994145d635 530-537
+areno/api/jev/labels/mlx.py
+  s_c00737e59a0146::t_a5199889916f95 1-48
+areno/api/backend/mlx/backend.py
+  s_c00737e59a0146::t_a5199889916f95 349,668
+  s_c00737e59a0146::t_e876ce76da1cd8 99-103,348,350-351,667,669-670
+areno/api/jev/labels/__init__.py
+  s_c00737e59a0146::t_a5199889916f95 1
+areno/api/jev/labels/loss.py
+  s_c00737e59a0146::t_a5199889916f95 1-54
+areno/api/jev/labels/config.py
+  s_c00737e59a0146::t_a5199889916f95 1-15
+areno/api/jev/labels/protocol.py
+  s_c00737e59a0146::t_a5199889916f95 1-124
+areno/api/jev/labels/trainer.py
+  s_c00737e59a0146::t_a5199889916f95 1-17
+areno/engine/training.py
+  s_c00737e59a0146::t_e876ce76da1cd8 160-162,189
+  s_c00737e59a0146::t_b3ad994145d635 163,183-188,190-191
+areno/api/algorithms.py
+  s_c00737e59a0146::t_3fb795916b1b53 266-271
+  s_c00737e59a0146::t_a5199889916f95 252-263,265,272
+tests/test_label_jev_cpu.py
+  s_c00737e59a0146::t_e2aee3bb131faf 1-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b324c57649f28b8fcf6755f5b02808f1dd6c924a",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
