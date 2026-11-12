@@ -410,6 +410,21 @@ class Trainer:
             proxy=proxy,
         )
 
+    def enable_async_overlap(self) -> None:
+        """Allow `train` while a rollout session is active (experimental).
+
+        Used by asynchronous rollout/train pipelines that run a separate
+        rollout engine and track sample staleness themselves. Backends that
+        cannot overlap rollout and training reject the request.
+        """
+
+        if self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        enable = getattr(self._backend, "enable_async_overlap", None)
+        if enable is None:
+            raise RuntimeError(f"{type(self._backend).__name__} does not support async rollout/train overlap")
+        enable()
+
     def train(
         self,
         batch_data: list[TrainSequence],
