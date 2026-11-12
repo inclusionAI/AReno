@@ -1,0 +1,23 @@
+docs/cookbook/sglang-label-jev.rst
+  s_c00737e59a0146::t_42f0d2badd956e 113,116-124
+  s_c00737e59a0146::t_01a3532700e289 114
+  s_c00737e59a0146::t_a631fe2ff39b04 115
+README.md
+  s_c00737e59a0146::t_42f0d2badd956e 39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1b0166872191226c9e4fb61bea1c36fdc6467f57",
+  "prompts": {},
+  "sessions": {
+    "s_c00737e59a0146": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd3-ae63-7590-8f20-484e07381f65",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
