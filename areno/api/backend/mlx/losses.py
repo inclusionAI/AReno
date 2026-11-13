@@ -186,12 +186,80 @@ def _policy_stats(batch, logprobs, ratio, loss):
     }
 
 
+def opd_loss(
+    batch,
+    logprobs,
+    *,
+    opd_coef: float = 1.0,
+    opd_loss_type: str = "pg",
+    opd_clip: float = 5.0,
+    **_,
+):
+    """Token-level on-policy distillation, the MLX counterpart of ``opd_loss_fn``.
+
+    Teacher logprobs arrive in the generic frozen-reference slot
+    ``ref_logprobs``. Only the exponent input of the k3 branch is bounded:
+    clamping the loss output would zero the gradient on the tokens the student
+    gets most wrong.
+    """
+    import mlx.core as mx
+
+    teacher = batch.get("ref_logprobs")
+    if teacher is None:
+        raise ValueError("OPD requires teacher logprobs in ref_logprobs; check that the teacher role scored this batch")
+    if teacher.shape != logprobs.shape:
+        raise ValueError("teacher logprobs must align with student logprobs")
+    # Finite-value checks belong outside the graph transform: MLX forbids eager
+    # ``.item()`` inside ``mx.compile`` / ``nn.value_and_grad``, where the batch
+    # is a tracer. OPDTrainer validates teacher rows before building the batch.
+
+    mask = batch["response_mask"]
+    old = batch["old_logprobs"].astype(mx.float32)
+    student = logprobs.astype(mx.float32)
+    teacher = teacher.astype(mx.float32)
+    count = mx.maximum(mask.sum(), mx.array(1.0))
+
+    def masked_mean(value):
+        return (value * mask).sum() / count
+
+    coef = float(opd_coef)
+    loss_type = str(opd_loss_type).lower()
+    raw_signal = teacher - old
+    if loss_type == "pg":
+        advantage = mx.stop_gradient(mx.clip(raw_signal, -float(opd_clip), float(opd_clip)))
+        token_loss = -advantage * student
+        clipped = (mx.abs(raw_signal) > float(opd_clip)).astype(mx.float32)
+        advantage_mean = masked_mean(advantage)
+    elif loss_type in {"k3", "low_var_kl"}:
+        delta = mx.clip(teacher - student, -20.0, 5.0)
+        token_loss = mx.exp(delta) - delta - 1.0
+        clipped = mx.zeros_like(student)
+        advantage_mean = mx.array(0.0)
+    else:
+        raise ValueError(f"unsupported opd_loss_type: {opd_loss_type!r}")
+
+    loss = masked_mean(token_loss) * coef
+    return loss, {
+        "opd_loss": mx.stop_gradient(loss),
+        "total_loss": mx.stop_gradient(loss),
+        "opd_advantage_mean": mx.stop_gradient(advantage_mean),
+        "opd_teacher_logprob_mean": masked_mean(teacher),
+        "opd_teacher_student_gap": masked_mean(teacher - mx.stop_gradient(student)),
+        "opd_clipfrac": masked_mean(clipped),
+        "response_len": mx.maximum(mask.sum(axis=-1), mx.array(1.0)).mean(),
+        LOGP_METRIC_WEIGHT: count,
+        TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(old),
+        TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(mx.stop_gradient(student)),
+    }
+
+
 _LOSSES: dict[str, MlxLoss] = {
     "sft": sft_loss,
     "dpo": dpo_loss,
     "grpo": grpo_loss,
     "gspo": gspo_loss,
     "ppo": ppo_loss,
+    "opd": opd_loss,
 }
 
 __all__ = ["mlx_loss"]

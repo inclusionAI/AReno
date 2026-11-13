@@ -40,6 +40,12 @@ class AlgorithmSpec:
     requires_rollout: bool
     loss_fn_factory: LossFnFactory | None = None
     experimental: bool = False
+    # Rollout and reward requirements are independent: on-policy
+    # distillation samples from the student but has no external reward
+    # function. Only consulted for rollout algorithms; the CLI checks
+    # requires_rollout first, so existing specs keep their behavior
+    # without being edited.
+    requires_reward: bool = True
 
     def resolve_trainer_cls(self) -> type:
         """Resolve a lazy trainer loader to the concrete trainer class."""
@@ -117,6 +123,27 @@ def ppo_loss_fn(
     )
 
 
+def opd_loss_fn(
+    data_pack,
+    logprobs,
+    *,
+    opd_coef: float = 1.0,
+    opd_loss_type: str = "pg",
+    opd_clip: float = 5.0,
+):
+    """Run the built-in OPD objective on the selected tensor runtime."""
+
+    from areno.api.backend.cuda.losses import opd_loss_fn as cuda_loss
+
+    return cuda_loss(
+        data_pack,
+        logprobs,
+        opd_coef=opd_coef,
+        opd_loss_type=opd_loss_type,
+        opd_clip=opd_clip,
+    )
+
+
 def register_algorithm(spec: AlgorithmSpec, *, replace: bool = False) -> None:
     """Register an algorithm spec by name.
 
@@ -137,6 +164,7 @@ def register_algorithm(spec: AlgorithmSpec, *, replace: bool = False) -> None:
             requires_rollout=spec.requires_rollout,
             loss_fn_factory=spec.loss_fn_factory,
             experimental=spec.experimental,
+            requires_reward=spec.requires_reward,
         )
     _ALGORITHMS[name] = spec
 
@@ -261,6 +289,21 @@ def _load_label_jev_trainer() -> type:
     return LabelJevTrainer
 
 
+def _bind_opd_loss(config: TrainerConfig, loss_fn: Callable) -> Callable:
+    return partial(
+        loss_fn,
+        opd_coef=float(getattr(config, "opd_coef", 1.0)),
+        opd_loss_type=str(getattr(config, "opd_loss_type", "pg")),
+        opd_clip=float(getattr(config, "opd_clip", 5.0)),
+    )
+
+
+def _load_opd_trainer() -> type:
+    from areno.api.trainers.opd import OPDTrainer
+
+    return OPDTrainer
+
+
 def _register_builtin_algorithms() -> None:
     register_algorithm(
         AlgorithmSpec(
@@ -321,6 +364,16 @@ def _register_builtin_algorithms() -> None:
             requires_rollout=True,
         )
     )
+    register_algorithm(
+        AlgorithmSpec(
+            name="opd",
+            trainer_cls=_load_opd_trainer,
+            default_loss_fn=opd_loss_fn,
+            requires_rollout=True,
+            requires_reward=False,
+            loss_fn_factory=_bind_opd_loss,
+        )
+    )
 
 
 _register_builtin_algorithms()
@@ -339,4 +392,5 @@ __all__ = [
     "gspo_loss_fn",
     "ppo_loss_fn",
     "sft_loss_fn",
+    "opd_loss_fn",
 ]

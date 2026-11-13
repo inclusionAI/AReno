@@ -22,9 +22,15 @@ class AlgorithmRegistryTest(unittest.TestCase):
         """Built-ins should expose rollout and role requirements in one place."""
         algorithms = list_algorithms(include_experimental=False)
 
-        self.assertEqual(set(algorithms), {"dpo", "grpo", "gspo", "ppo", "sft", "jev", "label_jev"})
+        self.assertEqual(
+            set(algorithms), {"dpo", "grpo", "gspo", "ppo", "sft", "jev", "label_jev", "opd"}
+        )
         self.assertFalse(algorithms["sft"].requires_rollout)
         self.assertTrue(algorithms["gspo"].requires_rollout)
+        self.assertTrue(algorithms["gspo"].requires_reward)
+        self.assertTrue(algorithms["opd"].requires_rollout)
+        self.assertFalse(algorithms["opd"].requires_reward)
+        self.assertFalse(algorithms["opd"].experimental)
         self.assertIs(algorithms["ppo"].default_loss_fn, ppo_loss_fn)
 
     def test_unknown_algorithm_error_lists_registered_names(self):

@@ -11,6 +11,7 @@ critic warmup window.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -402,6 +403,46 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     reward_fn_path: str | None = None
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
+
+
+@dataclass(slots=True)
+class OPDTrainerConfig(PolicyTrainerConfig):
+    """On-policy distillation configuration.
+
+    OPD needs rollout but no reward function: the dense training signal comes
+    from a frozen teacher scoring the tokens the student just sampled. The
+    held-out benchmark reuses the existing SFT ``--eval-*`` options.
+    """
+
+    teacher_ckpt: str | None = None
+    opd_coef: float = 1.0
+    opd_loss_type: Literal["pg", "k3"] = "pg"
+    opd_clip: float = 5.0
+    opd_teacher_micro_bs: int | None = None
+    validation_dataset_path: str | None = field(default=None, kw_only=True)
+    validation_dataset_loader_fn: str | None = field(default=None, kw_only=True)
+    eval_interval: int = field(default=50, kw_only=True)
+    eval_batches: int | None = field(default=None, kw_only=True)
+    eval_before_step: bool = field(default=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        TrainerConfig.__post_init__(self)
+        if not self.teacher_ckpt or not self.teacher_ckpt.strip():
+            raise ValueError("teacher_ckpt is required for --algo opd")
+        if self.opd_loss_type not in {"pg", "k3"}:
+            raise ValueError("opd_loss_type must be 'pg' or 'k3'")
+        if not math.isfinite(self.opd_coef) or self.opd_coef <= 0:
+            raise ValueError("opd_coef must be a finite positive number")
+        if not math.isfinite(self.opd_clip) or self.opd_clip <= 0:
+            raise ValueError("opd_clip must be a finite positive number")
+        if self.opd_teacher_micro_bs is not None and self.opd_teacher_micro_bs < 1:
+            raise ValueError("opd_teacher_micro_bs must be positive")
+        if self.eval_interval < 1:
+            raise ValueError("eval_interval must be positive")
+        if self.eval_batches is not None and self.eval_batches < 1:
+            raise ValueError("eval_batches must be positive or None")
+        if self.validation_dataset_loader_fn and not self.validation_dataset_path:
+            raise ValueError("validation_dataset_loader_fn requires validation_dataset_path")
 
 
 @dataclass(slots=True)

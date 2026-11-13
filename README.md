@@ -369,6 +369,30 @@ counts questions and `--mini-bs` counts candidate sequences. See the
 [JEV concept guide](docs/concepts/jev.rst) for data formats, backbone updates,
 checkpoint continuation, and backend settings.
 
+#### OPD
+
+On-Policy Distillation trains on the student's own rollouts with a frozen
+teacher scoring every response token. It needs no reward function:
+
+```bash
+areno train \
+  --algo opd \
+  --ckpt Qwen/Qwen3-0.6B \
+  --teacher-ckpt Qwen/Qwen3-0.6B-Instruct \
+  --dataset-path gsm8k:main \
+  --dataset-loader-fn examples/math/dataset_loader.py \
+  --tp-size 1 --world-size 1 \
+  --batch-size 1 --n-samples 2 --mini-bs 1 \
+  --max-steps 20
+```
+
+Add `--validation-dataset-path`, `--eval-interval`, `--eval-before-step` and
+`--reward-fn-path examples/math/math_verify_reward.py` to measure held-out task
+accuracy; the reward function is used only during evaluation, never in the OPD
+training loss. See the
+[OPD concept guide](docs/concepts/opd.rst) and the
+[OPD cookbook](docs/cookbook/opd-training.rst).
+
 ### Serving
 
 Serve a trained checkpoint as an OpenAI-compatible endpoint with continuous batching:

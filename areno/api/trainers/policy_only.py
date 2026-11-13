@@ -299,7 +299,9 @@ class PolicyOnlyTrainer:
             self._agent_run_fn = load_agent_run_fn(self.config.agent_fn)
         return self._agent_run_fn
 
-    async def _run_prompt_rollout(self, sampling_params, prompt_batch):
+    async def _run_prompt_rollout(
+        self, sampling_params, prompt_batch, *, n_samples: int | None = None
+    ):
         async with self.areno.rollout_session(
             sampling_params=sampling_params,
             max_running_prompts=self.config.resolved_max_running_prompts(),
@@ -311,7 +313,7 @@ class PolicyOnlyTrainer:
                 prompt_features = None
             return await self.areno.rollout_token_batch_async(
                 prompt_tokens,
-                self.config.n_samples,
+                self.config.n_samples if n_samples is None else n_samples,
                 sampling_params,
                 prompt_features=prompt_features,
             )

@@ -32,6 +32,7 @@ AReno documentation
    Native LoRA <concepts/native-lora>
    Selective Recompute <concepts/selective-recompute>
    JEV <concepts/jev>
+   OPD <concepts/opd>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
    Reward Functions <concepts/reward-functions>
@@ -45,6 +46,7 @@ AReno documentation
    cookbook/writing-loaders-and-rewards
    cookbook/math-rlvr
    cookbook/jev-training
+   cookbook/opd-training
    cookbook/tictactoe-agentic-rl
    cookbook/duelgrid-visual-agent
 
