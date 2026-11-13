@@ -5,7 +5,7 @@ Training CLI reference
 
 ``areno train``
 
-Run SFT, DPO, GSPO, GRPO, or PPO training with the local Areno backend. The
+Run SFT, DPO, GSPO, GRPO, PPO, or OPD training with the local Areno backend. The
 command owns the full loop: dataset loading, optional normalization, rollout,
 reward scoring, loss computation, optimizer steps, metrics, and checkpoint
 saving.
@@ -84,21 +84,23 @@ except for SFT where a loader is required. See :doc:`dataset_loaders` for the
 per-algorithm loader contracts.
 
 ``--validation-dataset-path TEXT``
-   Optional held-out SFT dataset. AReno loads it separately and never uses it
-   for optimizer updates.
+   Optional held-out dataset for ``--algo sft`` or ``--algo opd``. AReno loads
+   it separately and never uses it for optimizer updates.
 
 ``--validation-dataset-loader-fn TEXT``
    Optional validation loader. Defaults to the training dataset loader.
 
 ``--eval-interval INTEGER``, ``--eval-batches INTEGER``
-   SFT validation runs every ``50`` optimizer updates by default. Limit each
-   evaluation to this many batches, or omit ``--eval-batches`` to use all
-   accepted validation rows. Loss is weighted by supervised target tokens.
-   Results are saved as ``validation/*`` TensorBoard scalars and
-   ``validation_metrics.jsonl`` in the metrics directory.
+   Held-out evaluation runs every ``50`` optimizer updates by default. Limit
+   each evaluation to this many batches, or omit ``--eval-batches`` to use all
+   accepted validation rows. SFT reports token-weighted NLL; OPD reports the
+   teacher/student logprob gap and, when ``--reward-fn-path`` is set, greedy
+   generation accuracy on held-out tasks. Results are saved as
+   ``validation/*`` TensorBoard scalars and ``validation_metrics.jsonl`` in
+   the metrics directory.
 
 ``--eval-before-step``
-   Opt in to evaluating before scheduled SFT updates, including the initial
+   Opt in to evaluating before scheduled updates, including the initial
    update and the last update selected by ``--max-steps``. For an interval of
    50 and 500 steps, validation occurs before updates 1, 50, 100, ..., 500.
    Without this flag, evaluation occurs after scheduled updates.
@@ -106,12 +108,13 @@ per-algorithm loader contracts.
 ``--shuffle / --no-shuffle``, ``--seed INTEGER``
    SFT shuffling is disabled by default. When enabled, training and validation
    consume the same seeded NumPy sampler. The seed also controls MLX model and
-   LoRA initialization; it does not change CUDA model initialization.
+   LoRA initialization; it does not change CUDA model initialization. OPD
+   rejects ``--shuffle`` because it samples online and has no fixed batch order.
 
 ``--algo TEXT``
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
 
-Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
+Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``, ``jev``, ``opd``.
 
 ``--epochs INTEGER``
    Number of dataset epochs to train. Default: ``10``.
@@ -284,7 +287,8 @@ When ``--max-context-len`` is set, filtering uses the full concatenated token
 row for the whole agentic trajectory, not only the latest chat-completion turn.
 
 ``--reward-fn-path TEXT``
-   Python file defining ``reward_fn(record)``.
+   Python file defining ``reward_fn(record)``. OPD uses it only for the
+   held-out generation benchmark; its training loss has no reward term.
 
 Reward files should expose:
 
@@ -547,6 +551,21 @@ in its description; flags for other algorithms are ignored.
 ``--lam FLOAT``
    PPO GAE lambda. Default: ``0.95``.
 
+``--teacher-ckpt TEXT``
+   OPD frozen teacher checkpoint. Must share the student tokenizer.
+
+``--opd-coef FLOAT``
+   OPD distillation loss scale. Default: ``1.0``.
+
+``--opd-loss-type [pg|k3]``
+   OPD objective: clipped dense advantage or low-variance KL. Default: ``pg``.
+
+``--opd-clip FLOAT``
+   OPD dense-advantage clipping range for ``pg``. Default: ``5.0``.
+
+``--opd-teacher-micro-bs INTEGER``
+   OPD teacher scoring microbatch size. Defaults to ``--score-micro-bs``.
+
 Checkpoint
 ~~~~~~~~~~
 
@@ -767,6 +786,33 @@ game loop.
      - .. image:: ../../examples/agentic/duelgrid/images/train_after.gif
           :alt: Gemma-E2B-it after DuelGrid training
           :width: 260px
+
+OPD
+~~~
+
+On-Policy Distillation samples with the student and scores those exact tokens
+with a frozen teacher. No reward function is required for training:
+
+.. code-block:: bash
+
+   areno train \
+     --algo opd \
+     --ckpt Qwen/Qwen3-0.6B \
+     --teacher-ckpt Qwen/Qwen3-0.6B-Instruct \
+     --dataset-path gsm8k:main \
+     --dataset-loader-fn examples/math/dataset_loader.py \
+     --tp-size 1 \
+     --world-size 1 \
+     --batch-size 1 --n-samples 2 --mini-bs 1 \
+     --max-prompt-tokens 256 --max-new-tokens 256 \
+     --max-steps 20
+
+Add ``--validation-dataset-path``, ``--eval-interval`` and
+``--eval-before-step`` to record the teacher/student logprob gap on a held-out
+set. To measure task accuracy, also pass ``--reward-fn-path`` (for example
+``examples/math/math_verify_reward.py``): OPD ignores it during training and
+uses it only to score held-out generations when evaluation fires. See
+:doc:`../concepts/opd` and :doc:`../cookbook/opd-training` for details.
 
 Help
 ----

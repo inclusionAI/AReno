@@ -1,7 +1,7 @@
 Ascend NPU
 ==========
 
-AReno provides an Ascend NPU backend for SFT, DPO, GRPO, GSPO and PPO,
+AReno provides an Ascend NPU backend for SFT, DPO, GRPO, GSPO, PPO and OPD,
 as well as rollout, scoring and OpenAI-compatible serving.
 
 Installation

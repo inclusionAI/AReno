@@ -61,8 +61,8 @@ class MlxBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev"}),
-            model_roles=frozenset({"actor", "ref", "reward", "critic"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev", "opd"}),
+            model_roles=frozenset({"actor", "ref", "reward", "critic", "teacher"}),
             multimodal=True,
         )
 
@@ -477,7 +477,9 @@ class MlxBackend(Backend):
         for name, role in roles.items():
             if name == "actor" or name in self._roles:
                 continue
-            if name == "ref":
+            if name in {"ref", "teacher"}:
+                # Both are frozen language models; the teacher only scores tokens
+                # sampled by the student, so it needs no optimizer or value head.
                 loaded = load_language_role(role.path)
             elif name == "critic":
                 loaded = load_value_role(

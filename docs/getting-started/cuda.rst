@@ -65,7 +65,7 @@ The CLI selects CUDA automatically; there is no backend flag:
      --n-samples 8 \
      --mini-bs 1
 
-CUDA supports the built-in SFT, DPO, GRPO, GSPO, and PPO trainer paths. It can
+CUDA supports the built-in SFT, DPO, GRPO, GSPO, PPO, and OPD trainer paths. It can
 run a colocated rollout/training engine or place rollout on a separate CUDA
 device partition. ``--world-size`` selects the total training ranks,
 ``--tp-size`` selects training tensor parallelism, and the world size must be
