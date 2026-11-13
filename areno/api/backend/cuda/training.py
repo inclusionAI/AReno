@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import torch
 
-from areno.api.algorithms import sft_loss_fn
+from areno.api.algorithms import opd_loss_fn, sft_loss_fn
 from areno.api.backend.common import accumulation_steps, train_sequence_ids
 from areno.api.context import Context
 from areno.api.models import TrainSequence
@@ -98,6 +98,31 @@ def is_sft_loss_fn(loss_fn: Callable) -> bool:
     return loss_fn is sft_loss_fn or getattr(loss_fn, "func", None) is sft_loss_fn
 
 
+def is_opd_loss_fn(loss_fn: Callable) -> bool:
+    """Return whether a callable is the built-in OPD loss or its partial."""
+
+    return loss_fn is opd_loss_fn or getattr(loss_fn, "func", None) is opd_loss_fn
+
+
+def _annotate_token_mean_packs(
+    packs: list[dict],
+    token_counts: list[int],
+    *,
+    total_key: str,
+    scale_key: str,
+    gradient_accumulation_steps: int | None,
+) -> None:
+    if not packs:
+        return
+    accumulation = accumulation_steps(len(packs), gradient_accumulation_steps)
+    for start in range(0, len(packs), accumulation):
+        end = min(start + accumulation, len(packs))
+        total = max(sum(token_counts[start:end]), 1)
+        for pack in packs[start:end]:
+            pack[total_key] = total
+            pack[scale_key] = end - start
+
+
 def annotate_sft_token_mean_packs(
     packs: list[dict],
     target_counts: list[int],
@@ -106,15 +131,30 @@ def annotate_sft_token_mean_packs(
 ) -> None:
     """Attach per-accumulation-group token normalizers for token-mean SFT."""
 
-    if not packs:
-        return
-    accumulation = accumulation_steps(len(packs), gradient_accumulation_steps)
-    for start in range(0, len(packs), accumulation):
-        end = min(start + accumulation, len(packs))
-        total = max(sum(target_counts[start:end]), 1)
-        for pack in packs[start:end]:
-            pack["_sft_total_target_tokens"] = total
-            pack["_sft_grad_scale"] = end - start
+    _annotate_token_mean_packs(
+        packs,
+        target_counts,
+        total_key="_sft_total_target_tokens",
+        scale_key="_sft_grad_scale",
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+
+
+def annotate_opd_token_mean_packs(
+    packs: list[dict],
+    response_counts: list[int],
+    *,
+    gradient_accumulation_steps: int | None,
+) -> None:
+    """Attach per-accumulation-group token normalizers for token-mean OPD."""
+
+    _annotate_token_mean_packs(
+        packs,
+        response_counts,
+        total_key="_opd_total_response_tokens",
+        scale_key="_opd_grad_scale",
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
 
 
 def sft_target_token_count(seqs: list[TrainSequence]) -> int:
@@ -199,7 +239,9 @@ def _sequence_prompt_len(seq: TrainSequence) -> int:
 
 
 __all__ = [
+    "annotate_opd_token_mean_packs",
     "annotate_sft_token_mean_packs",
+    "is_opd_loss_fn",
     "is_sft_loss_fn",
     "make_routing_replay",
     "make_train_pack",

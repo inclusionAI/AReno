@@ -133,7 +133,7 @@ per-algorithm loader contracts.
 ``--algo TEXT``
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
 
-Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
+Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``, ``opd``.
 
 ``--epochs INTEGER``
    Number of dataset epochs to train. Default: ``10``.
@@ -569,6 +569,21 @@ in its description; flags for other algorithms are ignored.
 ``--lam FLOAT``
    PPO GAE lambda. Default: ``0.95``.
 
+``--teacher-ckpt TEXT``
+   OPD frozen teacher checkpoint. Must share the student tokenizer.
+
+``--opd-coef FLOAT``
+   OPD distillation loss scale. Default: ``1.0``.
+
+``--opd-loss-type [pg|k3]``
+   OPD objective: clipped dense advantage or low-variance KL. Default: ``pg``.
+
+``--opd-clip FLOAT``
+   OPD dense-advantage clipping range for ``pg``. Default: ``5.0``.
+
+``--opd-teacher-micro-bs INTEGER``
+   OPD teacher scoring microbatch size. Defaults to ``--score-micro-bs``.
+
 Checkpoint
 ~~~~~~~~~~
 
@@ -789,6 +804,26 @@ game loop.
      - .. image:: ../../examples/agentic/duelgrid/images/train_after.gif
           :alt: Gemma-E2B-it after DuelGrid training
           :width: 260px
+
+OPD
+~~~
+
+On-Policy Distillation samples with the student and scores those exact tokens
+with a frozen teacher. No reward function is required for training:
+
+.. code-block:: bash
+
+   areno train \
+     --algo opd \
+     --ckpt Qwen/Qwen3-0.6B-Base \
+     --teacher-ckpt Qwen/Qwen3-0.6B \
+     --dataset-path gsm8k:main \
+     --dataset-loader-fn examples/math/dataset_loader.py \
+     --tp-size 1 \
+     --world-size 1 \
+     --batch-size 1 --n-samples 2 --mini-bs 1 \
+     --max-prompt-tokens 256 --max-new-tokens 256 \
+     --max-steps 20
 
 Help
 ----

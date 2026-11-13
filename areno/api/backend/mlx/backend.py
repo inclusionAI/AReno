@@ -61,8 +61,8 @@ class MlxBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev"}),
-            model_roles=frozenset({"actor", "ref", "reward", "critic"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev", "opd"}),
+            model_roles=frozenset({"actor", "ref", "reward", "critic", "teacher"}),
             multimodal=True,
         )
 
@@ -367,6 +367,13 @@ class MlxBackend(Backend):
                     dtype=mx.float32,
                 )
                 batch["_sft_grad_scale"] = mx.array(group_size, dtype=mx.float32)
+            elif spec.name == "opd":
+                group_size = accumulation_group_size(index, len(microbatches), accumulation)
+                group_start = (index // accumulation) * accumulation
+                group_end = group_start + group_size
+                total_tokens = sum(sft_target_token_count(group) for group in microbatches[group_start:group_end])
+                batch["_opd_total_response_tokens"] = mx.array(max(total_tokens, 1), dtype=mx.float32)
+                batch["_opd_grad_scale"] = mx.array(group_size, dtype=mx.float32)
             (loss, stats), grads = value_and_grad(batch)
             grad_accum = grads if grad_accum is None else tree_map(lambda left, right: left + right, grad_accum, grads)
             group_count += 1
@@ -477,7 +484,9 @@ class MlxBackend(Backend):
         for name, role in roles.items():
             if name == "actor" or name in self._roles:
                 continue
-            if name == "ref":
+            if name in {"ref", "teacher"}:
+                # Both are frozen language models; the teacher only scores tokens
+                # sampled by the student, so it needs no optimizer or value head.
                 loaded = load_language_role(role.path)
             elif name == "critic":
                 loaded = load_value_role(
