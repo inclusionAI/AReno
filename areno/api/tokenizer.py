@@ -141,3 +141,63 @@ def _extend_token_ids(out: list[int], value) -> None:
         for item in value:
             if isinstance(item, int):
                 out.append(item)
+
+
+TOKENIZER_PROBE = "AReno tokenizer compatibility probe: 12345 <|endoftext|>"
+
+
+def vocab_size(tokenizer: Any) -> int | None:
+    """Best-effort vocabulary size for a tokenizer-like object."""
+
+    value = getattr(tokenizer, "vocab_size", None)
+    if isinstance(value, int) and value > 0:
+        return int(value)
+    try:
+        return int(len(tokenizer))
+    except (TypeError, AttributeError):
+        return None
+
+
+def _as_int_list(value: Any) -> list[int]:
+    if isinstance(value, (str, bytes)):
+        return [value]
+    try:
+        return [int(item) for item in value]
+    except TypeError:
+        return [int(value)]
+
+
+def assert_compatible_tokenizers(student: Any, teacher: Any, *, probe_text: str = TOKENIZER_PROBE) -> None:
+    """Reject teacher/student pairs whose token ids are not interchangeable.
+
+    A teacher-forcing scorer consumes *student* token ids. A vocab mismatch or
+    a different encoding would shift every per-token score while the loss still
+    looked finite, so this check runs at trainer start-up instead of at loss
+    time. Generation-only tokens (eos/bos) are not compared because the scoring
+    model never generates text.
+    """
+
+    student_size, teacher_size = vocab_size(student), vocab_size(teacher)
+    if student_size is not None and teacher_size is not None and student_size != teacher_size:
+        raise ValueError(
+            f"OPD teacher and student vocab sizes differ ({teacher_size} vs {student_size}); "
+            "teacher logprobs would be misaligned with student token ids"
+        )
+    # Only pad_token_id feeds the packed tensors shared with the teacher.
+    # A Base student (eos <|endoftext|>) with a post-trained teacher
+    # (eos <|im_end|>) is a valid and intended OPD setup.
+    for attr in ("pad_token_id",):
+        student_value = getattr(student, attr, None)
+        teacher_value = getattr(teacher, attr, None)
+        if student_value is not None and teacher_value is not None and student_value != teacher_value:
+            raise ValueError(f"OPD teacher and student {attr} differ ({teacher_value} vs {student_value})")
+    student_encode = getattr(student, "encode", None)
+    teacher_encode = getattr(teacher, "encode", None)
+    if callable(student_encode) and callable(teacher_encode):
+        student_ids = _as_int_list(student_encode(probe_text))
+        teacher_ids = _as_int_list(teacher_encode(probe_text))
+        if student_ids != teacher_ids:
+            raise ValueError(
+                "OPD teacher and student tokenizers encode the same text differently; "
+                "use a teacher from the same model family as the student"
+            )

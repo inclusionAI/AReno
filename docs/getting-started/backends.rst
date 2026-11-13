@@ -51,8 +51,8 @@ serving, checkpoint behavior, ``mlx-lm``/``mlx-vlm`` model support, and
 Shared contract
 ---------------
 
-Both backends support the built-in SFT, DPO, GRPO, GSPO, and PPO trainer paths
-through the same CLI and ``Trainer`` methods. They share algorithm schemas,
+Both backends support the built-in SFT, DPO, GRPO, GSPO, PPO, and OPD trainer
+paths through the same CLI and ``Trainer`` methods. They share algorithm schemas,
 ``TrainSequence`` batches, microbatch semantics, role APIs, multimodal message
 format, rollout-session lifecycle, and OpenAI-compatible serving API.
 

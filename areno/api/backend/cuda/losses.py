@@ -279,6 +279,87 @@ def _kl_penalty(logprob, ref_logprob, kl_type: str):
     raise NotImplementedError(f"unsupported PPO kl_loss_type: {kl_type}")
 
 
+def opd_loss_fn(
+    data_pack,
+    logprobs,
+    *,
+    opd_coef: float = 1.0,
+    opd_loss_type: str = "pg",
+    opd_clip: float = 5.0,
+):
+    """Token-level on-policy distillation loss.
+
+    The frozen teacher scores the tokens sampled by the current student and
+    the result travels in ``packed_ref_logprobs`` (the framework's generic
+    frozen-reference slot). ``response_layout`` aligns teacher, rollout and
+    train-time logprobs to the response-token action view.
+
+    ``pg`` uses a clipped dense advantage detached from the graph:
+        A_t = clamp(log pi_teacher - log pi_old, -clip, clip)
+        L   = -coef * mean_mask(A_t * log pi_student)
+    ``k3`` uses the low-variance reverse-KL estimator. Only the exponent
+    input is bounded (delta in [-20, 5]) to prevent overflow; the loss output
+    is never clamped. Clamping the loss itself would flatten it from
+    delta ~= 2.6 onwards and zero the gradient on exactly the tokens the
+    student gets most wrong. Binding the exponent input instead pushes that
+    saturation point out to delta = 5 while keeping the objective unbounded;
+    step size is handled by the framework's gradient clipping.
+    """
+
+    import torch
+
+    layout = response_layout(
+        data_pack,
+        logprobs,
+        need_old_logprobs=True,
+        need_ref_logprobs=True,
+        need_sequences=True,
+    )
+    if layout.ref_logprobs is None:
+        raise ValueError(
+            "OPD requires teacher logprobs in packed_ref_logprobs; "
+            "check that the teacher role scored this batch"
+        )
+
+    student = logprobs.to(torch.float32)
+    old = layout.old_logprobs.to(torch.float32)
+    teacher = layout.ref_logprobs.to(torch.float32)
+    if teacher.shape != student.shape:
+        raise ValueError("teacher logprobs must align with student logprobs")
+    if not torch.isfinite(teacher).all():
+        raise ValueError("teacher logprobs contain non-finite values")
+
+    loss_type = str(opd_loss_type).lower()
+    raw_signal = teacher - old
+    if loss_type == "pg":
+        advantage = raw_signal.clamp(-float(opd_clip), float(opd_clip)).detach()
+        token_loss = -advantage * student
+        clipped = raw_signal.abs() > float(opd_clip)
+        loss = masked_mean(token_loss, layout) * float(opd_coef)
+        advantage_mean = masked_mean(advantage, layout).detach()
+    elif loss_type in {"k3", "low_var_kl"}:
+        delta = (teacher - student).clamp(-20.0, 5.0)
+        token_loss = torch.exp(delta) - delta - 1.0
+        loss = masked_mean(token_loss, layout) * float(opd_coef)
+        clipped = torch.zeros_like(student, dtype=torch.bool)
+        advantage_mean = torch.zeros((), device=student.device, dtype=student.dtype)
+    else:
+        raise ValueError(f"unsupported opd_loss_type: {opd_loss_type!r}")
+
+    return loss, {
+        "opd_loss": loss.detach(),
+        "total_loss": loss.detach(),
+        "opd_advantage_mean": advantage_mean,
+        "opd_teacher_logprob_mean": masked_mean(teacher, layout).detach(),
+        "opd_teacher_student_gap": masked_mean((teacher - student).detach(), layout).detach(),
+        "opd_clipfrac": masked_mean(clipped.float(), layout).detach(),
+        "response_len": layout.response_len.mean().detach(),
+        LOGP_METRIC_WEIGHT: layout.valid_count.detach(),
+        TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(old, layout).detach(),
+        TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(student.detach(), layout).detach(),
+    }
+
+
 def dispatch_loss(pack: dict, logprobs):
     """Invoke the loss callable carried by a CUDA training pack."""
 
@@ -294,6 +375,7 @@ __all__ = [
     "grpo_loss_fn",
     "gspo_loss_fn",
     "masked_mean",
+    "opd_loss_fn",
     "ppo_loss_fn",
     "response_layout",
     "sequence_sum",

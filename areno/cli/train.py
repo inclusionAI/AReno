@@ -33,6 +33,7 @@ from areno.api.algorithms import get_algorithm
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
+    OPDTrainerConfig,
     PolicyTrainerConfig,
     PPOTrainerConfig,
     RolloutTrainerConfig,
@@ -203,6 +204,11 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "value_loss_coef",
             "gamma",
             "lam",
+            "teacher_ckpt",
+            "opd_coef",
+            "opd_loss_type",
+            "opd_clip",
+            "opd_teacher_micro_bs",
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval", "export_gguf_path", "gguf_file_type")),
@@ -287,6 +293,11 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     args.reference_mode = getattr(args, "reference_mode", "independent")
+    args.teacher_ckpt = getattr(args, "teacher_ckpt", None)
+    args.opd_coef = getattr(args, "opd_coef", 1.0)
+    args.opd_loss_type = getattr(args, "opd_loss_type", "pg")
+    args.opd_clip = getattr(args, "opd_clip", 5.0)
+    args.opd_teacher_micro_bs = getattr(args, "opd_teacher_micro_bs", None)
     args.lora = _lora_config_from_options(args)
     if args.lora is not None and args.lora.dropout != 0.0 and args.backend != "mlx":
         raise click.UsageError("nonzero --lora-dropout currently requires --backend mlx")
@@ -336,15 +347,18 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     algorithm = _algorithm_for_cli(args.algo)
     validation_path = getattr(args, "validation_dataset_path", None)
     validation_loader = getattr(args, "validation_dataset_loader_fn", None)
-    if algorithm.name != "sft" and (
+    # SFT and OPD both support held-out evaluation. --shuffle stays
+    # SFT-only because OPD samples online and has no fixed batch order.
+    if algorithm.name not in {"sft", "opd"} and (
         validation_path
         or validation_loader
-        or getattr(args, "shuffle", False)
         or getattr(args, "eval_before_step", False)
         or getattr(args, "eval_interval", 50) != 50
         or getattr(args, "eval_batches", None) is not None
     ):
-        raise click.UsageError("validation datasets and --shuffle currently require --algo sft")
+        raise click.UsageError("validation datasets currently require --algo sft or --algo opd")
+    if algorithm.name != "sft" and getattr(args, "shuffle", False):
+        raise click.UsageError("--shuffle currently requires --algo sft")
     if validation_loader and not validation_path:
         raise click.UsageError("--validation-dataset-loader-fn requires --validation-dataset-path")
     if getattr(args, "eval_interval", 50) < 1:
@@ -370,6 +384,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--tune-max-samples must be positive")
     if (
         algorithm.requires_rollout
+        and algorithm.requires_reward
         and not (smoke_infer or smoke_train)
         and args.reward_fn_path is None
         and args.reward_ckpt is None
@@ -481,6 +496,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.lam, "--lam")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
+    if algorithm.name == "opd":
+        if not getattr(args, "teacher_ckpt", None) or not str(args.teacher_ckpt).strip():
+            raise click.UsageError("--teacher-ckpt is required for --algo opd")
+        _require_positive_float(args.opd_coef, "--opd-coef")
+        _require_positive_float(args.opd_clip, "--opd-clip")
+        if args.opd_loss_type not in {"pg", "k3"}:
+            raise click.UsageError("--opd-loss-type must be pg or k3")
+        if getattr(args, "opd_teacher_micro_bs", None) is not None and args.opd_teacher_micro_bs < 1:
+            raise click.UsageError("--opd-teacher-micro-bs must be positive")
     _preflight_task_hooks(args, algorithm)
     try:
         config = _trainer_config_from_args(args)
@@ -1159,7 +1183,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             shuffle=getattr(args, "shuffle", False),
         )
     if algorithm.name != "ppo":
-        return PolicyTrainerConfig(
+        # Keep this a static PolicyTrainerConfig(...) call: the
+        # dashboard derives per-flag algorithm applicability by
+        # parsing this function's AST. OPD reuses the same fields.
+        config = PolicyTrainerConfig(
             algo=algorithm.name,
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
@@ -1232,6 +1259,21 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             lora=lora,
             reference_mode=args.reference_mode,
             **runtime_options,
+        )
+        if algorithm.name != "opd":
+            return config
+        return OPDTrainerConfig(
+            **{field.name: getattr(config, field.name) for field in fields(config)},
+            teacher_ckpt=args.teacher_ckpt,
+            opd_coef=args.opd_coef,
+            opd_loss_type=args.opd_loss_type,
+            opd_clip=args.opd_clip,
+            opd_teacher_micro_bs=args.opd_teacher_micro_bs,
+            validation_dataset_path=getattr(args, "validation_dataset_path", None),
+            validation_dataset_loader_fn=getattr(args, "validation_dataset_loader_fn", None),
+            eval_interval=getattr(args, "eval_interval", 50),
+            eval_batches=getattr(args, "eval_batches", None),
+            eval_before_step=getattr(args, "eval_before_step", False),
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -1362,7 +1404,10 @@ def run(trainer_config: TrainerConfig):
         **dataset_options,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
-    if isinstance(trainer_config, SFTTrainerConfig) and trainer_config.validation_dataset_path:
+    if (
+        isinstance(trainer_config, (SFTTrainerConfig, OPDTrainerConfig))
+        and trainer_config.validation_dataset_path
+    ):
         trainer.validation_dataset = _load_dataset_for_training(
             trainer_config.validation_dataset_path,
             dataset_loader_fn=trainer_config.validation_dataset_loader_fn or trainer_config.dataset_loader_fn,
@@ -1756,21 +1801,21 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--shuffle/--no-shuffle", default=False, show_default=True, help="Shuffle SFT training and validation rows."
 )
 @click.option(
-    "--validation-dataset-path", default=None, help="Optional held-out SFT dataset, loaded separately from training."
+    "--validation-dataset-path", default=None, help="Optional held-out evaluation dataset, loaded separately from training."
 )
 @click.option(
     "--validation-dataset-loader-fn", default=None, help="Validation loader; defaults to --dataset-loader-fn."
 )
 @click.option(
-    "--eval-interval", type=int, default=50, show_default=True, help="SFT validation interval in optimizer steps."
+    "--eval-interval", type=int, default=50, show_default=True, help="Held-out evaluation interval in optimizer steps."
 )
 @click.option(
-    "--eval-batches", type=int, default=None, help="Maximum SFT validation batches per evaluation; default: all."
+    "--eval-batches", type=int, default=None, help="Maximum held-out evaluation batches per evaluation; default: all."
 )
 @click.option(
     "--eval-before-step",
     is_flag=True,
-    help="Evaluate before scheduled SFT updates, including the initial and final updates.",
+    help="Evaluate before scheduled updates, including the initial and final updates.",
 )
 @click.option(
     "--adam-bias-correction/--no-adam-bias-correction",
@@ -1807,6 +1852,18 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
 )
+@click.option(
+    "--teacher-ckpt", default=None,
+    help="OPD frozen teacher checkpoint. Must share the student tokenizer."
+)
+@click.option("--opd-coef", type=float, default=1.0, show_default=True,
+              help="OPD distillation loss scale.")
+@click.option("--opd-loss-type", type=click.Choice(["pg", "k3"]), default="pg", show_default=True,
+              help="OPD objective: clipped dense advantage (pg) or low-variance KL (k3).")
+@click.option("--opd-clip", type=float, default=5.0, show_default=True,
+              help="OPD dense-advantage clipping range (pg only).")
+@click.option("--opd-teacher-micro-bs", type=int, default=None,
+              help="OPD teacher scoring microbatch size; defaults to --score-micro-bs.")
 @click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or remote model repo ID.")
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
 @click.option("--save-path", default=None, help="Optional checkpoint output directory.")
