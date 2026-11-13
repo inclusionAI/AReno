@@ -142,6 +142,12 @@ class Backend(ABC):
 
         raise NotImplementedError(f"{type(self).__name__} does not support checkpoint saving")
 
+    def save_training_state(self, ctx: Context, path: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support training state saving")
+
+    def load_training_state(self, ctx: Context, path: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support training state loading")
+
     def export_adapter(self, ctx: Context, path: str) -> str:
         """Persist a standard adapter artifact, or raise when unsupported."""
 
