@@ -158,6 +158,8 @@ class InferenceManager:
         block_size = int(spec.block_size)
         max_cache_len = int(spec.max_cache_len)
         max_blocks_per_seq = int(spec.max_blocks_per_seq)
+        runtime = getattr(getattr(self.worker, "config", None), "runtime", None)
+        exact_capacity = getattr(runtime, "shared_prompt_kv", False)
         self._prepare_actor_onloaded()
         can_reuse_weights = getattr(self.worker, "_can_reuse_rollout_session_infer_weights", None)
         reuse_session_weights = can_reuse_weights() if callable(can_reuse_weights) else False
@@ -169,6 +171,7 @@ class InferenceManager:
                 block_size == self._infer_cache_spec[2]
                 and max_running_seqs <= self._infer_batch_size
                 and num_blocks <= self._infer_cache_blocks - 1
+                and (not exact_capacity or num_blocks == self._infer_cache_blocks - 1)
                 and max_cache_len <= self._max_cache_len
                 and max_blocks_per_seq <= self._max_blocks_per_seq
             ):
@@ -192,6 +195,8 @@ class InferenceManager:
             self._decode_graphs.clear()
             self._decode_graph_skipped_buckets.clear()
             self._decode_graph_init_attempted = False
+            if exact_capacity:
+                self.model.clear_kv_caches()
         self._infer_batch_size = max_running_seqs
         # Recurrent models need their own scratch slot for graph warmup,
         # capture, and padded replay rows.  Real requests exclusively own
@@ -229,6 +234,25 @@ class InferenceManager:
         if self.device.type in {"cuda", "npu"}:
             self._init_decode_graphs()
 
+    def _shared_prompt_kv_enabled(self, payload: RolloutPayload) -> bool:
+        if not getattr(self.config.runtime, "shared_prompt_kv", False):
+            return False
+        reason = None
+        if self.device.type != "cuda" or self.config.tp_size != 1 or self.config.dp_size != 1:
+            reason = "requires single-GPU CUDA"
+        elif self.config.model.model_type != "qwen3" or self.config.model.dtype != torch.bfloat16:
+            reason = "requires Qwen3 dense BF16; recurrent state cloning is unsupported"
+        elif self.config.runtime.rollout_routing_replay:
+            reason = "routing replay is not supported by shared prompt KV"
+        elif payload.prompt_features_by_dp is not None and any(
+            feature is not None for shard in payload.prompt_features_by_dp for feature in shard
+        ):
+            reason = "multimodal/explicit-position features require independent caches"
+        if reason is not None:
+            logger.warning("shared_prompt_kv fallback: %s", reason)
+            return False
+        return True
+
     @torch.inference_mode()
     def infer_rollout(
         self,
@@ -242,6 +266,7 @@ class InferenceManager:
         on rank 0 / `None` elsewhere without touching the model.
         """
         ctx = get_tp_context()
+        state = None
         was_training = self.model.training
         self.model.eval()
         try:
@@ -263,6 +288,8 @@ class InferenceManager:
                 max_prefill_tokens=int(payload.max_prefill_tokens),
                 kv_block_size=int(payload.block_size),
                 num_cache_blocks=int(payload.num_blocks),
+                shared_prompt_kv=self._shared_prompt_kv_enabled(payload),
+                compact_cache=True,
                 prompt_features=payload.prompt_features_by_dp[ctx.dp_rank]
                 if payload.prompt_features_by_dp is not None
                 else None,
@@ -318,6 +345,8 @@ class InferenceManager:
                 return state.to_rollout()
             return None
         finally:
+            if state is not None:
+                state.close()
             if was_training:
                 self.model.train()
             should_drop = getattr(self.worker, "_should_drop_rollout_hbm_after_infer", None)
@@ -653,10 +682,17 @@ class InferenceManager:
 
         if active_rows.numel() == 0:
             return
-        state.ensure_decode_blocks(
+        copies = state.prepare_decode_writes(
             [int(row) for row in active_rows.detach().cpu().tolist()],
             [int(pos) for pos in cache_seqlens.detach().cpu().tolist()],
         )
+        try:
+            if copies:
+                self.model.copy_kv_blocks(copies)
+        except Exception:
+            state.rollback_decode_writes()
+            raise
+        state.commit_decode_writes()
 
     def _cache_reprefill_mask(self, cache_seqlens: torch.Tensor) -> torch.Tensor:
         """Ask the active model whether any cached rows must be rebuilt."""
@@ -726,14 +762,11 @@ class InferenceManager:
     def _block_table_for_active_rows(self, state: InferenceBatchState, active_rows: torch.Tensor) -> torch.Tensor:
         """Build a device block table for the current active rows."""
 
-        rows = []
-        for row in active_rows.detach().cpu().tolist():
-            blocks = state._seq_to_blocks[int(row)]
-            rows.append(blocks + [blocks[-1]] * (state.max_blocks_per_seq - len(blocks)))
-        return torch.tensor(rows, device=self.device, dtype=torch.int32)
+        rows = [int(row) for row in active_rows.detach().cpu().tolist()]
+        return torch.tensor(state.block_table(rows), device=self.device, dtype=torch.int32)
 
     def _recurrent_slots_for_active_rows(self, state: InferenceBatchState, active_rows: torch.Tensor) -> torch.Tensor:
-        slots = [state._seq_to_recurrent_slot[int(row)] for row in active_rows.detach().cpu().tolist()]
+        slots = state.recurrent_slots([int(row) for row in active_rows.detach().cpu().tolist()])
         return torch.tensor(slots, device=self.device, dtype=torch.long)
 
     def _record_decode_progress(
@@ -811,16 +844,11 @@ class InferenceManager:
         if rows.numel() == 0:
             return
         row_ids = [int(row) for row in rows.detach().cpu().tolist()]
-        recurrent_slots = [state._seq_to_recurrent_slot[row] for row in row_ids]
+        recurrent_slots = state.recurrent_slots(row_ids)
         reset_recurrent_slots = getattr(getattr(self.worker, "model", None), "reset_recurrent_cache_slots", None)
         if reset_recurrent_slots is not None:
             reset_recurrent_slots(torch.tensor(recurrent_slots, device=self.device, dtype=torch.long))
-        for row in row_ids:
-            blocks = state._seq_to_blocks.pop(row, None)
-            if blocks:
-                state._free_blocks.extend(blocks)
-            slot = state._seq_to_recurrent_slot.pop(row)
-            state._free_recurrent_slots.append(slot)
+        state.release_sequences(row_ids)
 
     def _admit_pending_rollout_rows(
         self,
@@ -901,7 +929,7 @@ class InferenceManager:
             state.decode_position_deltas(new_rows.detach().cpu().tolist()), device=self.device, dtype=torch.long
         )
         new_position_ids = new_cache_seqlens.to(torch.long) + new_position_deltas
-        new_block_table = prefill.block_table.to(self.device, non_blocking=True).int()
+        new_block_table = self._block_table_for_active_rows(state, new_rows)
         remove = torch.zeros(int(new_rows.numel()), device=self.device, dtype=torch.bool)
         finished = None
         if stop_token_tensor is not None:

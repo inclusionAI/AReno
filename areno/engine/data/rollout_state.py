@@ -36,6 +36,8 @@ class InferenceBatchState:
         kv_block_size: int = 256,
         num_cache_blocks: int | None = None,
         prompt_features: list[dict | None] | None = None,
+        shared_prompt_kv: bool = False,
+        compact_cache: bool = False,
     ):
         """Create rollout state and reserve bookkeeping for paged KV blocks."""
 
@@ -55,7 +57,26 @@ class InferenceBatchState:
         self.kv_block_size = kv_block_size
         self.max_blocks_per_seq = ceil_div(self.max_cache_len, kv_block_size)
         self.num_cache_blocks = num_cache_blocks or self.max_running_seqs * self.max_blocks_per_seq
+        compact_blocks = (
+            self.shared_cache_capacity(
+                prompts, max_new_tokens, self.max_running_seqs, max_prefill_tokens, kv_block_size, self.prompt_features
+            )
+            if shared_prompt_kv and compact_cache
+            else None
+        )
+        self.compact_cache = compact_blocks is not None and compact_blocks < self.num_cache_blocks
+        if self.compact_cache:
+            self.num_cache_blocks = compact_blocks
         self._pending_seq_id = 0
+        self.shared_prompt_kv = shared_prompt_kv
+        self._request_scopes = [0] * len(prompts)
+        self._next_request_scope = 1
+        self._block_refcounts = [0] * self.num_cache_blocks
+        self._readonly_blocks: set[int] = set()
+        self._forkable_prompts: set[int] = set()
+        self._pending_copies: list[tuple[int, int, int, int]] = []
+        self._pending_allocations: list[tuple[int, int]] = []
+        self._pending_write_rows: list[int] = []
         self._free_blocks = list(range(self.num_cache_blocks))
         self._seq_to_blocks: dict[int, list[int]] = {}
         self._free_recurrent_slots = list(range(self.max_running_seqs))
@@ -63,12 +84,32 @@ class InferenceBatchState:
         self._prefill_cursor_by_seq: dict[int, int] = {}
         self._last_active_ids: list[int] = []
 
+    @staticmethod
+    def shared_cache_capacity(prompts, max_new_tokens, max_running_seqs, max_prefill_tokens, block_size, features=None):
+        """Exact capacity for one fixed, homogeneous text-only sample group.
+
+        Other admission patterns retain the conservative pool. Compact pools
+        cannot accept external refills because those were not in the plan.
+        """
+        if not prompts or len(prompts) > max_running_seqs or any(feature is not None for feature in (features or [])):
+            return None
+        prompt = prompts[0]
+        if len(prompt) > max_prefill_tokens or any(row != prompt for row in prompts):
+            return None
+        full = len(prompt) // block_size
+        private = ceil_div(len(prompt) + max_new_tokens, block_size) - full
+        return full + len(prompts) * private
+
     def append_prompts(self, prompts: list[list[int]], prompt_features: list[dict | None] | None = None) -> list[int]:
         """Append newly arrived prompts and return their row ids."""
 
         if not prompts:
             return []
+        if self.compact_cache:
+            raise RuntimeError("compact shared cache cannot accept requests outside its capacity plan")
         start = len(self.prompts)
+        self._request_scopes.extend([self._next_request_scope] * len(prompts))
+        self._next_request_scope += 1
         self.prompts.extend(prompts)
         self.prompt_features.extend(_normalize_prompt_features(prompt_features, len(prompts)))
         self.generated.extend([] for _ in prompts)
@@ -102,7 +143,7 @@ class InferenceBatchState:
         include enough block metadata for the model to write each prompt token
         into its paged KV cache slot.
         """
-        if not self._free_blocks or self._pending_seq_id >= len(self.prompts):
+        if self._pending_seq_id >= len(self.prompts):
             return None
         # Packed prefill layout: `input_ids` and `position_ids` are flat 1-D
         # tensors of total tokens; `cu_seqlens` is the prefix sum boundary
@@ -124,6 +165,8 @@ class InferenceBatchState:
         recurrent_slots: list[int] = []
         active_ids: list[int] = []
         prefill_seq_ids: list[int] = []
+        # Reuse logits only from complete prompts in this forward.
+        leaders: dict[tuple[int, tuple[int, ...]], tuple[int, int]] = {}
 
         while self._pending_seq_id < len(self.prompts):
             seq_id = self._pending_seq_id
@@ -132,6 +175,16 @@ class InferenceBatchState:
             prompt = self.prompts[seq_id]
             if len(prompt) + self.max_new_tokens > self.max_cache_len:
                 raise ValueError("request exceeds configured max_cache_len")
+            identity = (self._request_scopes[seq_id], tuple(prompt)) if self.shared_prompt_kv else None
+            if self.shared_prompt_kv and self.prompt_features[seq_id] is None and identity in leaders:
+                source, sample_index = leaders[identity]
+                self.fork_prompt(source, seq_id)
+                active_ids.append(seq_id)
+                sample_indices.append(sample_index)
+                self._pending_seq_id += 1
+                continue
+            if not self._free_blocks and seq_id not in self._seq_to_blocks:
+                break
             cursor = self._prefill_cursor_by_seq.get(seq_id, 0)
             remaining_budget = self.max_prefill_tokens - len(input_ids)
             if remaining_budget <= 0:
@@ -171,7 +224,7 @@ class InferenceBatchState:
                             prefill_seq_ids,
                         )
                     )
-                blocks.append(self._free_blocks.pop(0))
+                blocks.append(self._allocate_block())
             chunk = prompt[cursor : cursor + chunk_len]
             prefill_seq_ids.append(seq_id)
             input_ids.extend(chunk)
@@ -212,7 +265,10 @@ class InferenceBatchState:
             if cursor >= len(prompt):
                 sample_indices.append(len(input_ids) - 1)
                 active_ids.append(seq_id)
+                if self.shared_prompt_kv and self.prompt_features[seq_id] is None:
+                    leaders[identity] = (seq_id, len(input_ids) - 1)
                 self._prefill_cursor_by_seq.pop(seq_id, None)
+                self._forkable_prompts.add(seq_id)
                 self._pending_seq_id += 1
             else:
                 self._prefill_cursor_by_seq[seq_id] = cursor
@@ -256,6 +312,7 @@ class InferenceBatchState:
         prefill_seq_ids: list[int],
     ) -> dict:
         self._last_active_ids = active_ids
+        self._record_kv_peaks()
         payload = {
             "mode": "prefill",
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
@@ -285,20 +342,159 @@ class InferenceBatchState:
             )
         return payload
 
-    def ensure_decode_blocks(self, seq_ids: list[int], next_positions: list[int]) -> None:
-        """Allocate one decode KV block for rows whose next token starts a block."""
+    def _allocate_block(self) -> int:
+        if not self._free_blocks:
+            raise RuntimeError("paged KV cache exhausted")
+        block = self._free_blocks.pop(0)
+        self._block_refcounts[block] = 1
+        return block
 
-        for seq_id, next_position in zip(seq_ids, next_positions, strict=True):
-            if next_position < 0 or next_position % self.kv_block_size != 0:
-                continue
-            blocks = self._seq_to_blocks.get(int(seq_id))
-            if blocks is None:
-                continue
-            required_blocks = next_position // self.kv_block_size + 1
-            while len(blocks) < required_blocks:
-                if not self._free_blocks:
-                    raise RuntimeError("paged KV cache exhausted during decode")
-                blocks.append(self._free_blocks.pop(0))
+    def _release_block(self, block: int) -> None:
+        if self._block_refcounts[block] <= 0:
+            raise RuntimeError("KV block reference underflow")
+        self._block_refcounts[block] -= 1
+        if self._block_refcounts[block] == 0:
+            self._readonly_blocks.discard(block)
+            self._free_blocks.append(block)
+
+    def fork_prompt(self, source: int, target: int) -> None:
+        """Share a prompt whose final prefill chunk is scheduled before decode."""
+        if target in self._seq_to_blocks:
+            raise ValueError("fork target already owns blocks")
+        if self.prompt_features[source] is not None or self.prompt_features[target] is not None:
+            raise ValueError("shared prompt KV supports text-only inputs")
+        if self._request_scopes[source] != self._request_scopes[target] or self.prompts[source] != self.prompts[target]:
+            raise ValueError("fork requires identical prompts in one request scope")
+        if source not in self._forkable_prompts:
+            raise ValueError("cannot fork an incomplete or already decoded prompt")
+        if not self._free_recurrent_slots:
+            raise RuntimeError("sequence slots exhausted during fork")
+        blocks = list(self._seq_to_blocks[source])
+        if len(blocks) != ceil_div(len(self.prompts[source]), self.kv_block_size):
+            raise ValueError("fork source must contain only prompt blocks")
+        for block in blocks:
+            self._block_refcounts[block] += 1
+        self._readonly_blocks.update(blocks)
+        self._seq_to_blocks[target] = blocks
+        self._forkable_prompts.add(target)
+        self._seq_to_recurrent_slot[target] = self._free_recurrent_slots.pop(0)
+
+    def prepare_decode_writes(self, seq_ids: list[int], next_positions: list[int]) -> list[tuple[int, int]]:
+        """Reserve COW destinations; the executor must copy then commit mappings."""
+        if self._pending_write_rows:
+            raise RuntimeError("uncommitted KV writes")
+        if len(set(seq_ids)) != len(seq_ids):
+            raise ValueError("duplicate decode sequence")
+        try:
+            for seq_id, position in zip(seq_ids, next_positions, strict=True):
+                blocks = self._seq_to_blocks.get(seq_id)
+                if blocks is None or position < 0:
+                    continue
+                if position < len(self.prompts[seq_id]):
+                    raise ValueError("decode cannot overwrite prompt KV")
+                self._pending_write_rows.append(seq_id)
+                column = position // self.kv_block_size
+                while len(blocks) <= column:
+                    block = self._allocate_block()
+                    blocks.append(block)
+                    self._pending_allocations.append((seq_id, block))
+                source = blocks[column]
+                pending_releases = sum(copy[2] == source for copy in self._pending_copies)
+                if self._block_refcounts[source] - pending_releases > 1:
+                    target = self._allocate_block()
+                    self._pending_copies.append((seq_id, column, source, target))
+        except Exception:
+            self.rollback_decode_writes()
+            raise
+        self._record_kv_peaks()
+        return [(source, target) for _, _, source, target in self._pending_copies]
+
+    def commit_decode_writes(self) -> None:
+        """Publish mappings after copies are enqueued on the decode stream."""
+        for seq_id, column, source, target in self._pending_copies:
+            self._seq_to_blocks[seq_id][column] = target
+            self._release_block(source)
+        self._pending_copies.clear()
+        self._pending_allocations.clear()
+        for row in self._pending_write_rows:
+            length = len(self.prompts[row])
+            if length % self.kv_block_size:
+                tail = self._seq_to_blocks[row][length // self.kv_block_size]
+                if self._block_refcounts[tail] == 1:
+                    self._readonly_blocks.discard(tail)
+        self._record_kv_peaks()
+        self._forkable_prompts.difference_update(self._pending_write_rows)
+        self._pending_write_rows.clear()
+
+    def rollback_decode_writes(self) -> None:
+        """Return reserved COW destinations, preserving source mappings."""
+        for _, _, _, target in self._pending_copies:
+            self._release_block(target)
+        self._pending_copies.clear()
+        for seq_id, block in reversed(self._pending_allocations):
+            allocated = self._seq_to_blocks[seq_id].pop()
+            if allocated != block:
+                raise RuntimeError("KV allocation rollback order mismatch")
+            self._release_block(block)
+        self._pending_allocations.clear()
+        self._pending_write_rows.clear()
+
+    def ensure_decode_blocks(self, seq_ids: list[int], next_positions: list[int]) -> None:
+        """Compatibility entry for independent caches that need no GPU copies."""
+        copies = self.prepare_decode_writes(seq_ids, next_positions)
+        if copies:
+            self.rollback_decode_writes()
+            raise RuntimeError("shared tails require prepare/execute/commit decode writes")
+        self.commit_decode_writes()
+
+    def recurrent_slots(self, seq_ids: list[int]) -> list[int]:
+        return [self._seq_to_recurrent_slot[row] for row in seq_ids if row in self._seq_to_recurrent_slot]
+
+    def block_table(self, seq_ids: list[int]) -> list[list[int]]:
+        return [_pad_blocks(self._seq_to_blocks[row], self.max_blocks_per_seq) for row in seq_ids]
+
+    def release_sequences(self, seq_ids: list[int]) -> None:
+        """Release ownership once; repeated completion/cancellation is safe."""
+        if self._pending_write_rows:
+            raise RuntimeError("cannot release sequences with uncommitted KV writes")
+        for row in seq_ids:
+            for block in self._seq_to_blocks.pop(row, []):
+                self._release_block(block)
+            slot = self._seq_to_recurrent_slot.pop(row, None)
+            if slot is not None:
+                self._free_recurrent_slots.append(slot)
+            self._prefill_cursor_by_seq.pop(row, None)
+            self._forkable_prompts.discard(row)
+
+    def kv_block_counts(self) -> dict[str, int]:
+        """Physical occupancy; mixed prompt/response tail pages count as tails."""
+        complete, tails, response = set(), set(), set()
+        for row, blocks in self._seq_to_blocks.items():
+            full, remainder = divmod(len(self.prompts[row]), self.kv_block_size)
+            complete.update(blocks[:full])
+            if remainder and len(blocks) > full:
+                tails.add(blocks[full])
+            response.update(blocks[full + bool(remainder) :])
+        return {
+            "prompt_blocks": len(complete),
+            "tail_blocks": len(tails),
+            "response_blocks": len(response),
+            "cow_reserved_blocks": len(self._pending_copies),
+            "used_blocks": sum(ref > 0 for ref in self._block_refcounts),
+            "free_blocks": len(self._free_blocks),
+        }
+
+    def _record_kv_peaks(self) -> None:
+        if self.shared_prompt_kv:
+            for name, count in self.kv_block_counts().items():
+                if name != "free_blocks":
+                    key = f"kv/{name}_peak"
+                    self.metrics[key] = max(self.metrics.get(key, 0.0), float(count))
+
+    def close(self) -> None:
+        """Release all ownership, including partially executed copy plans."""
+        self.rollback_decode_writes()
+        self.release_sequences(list(self._seq_to_blocks))
 
     def build_cache_reprefill_payload(
         self,
@@ -332,6 +528,8 @@ class InferenceBatchState:
             if not history:
                 raise ValueError("cache re-prefill requires at least one token")
             blocks = self._seq_to_blocks[seq_id]
+            if any(self._block_refcounts[block] > 1 for block in blocks):
+                raise RuntimeError("cannot re-prefill shared prompt blocks")
             if len(blocks) < ceil_div(len(history), self.kv_block_size):
                 raise RuntimeError("cache re-prefill is missing paged KV blocks")
             input_ids.extend(history)

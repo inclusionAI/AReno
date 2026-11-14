@@ -91,7 +91,17 @@ void gemm_row_major(
   float beta = 0.0f;
   cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
   cublasGemmAlgo_t algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
-  TORCH_CUDABLAS_CHECK(cublasGemmEx(
+  // FP32 compute alone still permits BF16 intermediate reductions. Those
+  // change with the token batch shape (e.g. shared versus repeated prefill).
+  // Keep reductions in FP32 and restore the thread-local PyTorch handle.
+  cublasMath_t previous_math;
+  const bool strict_bf16 = a_type == CUDA_R_16BF;
+  if (strict_bf16) {
+    TORCH_CUDABLAS_CHECK(cublasGetMathMode(handle, &previous_math));
+    TORCH_CUDABLAS_CHECK(cublasSetMathMode(
+        handle, static_cast<cublasMath_t>(previous_math | CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)));
+  }
+  auto status = cublasGemmEx(
       handle,
       op_a,
       op_b,
@@ -110,7 +120,11 @@ void gemm_row_major(
       c_type,
       static_cast<int>(ldc),
       compute_type,
-      algo));
+      algo);
+  if (strict_bf16) {
+    TORCH_CUDABLAS_CHECK(cublasSetMathMode(handle, previous_math));
+  }
+  TORCH_CUDABLAS_CHECK(status);
 }
 
 void maybe_add_bias(torch::Tensor output, torch::Tensor bias) {

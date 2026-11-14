@@ -466,6 +466,15 @@ class Qwen3ForCausalLM(nn.Module):
             caches.append((k_cache, v_cache))
         return caches
 
+    @torch.no_grad()
+    def copy_kv_blocks(self, copies: list[tuple[int, int]]) -> None:
+        """Copy all layers on the current stream before publishing block tables."""
+        for layer in self.layers:
+            attention = layer.self_attn
+            for source, target in copies:
+                attention.k_cache[target].copy_(attention.k_cache[source])
+                attention.v_cache[target].copy_(attention.v_cache[source])
+
     def clear_kv_caches(self) -> None:
         for layer in self.layers:
             layer.self_attn.clear_kv_cache()

@@ -360,6 +360,8 @@ class ArenoWorker:
         send_empty_requests()
 
         def refill_waiting(state) -> list[int]:
+            if getattr(state, "compact_cache", False):
+                return []
             new_prompt_indices: list[int] = []
             while True:
                 cmd = self._next_refill_command()

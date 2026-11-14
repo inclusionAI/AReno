@@ -62,6 +62,7 @@ class RuntimeConfig:
     """Runtime allocation config for rollout decode and device graphs."""
 
     kv_block_size: int = 256
+    shared_prompt_kv: bool = False
     attn_backend: Literal["flash", "native"] = "flash"
     compile_model: bool = True
     activation_checkpointing: bool = True
