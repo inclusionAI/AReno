@@ -158,6 +158,8 @@ class InferenceManager:
         block_size = int(spec.block_size)
         max_cache_len = int(spec.max_cache_len)
         max_blocks_per_seq = int(spec.max_blocks_per_seq)
+        runtime = getattr(getattr(self.worker, "config", None), "runtime", None)
+        exact_capacity = getattr(runtime, "shared_prompt_kv", False)
         self._prepare_actor_onloaded()
         can_reuse_weights = getattr(self.worker, "_can_reuse_rollout_session_infer_weights", None)
         reuse_session_weights = can_reuse_weights() if callable(can_reuse_weights) else False
@@ -169,7 +171,7 @@ class InferenceManager:
                 block_size == self._infer_cache_spec[2]
                 and max_running_seqs <= self._infer_batch_size
                 and num_blocks <= self._infer_cache_blocks - 1
-                and (not getattr(self.config.runtime, "shared_prompt_kv", False) or num_blocks == self._infer_cache_blocks - 1)
+                and (not exact_capacity or num_blocks == self._infer_cache_blocks - 1)
                 and max_cache_len <= self._max_cache_len
                 and max_blocks_per_seq <= self._max_blocks_per_seq
             ):
@@ -193,7 +195,7 @@ class InferenceManager:
             self._decode_graphs.clear()
             self._decode_graph_skipped_buckets.clear()
             self._decode_graph_init_attempted = False
-            if getattr(self.config.runtime, "shared_prompt_kv", False):
+            if exact_capacity:
                 self.model.clear_kv_caches()
         self._infer_batch_size = max_running_seqs
         # Recurrent models need their own scratch slot for graph warmup,
