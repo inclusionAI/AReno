@@ -37,6 +37,7 @@ class InferenceBatchState:
         num_cache_blocks: int | None = None,
         prompt_features: list[dict | None] | None = None,
         shared_prompt_kv: bool = False,
+        compact_cache: bool = False,
     ):
         """Create rollout state and reserve bookkeeping for paged KV blocks."""
 
@@ -56,6 +57,16 @@ class InferenceBatchState:
         self.kv_block_size = kv_block_size
         self.max_blocks_per_seq = ceil_div(self.max_cache_len, kv_block_size)
         self.num_cache_blocks = num_cache_blocks or self.max_running_seqs * self.max_blocks_per_seq
+        compact_blocks = (
+            self.shared_cache_capacity(
+                prompts, max_new_tokens, self.max_running_seqs, max_prefill_tokens, kv_block_size, self.prompt_features
+            )
+            if shared_prompt_kv and compact_cache
+            else None
+        )
+        self.compact_cache = compact_blocks is not None and compact_blocks < self.num_cache_blocks
+        if self.compact_cache:
+            self.num_cache_blocks = compact_blocks
         self._pending_seq_id = 0
         self.shared_prompt_kv = shared_prompt_kv
         self._request_scopes = [0] * len(prompts)
@@ -73,11 +84,29 @@ class InferenceBatchState:
         self._prefill_cursor_by_seq: dict[int, int] = {}
         self._last_active_ids: list[int] = []
 
+    @staticmethod
+    def shared_cache_capacity(prompts, max_new_tokens, max_running_seqs, max_prefill_tokens, block_size, features=None):
+        """Exact capacity for one fixed, homogeneous text-only sample group.
+
+        Other admission patterns retain the conservative pool. Compact pools
+        cannot accept external refills because those were not in the plan.
+        """
+        if not prompts or len(prompts) > max_running_seqs or any(feature is not None for feature in (features or [])):
+            return None
+        prompt = prompts[0]
+        if len(prompt) > max_prefill_tokens or any(row != prompt for row in prompts):
+            return None
+        full = len(prompt) // block_size
+        private = ceil_div(len(prompt) + max_new_tokens, block_size) - full
+        return full + len(prompts) * private
+
     def append_prompts(self, prompts: list[list[int]], prompt_features: list[dict | None] | None = None) -> list[int]:
         """Append newly arrived prompts and return their row ids."""
 
         if not prompts:
             return []
+        if self.compact_cache:
+            raise RuntimeError("compact shared cache cannot accept requests outside its capacity plan")
         start = len(self.prompts)
         self._request_scopes.extend([self._next_request_scope] * len(prompts))
         self._next_request_scope += 1
