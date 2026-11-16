@@ -1,0 +1,20 @@
+examples/jev/qas_business/continue_raw.py
+  s_8f3ffcad83368e::t_2ebbd585e5f2fd 25,35-53,58-65,81-99,113-119,132-138
+  s_8f3ffcad83368e::t_7189fb2752c313 1-24,26-34,54-57,66-80,100-112,120-131,139-154
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c75cb47e1b12e8402ddb88056096b0948389844d",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
