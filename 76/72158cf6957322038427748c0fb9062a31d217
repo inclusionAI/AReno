@@ -1,0 +1,23 @@
+examples/jev/qas_business/finish.py
+  s_8f3ffcad83368e::t_c7b2bb182f3e06 13,53-56
+examples/jev/qas_business/preflight.py
+  s_8f3ffcad83368e::t_3f7da93b2fae80 64-75
+examples/jev/qas_business/run.py
+  s_8f3ffcad83368e::t_0ba8e57106bc58 64-73,156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7672158cf6957322038427748c0fb9062a31d217",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
