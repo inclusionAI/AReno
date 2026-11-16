@@ -1,0 +1,20 @@
+examples/jev/qas_business/clean_qas.py
+  s_8f3ffcad83368e::t_29c346714defd2 156-159,161-168
+  s_8f3ffcad83368e::t_100a435476c0a8 133,147-155,160,243-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "344d14b4b618e915de8df737d15591fc81947949",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
