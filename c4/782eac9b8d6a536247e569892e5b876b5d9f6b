@@ -1,0 +1,26 @@
+examples/jev/qas_business/eval_checkpoint.py
+  s_8f3ffcad83368e::t_1573e39b313c0f 37-41,63-67,121-122
+  s_8f3ffcad83368e::t_954ed736a78c34 13,23-36,42-44,54,68-70,82-83,119-120,123-131
+examples/jev/qas_business/intermediate_eval.py
+  s_8f3ffcad83368e::t_954ed736a78c34 1-34,38-56,84-103
+  s_8f3ffcad83368e::t_1573e39b313c0f 35-37,57-83
+tests/test_qas_business_cpu.py
+  s_8f3ffcad83368e::t_954ed736a78c34 203-215,224-231
+  s_8f3ffcad83368e::t_1573e39b313c0f 216-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c4782eac9b8d6a536247e569892e5b876b5d9f6b",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
