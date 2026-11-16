@@ -1,0 +1,21 @@
+examples/jev/modal/assets.py
+  s_8f3ffcad83368e::t_37605b88728b86 13,26,37,49
+examples/jev/modal/prepare_cpu.py
+  s_8f3ffcad83368e::t_37605b88728b86 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ffc2ea546b65fd20f142c23913d58f22c78cbb63",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
