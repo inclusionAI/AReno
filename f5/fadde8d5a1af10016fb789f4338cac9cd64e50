@@ -1,0 +1,21 @@
+tests/test_qas_business_cpu.py
+  s_8f3ffcad83368e::t_09d58152922241 160-164
+examples/jev/qas_business/clean_qas.py
+  s_8f3ffcad83368e::t_09d58152922241 16,41,60-64,66-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f5fadde8d5a1af10016fb789f4338cac9cd64e50",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
