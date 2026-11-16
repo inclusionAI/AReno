@@ -1,0 +1,23 @@
+tests/test_ling_continuation_data_cpu.py
+  s_8f3ffcad83368e::t_3f9caf4fe2a633 105-134
+examples/jev/prepare_ling_continuation.py
+  s_8f3ffcad83368e::t_109100dad04c71 113-124,126-156,158-160,164-169,226,373-374
+  s_8f3ffcad83368e::t_0f065a34cd38c7 157,161-163
+  s_8f3ffcad83368e::t_96e622920efabd 125,301-319,344-351,368
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ce40eea322606a418725635dbf76a846bebb41e1",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
