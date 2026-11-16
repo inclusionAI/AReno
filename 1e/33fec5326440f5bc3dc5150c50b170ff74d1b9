@@ -1,0 +1,25 @@
+examples/jev/modal/benchmark.py
+  s_8f3ffcad83368e::t_dbe641e7249a3f 1-116
+examples/jev/modal/deploy.py
+  s_8f3ffcad83368e::t_c9bc290f62510f 1-113
+examples/jev/modal/merge_label_weights.py
+  s_8f3ffcad83368e::t_65f80d0543305a 1-202
+examples/jev/modal/service.py
+  s_8f3ffcad83368e::t_8ab6ac1fb73555 1-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1e33fec5326440f5bc3dc5150c50b170ff74d1b9",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
