@@ -1,0 +1,28 @@
+examples/jev/prepare_ling_continuation.py
+  s_8f3ffcad83368e::t_f135c2c88dd959 77-79,180
+  s_8f3ffcad83368e::t_b54c0e999d708a 1-18,21-66,68-76,80-89,95-122,126-139,144-170,174-179,185-201,209-218,234-240,245,253-261,272-281,291-300,309-312,322-323,335-344,347-351,365-367,438,459-478,482-486
+  s_8f3ffcad83368e::t_44df2bec5fea0c 19-20,67,90-94,140-143,171-173,181-184,202-208,219-233,241-244,250-252,262-271,282-290,301-308,313-321,324-334,345-346,352-364,368-437,439-458,479-481
+  s_8f3ffcad83368e::t_c4899ad0757da7 123-125,246-249
+examples/jev/README.ling-continuation.md
+  s_8f3ffcad83368e::t_f135c2c88dd959 1-60
+tests/test_ling_continuation_data_cpu.py
+  s_8f3ffcad83368e::t_44df2bec5fea0c 17-31,66-70,76
+  s_8f3ffcad83368e::t_c4899ad0757da7 58,77
+  s_8f3ffcad83368e::t_f135c2c88dd959 1-16,32-57,59-65,71-75,78-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "507f96daca22b358124a8d65769188aa9ff40e9a",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
