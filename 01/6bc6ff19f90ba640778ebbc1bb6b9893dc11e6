@@ -1,0 +1,24 @@
+tests/test_qas_business_cpu.py
+  s_8f3ffcad83368e::t_61f3ac85cbb1d4 260-270,280-287
+  s_8f3ffcad83368e::t_3853f61c29dd24 271-279
+examples/jev/qas_business/weighted_continue.py
+  s_8f3ffcad83368e::t_3853f61c29dd24 67-69,86-89,93-111,116-127,132-141,143-165,170-190,193-199,203-205,212,240-265
+  s_8f3ffcad83368e::t_61f3ac85cbb1d4 1-66,70-85,90-92,112-115,128-131,142,166-169,191-192,200-202,206-211,213-221,229-239,266-270
+  s_8f3ffcad83368e::t_569fa6ea2227df 222-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "016bc6ff19f90ba640778ebbc1bb6b9893dc11e6",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
