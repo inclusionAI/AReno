@@ -1,0 +1,24 @@
+examples/jev/qas_business/hard_control.py
+  s_8f3ffcad83368e::t_25f35c6eba0d46 1-80,100-118
+  s_8f3ffcad83368e::t_f567c31bed47db 81-99
+examples/jev/qas_business/eval_checkpoint.py
+  s_8f3ffcad83368e::t_e0a0b2075379f9 17-22,38
+tests/test_qas_business_cpu.py
+  s_8f3ffcad83368e::t_e0a0b2075379f9 98-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "384505865312229425c89a69fe8ffaca6c5400fb",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
