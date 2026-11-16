@@ -1,0 +1,23 @@
+examples/jev/modal/bench_client.py
+  s_8f3ffcad83368e::t_54457b88347214 1-96
+examples/jev/modal/benchmark.py
+  s_8f3ffcad83368e::t_79906f3373ec89 67,73,112
+examples/jev/modal/service.py
+  s_8f3ffcad83368e::t_93b118cfdbc5f4 10,99-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "53b48416170f3fdbca28f3bd1d9a5649b6119ffd",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
