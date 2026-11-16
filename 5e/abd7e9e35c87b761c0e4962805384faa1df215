@@ -1,0 +1,21 @@
+examples/jev/qas_business/live.html
+  s_8f3ffcad83368e::t_6ba7c915e44c6c 1-18
+examples/jev/qas_business/live_server.py
+  s_8f3ffcad83368e::t_7d1835a2fe95a8 1-81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "5eabd7e9e35c87b761c0e4962805384faa1df215",
+  "prompts": {},
+  "sessions": {
+    "s_8f3ffcad83368e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e236-6fa4-7bc2-b022-35225ced25bd",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
