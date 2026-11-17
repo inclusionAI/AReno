@@ -93,18 +93,23 @@ def encode_question(state, question, tokenizer, *, target=None, max_seq_len=4096
     }
 
 
-def training_row(encoded, *, temperature=1.0):
+def training_row(encoded, *, temperature=1.0, bi_attn=False):
     if not math.isfinite(temperature) or temperature <= 0 or encoded["target"] is None:
         raise ValueError("training needs a target and finite positive temperature")
     return TrainSequence(
         tokens=encoded["prompt_token_ids"],
         features={
-            "label_jev": {"ids": encoded["label_token_ids"], "target": encoded["target"], "temperature": temperature}
+            "label_jev": {
+                "ids": encoded["label_token_ids"],
+                "target": encoded["target"],
+                "temperature": temperature,
+                "bi_attn": bi_attn,
+            }
         },
     )
 
 
-def save_protocol(path, tokenizer, *, temperature, max_seq_len):
+def save_protocol(path, tokenizer, *, temperature, max_seq_len, bi_attn=False):
     destination = Path(path)
     destination.mkdir(parents=True, exist_ok=True)
     metadata = {
@@ -114,6 +119,8 @@ def save_protocol(path, tokenizer, *, temperature, max_seq_len):
         "temperature": temperature,
         "max_seq_len": max_seq_len,
         "truncation": "reject",
+        "bi_attn": bool(bi_attn),
+        "attention_scope": "full_attention_only",
         "thinking": False,
         "choice": "A–Z in criteria insertion order",
         "noul": {"yes": "true", "no": "false"},
@@ -122,6 +129,11 @@ def save_protocol(path, tokenizer, *, temperature, max_seq_len):
         "resume": "adapter weights only; optimizer/RNG/data cursor not restored",
     }
     (destination / "label_jev_config.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    config_path = destination / "config.json"
+    if config_path.exists():
+        config = json.loads(config_path.read_text())
+        config.get("text_config", config)["is_causal"] = not bi_attn
+        config_path.write_text(json.dumps(config, indent=2) + "\n")
 
 
 def corpus_record(row):

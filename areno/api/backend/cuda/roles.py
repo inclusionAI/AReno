@@ -437,6 +437,14 @@ class RoleManager:
         microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
+            if payload.label_token_ids_by_dp is not None:
+                from areno.api.jev.labels.cuda import score_prompt_labels
+
+                labels = payload.label_token_ids_by_dp[get_tp_context().dp_rank][start : start + microbatch_size]
+                local.extend(
+                    score_prompt_labels(model, rows, labels, device=self.worker.device, bi_attn=payload.bi_attn)
+                )
+                continue
             row_features = features[start : start + microbatch_size] if features is not None else None
             row_routes = routed_experts[start : start + microbatch_size] if routed_experts is not None else None
             data_pack, lengths = _pack_score_rows(

@@ -48,6 +48,12 @@ Inputs, dataset loader, the algorithm and run length, and device counts.
    ``--algo label_jev``. Uses the existing LM head without a scalar decision
    head. See :doc:`../concepts/jev`.
 
+``--bi-attn / --no-bi-attn``
+   With ``--sgl-jev`` (or ``--algo label_jev``), enable bidirectional full
+   attention on CUDA or MLX; linear/recurrent and sliding-window layers stay
+   unchanged. The checkpoint records this mode and restores it on resume.
+   Existing checkpoints default to causal attention.
+
 ``--ckpt TEXT``
    Actor model/tokenizer checkpoint path or remote model repo ID.
 

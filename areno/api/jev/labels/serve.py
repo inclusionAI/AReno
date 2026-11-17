@@ -70,6 +70,7 @@ class LabelDecisionScorer:
         quantization_group_size=64,
         attn_backend="native",
         eager_decode=True,
+        bi_attn=None,
     ):
         from areno.api.models import BackendType
         from areno.api.tokenizer import load_tokenizer
@@ -81,6 +82,9 @@ class LabelDecisionScorer:
         metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
         if metadata and (metadata.get("format") != "areno-label-jev-v1" or metadata.get("prompt_version") != 1):
             raise ValueError("unsupported LM-label JEV checkpoint protocol")
+        from areno.api.jev.labels.attention import resolve_bi_attn
+
+        self.bi_attn = resolve_bi_attn(metadata_root, bi_attn)
         self.temperature = float(metadata.get("temperature", 1.0))
         self.max_seq_len = int(metadata.get("max_seq_len", 4096))
         if not math.isfinite(self.temperature) or self.temperature <= 0:
@@ -120,14 +124,21 @@ class LabelDecisionScorer:
 
     def label_logprobs(self, encoded):
         if self.engine is not None:
-            sequences = [encoded["prompt_token_ids"] + [label] for label in encoded["label_token_ids"]]
             rows = self.engine.score_logprobs(
-                "actor", sequences, pad_token_id=self.tokenizer.pad_token_id or 0, microbatch_size=1
+                "actor",
+                [encoded["prompt_token_ids"]],
+                pad_token_id=self.tokenizer.pad_token_id or 0,
+                microbatch_size=1,
+                label_token_ids=[encoded["label_token_ids"]],
+                bi_attn=self.bi_attn,
             )
-            return [row[-1] for row in rows]
+            return rows[0]
         import mlx.core as mx
 
-        logits = self.model(mx.array([encoded["prompt_token_ids"]]))
+        from areno.api.jev.labels.mlx import prompt_logits
+
+        ids = mx.array([encoded["prompt_token_ids"]])
+        logits = prompt_logits(self.model, ids, [len(encoded["prompt_token_ids"])], bi_attn=self.bi_attn)
         logits = logits.logits if hasattr(logits, "logits") else logits
         logits = logits[0, -1].astype(mx.float32)
         logprobs = logits[mx.array(encoded["label_token_ids"])] - mx.logsumexp(logits)
@@ -183,6 +194,7 @@ def create_label_decision_app(
     quantization_group_size=64,
     attn_backend="native",
     eager_decode=True,
+    bi_attn=None,
     scorer_factory=None,
 ):
     factory = scorer_factory or LabelDecisionScorer
@@ -203,6 +215,7 @@ def create_label_decision_app(
                     quantization_group_size=quantization_group_size,
                     attn_backend=attn_backend,
                     eager_decode=eager_decode,
+                    bi_attn=bi_attn,
                 ),
             )
             yield

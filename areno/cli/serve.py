@@ -380,6 +380,7 @@ def create_app(
     base_model_name_or_path: str | None = None,
     decision_checkpoint: str | None = None,
     sgl_jev: bool = False,
+    bi_attn: bool | None = None,
     mlx_quantize_bits: int | None = None,
     mlx_quantize_group_size: int = 64,
 ) -> FastAPI:
@@ -398,6 +399,8 @@ def create_app(
         if backend_type != MLX:
             raise ValueError("--q4 requires --backend mlx")
         validate_quantization(mlx_quantize_bits, mlx_quantize_group_size)
+    if bi_attn is not None and not sgl_jev:
+        raise ValueError("--bi-attn requires --sgl-jev")
     if sgl_jev:
         if backend_type not in {BackendType.CUDA, BackendType.MLX}:
             raise ValueError("--sgl-jev serving requires CUDA or MLX")
@@ -417,6 +420,7 @@ def create_app(
             quantization_group_size=mlx_quantize_group_size,
             attn_backend=attn_backend,
             eager_decode=eager_decode,
+            bi_attn=bi_attn,
         )
     if decision_checkpoint is not None:
         if backend_type == MLX and (tp_size != 1 or world_size != 1):
@@ -1131,6 +1135,9 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     help="JEV checkpoint containing LoRA, decision head and calibration; serves typed decisions.",
 )
 @click.option(
+    "--bi-attn/--no-bi-attn", default=None, help="LM-label full attention; reload checkpoint mode by default."
+)
+@click.option(
     "--sgl-jev",
     is_flag=True,
     help="Serve LM-label JEV decisions using the training prompt and original LM head (CUDA/MLX).",
@@ -1159,6 +1166,7 @@ def serve_command(
     lora_adapter_path: str | None,
     decision_checkpoint: str | None,
     sgl_jev: bool,
+    bi_attn: bool | None,
     q4: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
@@ -1212,6 +1220,7 @@ def serve_command(
         base_model_name_or_path=base_model_name_or_path,
         decision_checkpoint=decision_checkpoint,
         sgl_jev=sgl_jev,
+        bi_attn=bi_attn,
         mlx_quantize_bits=4 if q4 else None,
         mlx_quantize_group_size=64,
     )

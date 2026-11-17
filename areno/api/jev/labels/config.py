@@ -19,11 +19,16 @@ class LabelJevTrainerConfig(TrainerConfig):
     label_temperature: float = 1.0
     seed: int = 17
     data_start_index: int = 0
+    bi_attn: bool | None = None
 
     def __post_init__(self):
         import math
 
         TrainerConfig.__post_init__(self)
+        from areno.api.jev.labels.attention import resolve_bi_attn
+
+        metadata_root = self.lora.adapter_path if self.lora is not None and self.lora.adapter_path else self.ckpt
+        self.bi_attn = resolve_bi_attn(metadata_root, self.bi_attn)
         if self.seed is None:
             self.seed = 17
         if self.data_start_index < 0:

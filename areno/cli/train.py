@@ -86,6 +86,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "algo",
             "sgl_jev",
+            "bi_attn",
             "backend",
             "ckpt",
             "base_model_name_or_path",
@@ -254,6 +255,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         if args.algo not in {"gspo", "jev", "label_jev"}:
             raise click.UsageError("--sgl-jev cannot be combined with another training algorithm")
         args.algo = "label_jev"
+    if getattr(args, "bi_attn", None) is not None and args.algo != "label_jev":
+        raise click.UsageError("--bi-attn requires --sgl-jev or --algo label_jev")
     backend = getattr(args, "backend", None)
     if backend is None:
         from areno.api.config import default_backend_type
@@ -1130,7 +1133,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         if algorithm.name == "label_jev":
             from areno.api.jev.labels.config import LabelJevTrainerConfig
 
-            return LabelJevTrainerConfig(**{field.name: getattr(config, field.name) for field in fields(config)})
+            return LabelJevTrainerConfig(
+                **{field.name: getattr(config, field.name) for field in fields(config)},
+                bi_attn=getattr(args, "bi_attn", None),
+            )
         if algorithm.name == "jev":
             from areno.api.jev import JevTrainerConfig
 
@@ -1741,6 +1747,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Run a registered training algorithm with the areno backend.",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
+@click.option(
+    "--bi-attn/--no-bi-attn",
+    default=None,
+    help="Use bidirectional full attention for LM-label JEV prompts; reload saved mode by default.",
+)
 @click.option(
     "--sgl-jev",
     is_flag=True,
