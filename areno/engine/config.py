@@ -12,6 +12,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 from typing import Any, Literal
 
 import torch
@@ -437,7 +438,7 @@ def flash_attention_unsupported_model_reason(model: ModelConfig) -> str | None:
 
 
 def flash_attention_unsupported_gpu_reason(devices: list[int] | None = None) -> str | None:
-    """Return a user-facing reason when visible GPUs cannot run flash-attn."""
+    """Return a reason when visible GPUs lack flash-attn hardware or its optional package."""
 
     if not torch.cuda.is_available():
         return None
@@ -458,9 +459,11 @@ def flash_attention_unsupported_gpu_reason(devices: list[int] | None = None) -> 
         except Exception:
             name = f"cuda:{device}"
         unsupported.append(f"{name} cc {major}.{minor}")
-    if not unsupported:
-        return None
-    return ", ".join(unsupported)
+    if unsupported:
+        return ", ".join(unsupported)
+    if find_spec("flash_attn") is None:
+        return "optional flash-attn package is not installed; install with bash scripts/install.sh --flash"
+    return None
 
 
 def torch_compile_unsupported_gpu_reason(model: ModelConfig, devices: list[int] | None = None) -> str | None:

@@ -81,6 +81,43 @@ def _mlx_report(tmp_path: str) -> dict:
 
 
 class CliDiagnosticsTest(unittest.TestCase):
+    def test_npu_collection_never_probes_cuda(self):
+        torch = types.SimpleNamespace(npu=types.SimpleNamespace(is_available=lambda: True, device_count=lambda: 2))
+        with (
+            patch.object(diagnostics.platform, "system", return_value="Linux"),
+            patch.object(diagnostics, "find_spec", return_value=object()),
+            patch.object(diagnostics, "_dependency_info", return_value={"imported": True}),
+            patch.object(diagnostics, "import_module", return_value=torch),
+            patch.object(diagnostics, "_torch_info", side_effect=AssertionError("CUDA probe")),
+        ):
+            report = diagnostics.collect_env()
+        self.assertEqual(report["npu"]["device_count"], 2)
+        self.assertNotIn("cuda", report)
+        self.assertIn("areno.accel._areno_accel_npu", report["dependencies"])
+
+    def test_npu_ready_and_missing_extension_without_cuda_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = _ready_report(tmp)
+            for key in ("torch", "cuda", "gpus"):
+                del report[key]
+            report["npu"] = {"available": True, "device_count": 1, "error": None}
+            report["dependencies"] = {
+                name: {"imported": True, "error": None, "version": "test"}
+                for name in ("torch", "torch_npu", "fla", "areno.accel._areno_accel_npu")
+            }
+            with patch.object(diagnostics, "collect_env", return_value=report):
+                result = CliRunner().invoke(main, ["check"])
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("NPU availability", result.output)
+                self.assertNotIn("CUDA", result.output)
+                env = CliRunner().invoke(main, ["env"])
+                self.assertEqual(env.exit_code, 0, env.output)
+                self.assertIn("Backend: NPU", env.output)
+                report["dependencies"]["areno.accel._areno_accel_npu"].update(imported=False, error="missing")
+                failed = CliRunner().invoke(main, ["check"])
+                self.assertEqual(failed.exit_code, 1)
+                self.assertIn("bash scripts/install.sh", failed.output)
+
     def test_mlx_ready_without_torch_or_cuda(self):
         with tempfile.TemporaryDirectory() as tmp:
             for machine in ("arm64", "aarch64"):
@@ -106,7 +143,7 @@ class CliDiagnosticsTest(unittest.TestCase):
                     self.assertEqual(result.exit_code, 1)
                     self.assertIn(f"FAIL {name} import", result.output)
                     self.assertIn("ImportError: broken dependency", result.output)
-                    self.assertIn("python -m pip install -e .", result.output)
+                    self.assertIn("bash scripts/install.sh", result.output)
                     self.assertNotIn("CUDA", result.output)
 
     def test_mlx_vlm_missing_warns_for_multimodal_support(self):
