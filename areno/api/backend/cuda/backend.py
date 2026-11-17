@@ -535,6 +535,10 @@ class CudaBackend(Backend):
                     raise ValueError("label JEV initially requires TP=1")
                 pack.pop("features", None)
                 pack["_label_questions"] = label_features
+                modes = {bool(feature.get("bi_attn", False)) for feature in label_features}
+                if len(modes) != 1:
+                    raise ValueError("cannot mix causal and bidirectional label rows")
+                pack["_bi_attn"] = modes.pop()
             packs.append(pack)
             if is_sft:
                 sft_target_counts.append(sft_target_token_count(seqs))

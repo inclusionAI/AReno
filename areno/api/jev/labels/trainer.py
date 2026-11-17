@@ -64,7 +64,13 @@ class LabelJevTrainer:
 
             def save(path):
                 self.instance.save_checkpoint(str(path))
-                save_protocol(path, tokenizer, temperature=config.label_temperature, max_seq_len=config.max_seq_len)
+                save_protocol(
+                    path,
+                    tokenizer,
+                    temperature=config.label_temperature,
+                    max_seq_len=config.max_seq_len,
+                    bi_attn=config.bi_attn,
+                )
                 (Path(path) / "label_jev_cursor.json").write_text(
                     json.dumps(
                         {
@@ -101,6 +107,11 @@ class LabelJevTrainer:
                                         temperature=config.label_temperature,
                                     )
                                 )
+                        for row in rows:
+                            if isinstance(row.features, dict) and "label_jev" in row.features:
+                                row.features["label_jev"]["bi_attn"] = config.bi_attn
+                            elif config.bi_attn:
+                                raise ValueError("bidirectional training rows require label_jev features")
                         result = self.instance.train(
                             rows,
                             self.loss_fn,

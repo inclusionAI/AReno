@@ -73,6 +73,10 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
         softmax_scale: float | None = None,
     ) -> torch.Tensor:
         call = build_attention_call(q, k, v, window_size, softmax_scale)
+        # Sliding attention and recurrent/linear layers keep their existing semantics.
+        causal = not (getattr(meta, "bi_attn", False) and call.window_size == (-1, -1))
+        if not causal and use_native_attention(self.attn_backend, call.q):
+            return call.trim_value_dim(_bidirectional_train(call.q, call.k, call.v, meta, call.softmax_scale))
         if use_native_attention(self.attn_backend, call.q):
             use_kernel = q.device.type == "npu" or (self.native_train_matches_rollout and q.is_cuda)
             native_fn = _native_train_areno if use_kernel else _native_train
@@ -100,7 +104,7 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
                 cu_seqlens_k=meta.cu_seqlens,
                 max_seqlen_q=meta.max_seqlen,
                 max_seqlen_k=meta.max_seqlen,
-                causal=True,
+                causal=causal,
                 window_size=flat_call.window_size,
                 softmax_scale=flat_call.softmax_scale,
             )
@@ -113,7 +117,7 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
             call.q,
             call.k,
             call.v,
-            causal=True,
+            causal=causal,
             window_size=call.window_size,
             softmax_scale=call.softmax_scale,
         )
@@ -318,3 +322,31 @@ def _causal_window_mask(
     if window_size[0] >= 0:
         mask = mask & (cols >= rows - int(window_size[0]))
     return mask.view(1, 1, q_len, k_len)
+
+
+def _bidirectional_train(q, k, v, meta, softmax_scale):
+    """Full prompt SDPA, isolated by packed boundaries and bounded query chunks."""
+
+    def sequence(qi, ki, vi):
+        ki = expand_kv_heads(ki, qi.shape[-2])
+        vi = expand_kv_heads(vi, qi.shape[-2])
+        qs, ks, vs = (x.transpose(0, 1).unsqueeze(0) for x in (qi, ki, vi))
+        with _sdpa_math_kernel():
+            chunks = [
+                F.scaled_dot_product_attention(
+                    qs[:, :, start : start + _SDPA_MATH_QUERY_CHUNK],
+                    ks,
+                    vs,
+                    is_causal=False,
+                    scale=softmax_scale,
+                )
+                for start in range(0, qi.shape[0], _SDPA_MATH_QUERY_CHUNK)
+            ]
+        return torch.cat(chunks, dim=2).squeeze(0).transpose(0, 1)
+
+    if meta.cu_seqlens is not None:
+        cu = meta.cu_seqlens.detach().cpu().tolist()
+        qf, kf, vf = (x.reshape(-1, x.shape[-2], x.shape[-1]) for x in (q, k, v))
+        out = torch.cat([sequence(qf[a:b], kf[a:b], vf[a:b]) for a, b in zip(cu[:-1], cu[1:], strict=True) if b > a])
+        return out.reshape(q.shape[0], q.shape[1], q.shape[2], v.shape[-1])
+    return torch.stack([sequence(qi, ki, vi) for qi, ki, vi in zip(q, k, v, strict=True)])

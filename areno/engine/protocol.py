@@ -141,6 +141,8 @@ class ScorePayload:
     pad_token_id: int
     routing_replay_by_dp: list[list[torch.Tensor]] | None = None
     microbatch_size: int = 8
+    label_token_ids_by_dp: list[list[list[int]]] | None = None
+    bi_attn: bool = False
 
 
 @dataclass(slots=True)

@@ -569,6 +569,8 @@ class ArenoEngine:
         features: list[dict[str, Any] | None] | None = None,
         routed_experts: list[object] | None = None,
         microbatch_size: int = 8,
+        label_token_ids: list[list[int]] | None = None,
+        bi_attn: bool = False,
     ) -> list[list[float]]:
         """Score fixed token rows with a model role.
 
@@ -577,6 +579,17 @@ class ArenoEngine:
         split across DP ranks; only rank 0's merged result is returned.
         """
 
+        if bi_attn and label_token_ids is None:
+            raise ValueError("bidirectional scoring requires prompt-only rows and label_token_ids")
+        if label_token_ids is not None:
+            if self.config.tp_size != 1 or role != "actor":
+                raise ValueError("label scoring currently requires TP=1 and actor role")
+            if len(label_token_ids) != len(token_rows):
+                raise ValueError("label_token_ids must match prompt rows")
+            if features is not None or routed_experts is not None:
+                raise ValueError("label scoring does not accept multimodal features or routing replay")
+            if any(not ids or min(ids) < 0 or len(ids) != len(set(ids)) for ids in label_token_ids):
+                raise ValueError("label IDs must be nonnegative, nonempty and unique")
         if not token_rows:
             return []
         if features is not None and len(features) != len(token_rows):
@@ -594,6 +607,10 @@ class ArenoEngine:
                     split_list_by_dp(routed_experts, int(self.config.dp_size)) if routed_experts is not None else None
                 ),
                 microbatch_size=int(microbatch_size),
+                label_token_ids_by_dp=(
+                    split_list_by_dp(label_token_ids, int(self.config.dp_size)) if label_token_ids is not None else None
+                ),
+                bi_attn=bi_attn,
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))
