@@ -2,8 +2,9 @@ FROM nvcr.io/nvidia/pytorch:25.09-py3
 
 SHELL ["/bin/bash", "-lc"]
 
-ARG TRANSFORMERS_VERSION=4.56.2
 ARG PIP_INDEX_URL=https://pypi.org/simple
+# Explicit targets are required because docker build has no visible GPU.
+ARG TORCH_CUDA_ARCH_LIST="9.0"
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -13,18 +14,6 @@ ENV PIP_NO_CACHE_DIR=1 \
 RUN apt-get update && \
         apt-get install -y --no-install-recommends git && \
         rm -rf /var/lib/apt/lists/*
-
-RUN python -m pip install --index-url "${PIP_INDEX_URL}" --upgrade pip setuptools wheel packaging ninja
-
-RUN python -m pip install --index-url "${PIP_INDEX_URL}" \
-        "psutil" \
-        "transformers==${TRANSFORMERS_VERSION}" \
-        "datasets==4.0.0" \
-        "einops" \
-        "safetensors>=0.4" \
-        "accelerate" \
-        "tqdm>=4.66" \
-        "math-verify"
 
 ARG ARENO_REPO_URL=https://github.com/inclusionAI/AReno.git
 ARG ARENO_BRANCH=__local__
@@ -38,6 +27,6 @@ RUN if [[ "${ARENO_BRANCH}" != "__local__" ]]; then \
         git clone --depth 1 --branch "${ARENO_BRANCH}" "${ARENO_REPO_URL}" /workspace/areno; \
     fi
 
-RUN python -m pip install -e . --no-build-isolation
+RUN PYTHON="$(command -v python)" bash scripts/install.sh --build-only
 
 CMD ["/bin/bash"]

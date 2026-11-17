@@ -7,6 +7,8 @@ on:
     paths:
       - "areno/**"
       - "tests/**"
+      - "scripts/**/*.sh"
+      - "requirements/**"
       - "examples/agentic/pi/**"
       - "pyproject.toml"
       - ".github/workflows/cpu_unit_tests.yml"
@@ -16,6 +18,8 @@ on:
     paths:
       - "areno/**"
       - "tests/**"
+      - "scripts/**/*.sh"
+      - "requirements/**"
       - "examples/agentic/pi/**"
       - "pyproject.toml"
       - ".github/workflows/cpu_unit_tests.yml"
@@ -45,6 +49,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Test Shell installer (offline)
+        run: bash tests/test_install_shell.sh "$PWD"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
