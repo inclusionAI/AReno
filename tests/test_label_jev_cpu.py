@@ -238,3 +238,53 @@ def test_label_cursor_preserves_suffix_after_batch_size_change_cpu(tmp_path):
     config.data_start_index = 12
     with pytest.raises(ValueError, match="question count"):
         LabelJevTrainer(config, instance=sdk, dataset=dataset, reward_fn=None, loss_fn=None)
+
+
+class PairTokenizer(Tokenizer):
+    def get_added_vocab(self):
+        return {"<assistant>": 0}
+
+    def apply_chat_template(self, messages, **kwargs):
+        return messages[-1]["content"] + "<assistant>"
+
+    def encode(self, text, **kwargs):
+        content, separator, suffix = text.partition("<assistant>")
+        if separator:
+            return super().encode(content, **kwargs) + [0] + self.encode(suffix, **kwargs)
+        if len(text) == 2 and text.isascii() and text.isalpha() and text.isupper() and text != "AA":
+            return [256 + (ord(text[0]) - ord("A")) * 26 + ord(text[1]) - ord("A")]
+        return super().encode(text, **kwargs)
+
+
+@pytest.mark.parametrize("count", [26, 27, 255])
+def test_choice_width_and_order_cpu(count):
+    tokenizer = PairTokenizer()
+    names = [f"option-{i}" for i in reversed(range(count))]
+    question = {"type": "choice", "criteria": dict.fromkeys(names, "")}
+    encoded = encode_question("state", question, tokenizer, target=names[-1])
+    assert encoded["names"] == names
+    assert len(set(encoded["label_token_ids"])) == count
+    assert encoded["labels"][0] == ("A" if count == 26 else "AB")
+    assert all(
+        tokenizer.encode("<assistant>" + label) == [0, token_id]
+        for label, token_id in zip(encoded["labels"], encoded["label_token_ids"], strict=True)
+    )
+    assert training_row(encoded).features["label_jev"]["target"] == [0.0] * (count - 1) + [1.0]
+
+
+def test_choice_width_errors_cpu():
+    question = {"type": "choice", "criteria": {str(i): "" for i in range(256)}}
+    with pytest.raises(ValueError, match="2–255"):
+        encode_question("state", question, PairTokenizer())
+    del question["criteria"]["255"]
+    with pytest.raises(ValueError, match="isolated chat answer suffix"):
+        encode_question("state", question, Tokenizer())
+
+    class SplitPairs(PairTokenizer):
+        def encode(self, text, **kwargs):
+            if "<assistant>" not in text:
+                return Tokenizer.encode(self, text, **kwargs)
+            return super().encode(text, **kwargs)
+
+    with pytest.raises(ValueError, match="support only 26"):
+        encode_question("state", question, SplitPairs())

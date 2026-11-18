@@ -4,12 +4,15 @@ import hashlib
 import json
 import math
 import string
+from itertools import product
 from pathlib import Path
 
 from areno.api.models import TrainSequence
 
 ENGINE_REVISION = "297e54fd105e974cdf401e5b4d20253a22c16f90"
 PROMPT_VERSION = 1
+MAX_CHOICE_OPTIONS = 255
+_PAIR_LABELS = tuple(a + b for a, b in product(string.ascii_uppercase, repeat=2))
 
 
 def render_text(value):
@@ -22,14 +25,73 @@ def render_text(value):
     )
 
 
-def render_question(state, question):
+def _chat_prompt(tokenizer, content, system):
+    messages = [{"role": "system", "content": system}] if system is not None else []
+    messages.append({"role": "user", "content": content})
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+
+
+def _label_context(tokenizer, prompt, ids):
+    # Match SGLang: an added token isolates the short answer suffix from the input.
+    get_added_vocab = getattr(tokenizer, "get_added_vocab", None)
+    added_tokens = {token_id: token for token, token_id in get_added_vocab().items()} if get_added_vocab else {}
+    for index in range(len(ids) - 1, -1, -1):
+        token = added_tokens.get(ids[index])
+        if token is not None:
+            position = prompt.rfind(token)
+            if position >= 0:
+                suffix = prompt[position + len(token) :]
+                suffix_ids = ids[index + 1 :]
+                if tokenizer.encode(suffix, add_special_tokens=False) == suffix_ids:
+                    return suffix, suffix_ids
+            break
+    return None
+
+
+def _label_token_id(tokenizer, text, ids, label):
+    extended = tokenizer.encode(text + label, add_special_tokens=False)
+    if len(extended) == len(ids) + 1 and extended[:-1] == ids:
+        return extended[-1]
+    return None
+
+
+def _pair_labels(tokenizer, count, system):
+    if tokenizer is None:
+        raise ValueError("choice with more than 26 options requires a tokenizer")
+    contexts = []
+    for message in ("x", "y"):
+        prompt = _chat_prompt(tokenizer, message, system)
+        ids = tokenizer.encode(prompt, add_special_tokens=False)
+        contexts.append(_label_context(tokenizer, prompt, ids))
+    context, other = contexts
+    if context is None or context != other:
+        raise ValueError(
+            "choice with more than 26 options requires an isolated chat answer suffix after an added token"
+        )
+
+    text, ids = context
+    labels, seen = [], set()
+    for label in _PAIR_LABELS:
+        token_id = _label_token_id(tokenizer, text, ids, label)
+        if token_id is not None and token_id not in seen:
+            labels.append(label)
+            seen.add(token_id)
+            if len(labels) == count:
+                return labels
+    raise ValueError(
+        f"choice has {count} options, but this tokenizer and chat template support only {max(26, len(labels))}"
+    )
+
+
+def render_question(state, question, *, tokenizer=None, system=None):
     kind, criteria = question["type"], question.get("criteria")
     text = render_text(question.get("instructions"))
     if kind == "choice":
         names = list(criteria)
-        if not 2 <= len(names) <= 26:
-            raise ValueError("choice requires 2–26 options")
-        labels = list(string.ascii_uppercase[: len(names)])
+        count = len(names)
+        if not 2 <= count <= MAX_CHOICE_OPTIONS:
+            raise ValueError(f"choice requires 2–{MAX_CHOICE_OPTIONS} options")
+        labels = list(string.ascii_uppercase[:count]) if count <= 26 else _pair_labels(tokenizer, count, system)
         lines = [f"Question: {text}"] if text.strip() else []
         for label, name in zip(labels, names, strict=True):
             detail = render_text(criteria[name])
@@ -56,21 +118,26 @@ def render_question(state, question):
 
 
 def encode_question(state, question, tokenizer, *, target=None, max_seq_len=4096, system=None):
-    content, names, labels = render_question(state, question)
-    messages = [{"role": "system", "content": system}] if system is not None else []
-    messages.append({"role": "user", "content": content})
-    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    content, names, labels = render_question(state, question, tokenizer=tokenizer, system=system)
+    prompt = _chat_prompt(tokenizer, content, system)
     ids = tokenizer.encode(prompt, add_special_tokens=False)
     if not ids or len(ids) > max_seq_len:
         raise ValueError(
             "prompt exceeds max_seq_len; v1 rejects truncation to preserve all options and answer boundary"
         )
-    label_ids = []
+    text, prefix_ids = prompt, ids
+    if question["type"] == "choice" and len(labels) > 26:
+        context = _label_context(tokenizer, prompt, ids)
+        if context is None:
+            raise ValueError("choice with more than 26 options requires an isolated chat answer suffix")
+        text, prefix_ids = context
+    label_ids, seen = [], set()
     for label in labels:
-        extended = tokenizer.encode(prompt + label, add_special_tokens=False)
-        if len(extended) != len(ids) + 1 or extended[:-1] != ids or extended[-1] in label_ids:
+        token_id = _label_token_id(tokenizer, text, prefix_ids, label)
+        if token_id is None or token_id in seen:
             raise ValueError(f"label {label!r} must add one distinct token at the answer boundary")
-        label_ids.append(extended[-1])
+        label_ids.append(token_id)
+        seen.add(token_id)
     if target is None:
         distribution = None
     elif isinstance(target, dict):
@@ -122,7 +189,7 @@ def save_protocol(path, tokenizer, *, temperature, max_seq_len, bi_attn=False):
         "bi_attn": bool(bi_attn),
         "attention_scope": "full_attention_only",
         "thinking": False,
-        "choice": "A–Z in criteria insertion order",
+        "choice": "A–Z up to 26; tokenizer-supported two-letter labels in criteria insertion order up to 255",
         "noul": {"yes": "true", "no": "false"},
         "score": "0–9 in level order",
         "chat_template_sha256": hashlib.sha256(tokenizer.chat_template.encode()).hexdigest(),

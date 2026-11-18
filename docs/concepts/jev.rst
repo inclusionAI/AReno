@@ -13,9 +13,12 @@ For SGLang-compatible label-token scoring through the original LM head,
 use ``train/serve --sgl-jev``. That mode uses CUDA or MLX, reads label-token
 logits through the pretrained LM head, and trains label-only cross-entropy.
 It accepts raw request/target JSONL; oversized prompts are rejected. Choice
-uses A–Z, noul uses yes/no, and score uses 0–9. Exported LoRA adapters may be
-merged with model-compatible tools for native SGLang serving. It does not use
-the scalar head described below.
+uses A–Z for up to 26 options. For 27–255 options, it uses the same ordered
+single-token letter pairs as SGLang's ``/v1/systemone``. The actual limit
+also depends on how many distinct pairs the tokenizer can encode at the
+chat answer boundary. Noul uses yes/no and score uses 0–9. Exported LoRA
+adapters may be merged with model-compatible tools for native SGLang
+serving. This mode uses the original LM head.
 
 Objective and backbone updates
 ------------------------------
