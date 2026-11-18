@@ -35,6 +35,10 @@ class MetricReduction(str, Enum):
 
 LOGP_METRIC_WEIGHT = "_logp_metric_weight"
 
+# OPD k3 bounds only the exponent input, never the loss output.
+OPD_K3_DELTA_MIN = -20.0
+OPD_K3_DELTA_MAX = 5.0
+
 _FIRST_MICROBATCH_METRICS = frozenset({TrainMetric.RATIO_MEAN, TrainMetric.RATIO_STD})
 _TOKEN_WEIGHTED_METRICS = frozenset(
     {
@@ -174,6 +178,8 @@ __all__ = [
     "LOGP_METRIC_WEIGHT",
     "metric_reduction",
     "MetricReduction",
+    "OPD_K3_DELTA_MAX",
+    "OPD_K3_DELTA_MIN",
     "reduce_microbatch_metrics",
     "train_microbatches",
     "train_sequence_ids",

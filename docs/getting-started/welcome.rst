@@ -9,7 +9,7 @@ AReno documentation
      <div class="areno-hero-copy">
        <p class="areno-eyebrow">Local post-training and serving</p>
        <h1>Train and serve local LLMs with one native loop.</h1>
-       <p class="areno-lede">AReno keeps rollout, reward scoring, inference, optimizer steps, and checkpoint I/O in one compact engine for SFT, DPO, GSPO, GRPO, PPO, and agentic RL workflows.</p>
+       <p class="areno-lede">AReno keeps rollout, reward scoring, inference, optimizer steps, and checkpoint I/O in one compact engine for SFT, DPO, GSPO, GRPO, PPO, OPD, and agentic RL workflows.</p>
        <div class="areno-hero-actions" aria-label="Primary documentation links">
         <a class="areno-button areno-button-primary" href="installation.html">Get started</a>
         <a class="areno-button" href="../cli/training.html">Train a model</a>
@@ -54,7 +54,7 @@ Core workflows
     <a class="areno-doc-card" href="../cli/training.html">
        <span class="areno-icon">01</span>
        <strong>Train</strong>
-       <p>Run SFT, DPO, GSPO, GRPO, or PPO from the CLI with dataset loading, rollout, reward scoring, and checkpoint saving in one loop.</p>
+       <p>Run SFT, DPO, GSPO, GRPO, PPO, or OPD from the CLI with dataset loading, rollout, reward scoring, and checkpoint saving in one loop.</p>
      </a>
     <a class="areno-doc-card" href="../cli/inference.html">
        <span class="areno-icon">02</span>
@@ -160,6 +160,6 @@ What AReno owns
    <div class="areno-layer-list">
      <div><span>Kernels</span><p>Fused <code>areno_accel</code> CUDA paths on Linux and native MLX execution on Apple Silicon.</p></div>
      <div><span>Engine</span><p>Backend-native KV/cache layout, rollout state, scoring, optimizer steps, continuous batching, and checkpoint I/O.</p></div>
-     <div><span>Algorithms</span><p>SFT, DPO, GSPO, GRPO, PPO, and agentic rollouts implemented inside the project rather than delegated to a separate trainer framework.</p></div>
+     <div><span>Algorithms</span><p>SFT, DPO, GSPO, GRPO, PPO, OPD, and agentic rollouts implemented inside the project rather than delegated to a separate trainer framework.</p></div>
      <div><span>Checkpoints</span><p>Hugging Face-oriented CUDA checkpoints and native MLX checkpoints with tokenizer and processor assets.</p></div>
    </div>

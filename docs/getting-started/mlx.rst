@@ -62,11 +62,12 @@ The CLI selects MLX automatically; there is no backend flag:
      --mini-bs 1 \
      --max-running-prompts 8
 
-MLX supports the built-in SFT, DPO, GRPO, GSPO, and PPO trainer paths. It runs
-in one process on the Mac's unified-memory device, so tensor/data parallelism,
-CUDA device lists, a separate rollout device partition, NCCL policy sync,
-CUDA graphs, and FlashAttention selection do not apply. The CLI normalizes its
-default ``world-size`` and ``tp-size`` values to one on MLX; when specifying
+MLX supports the built-in SFT, DPO, GRPO, GSPO, PPO, and OPD trainer paths. OPD
+also keeps a frozen ``teacher`` model resident, since MLX does not offload model
+roles. It runs in one process on the Mac's unified-memory device, so tensor/data
+parallelism, CUDA device lists, a separate rollout device partition, NCCL policy
+sync, CUDA graphs, and FlashAttention selection do not apply. The CLI normalizes
+its default ``world-size`` and ``tp-size`` values to one on MLX; when specifying
 them explicitly, use ``--world-size 1 --tp-size 1``.
 
 ``--mini-bs`` has the same meaning on both backends: it is the number of
