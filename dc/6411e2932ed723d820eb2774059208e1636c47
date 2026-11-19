@@ -1,0 +1,31 @@
+areno/api/algorithms.py
+  s_6e0866bb649c5a::t_c8b4eec34cb6bf 276-287,289-296
+areno/api/backend/cuda/backend.py
+  s_6e0866bb649c5a::t_9a02aeaa30b4c0 105
+areno/api/jev/labels/direct.py
+  s_6e0866bb649c5a::t_78f2486701c77a 1-57
+areno/api/jev/labels/rl.py
+  s_6e0866bb649c5a::t_94d69b3760ae40 130-131,138,140,146-147,151,153-160,201,209-210,213-223
+areno/cli/train.py
+  s_6e0866bb649c5a::t_72ca9f2e59fed6 258-259,1071,1133,1136-1137
+tests/test_label_jev_rl_cpu.py
+  s_6e0866bb649c5a::t_2af135d77293bc 148-179
+tests/test_train_cli_config_cpu.py
+  s_6e0866bb649c5a::t_d6768111605389 1278-1290
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "dc6411e2932ed723d820eb2774059208e1636c47",
+  "prompts": {},
+  "sessions": {
+    "s_6e0866bb649c5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e39a-3142-7493-a4d8-fbd757d0bb3a",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
