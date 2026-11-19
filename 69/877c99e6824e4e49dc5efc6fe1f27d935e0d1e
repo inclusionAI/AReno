@@ -1,0 +1,23 @@
+areno/api/jev/labels/config.py
+  s_6e0866bb649c5a::t_c968ddcce8b0b8 58
+docs/cookbook/jev/capability-rl.md
+  s_6e0866bb649c5a::t_40b586825fdc16 20-21,59
+tests/test_label_jev_rl_cpu.py
+  s_6e0866bb649c5a::t_60c9a5d4765e8e 114,121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "69877c99e6824e4e49dc5efc6fe1f27d935e0d1e",
+  "prompts": {},
+  "sessions": {
+    "s_6e0866bb649c5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e39a-3142-7493-a4d8-fbd757d0bb3a",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
