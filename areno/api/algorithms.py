@@ -261,7 +261,27 @@ def _load_label_jev_trainer() -> type:
     return LabelJevTrainer
 
 
+def _load_dense_label_jev_trainer():
+    from areno.api.jev.labels.dense import DenseLabelJevTrainer
+
+    return DenseLabelJevTrainer
+
+
+def sgl_jev_dense_loss_fn(data_pack, logits):
+    from areno.api.jev.labels.dense import dense_label_jev_loss
+
+    return dense_label_jev_loss(data_pack, logits)
+
+
 def _register_builtin_algorithms() -> None:
+    register_algorithm(
+        AlgorithmSpec(
+            name="sgl-jev-dense",
+            trainer_cls=_load_dense_label_jev_trainer,
+            default_loss_fn=sgl_jev_dense_loss_fn,
+            requires_rollout=False,
+        )
+    )
     register_algorithm(
         AlgorithmSpec(
             name="label_jev",

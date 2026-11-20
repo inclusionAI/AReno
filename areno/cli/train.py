@@ -86,6 +86,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "algo",
             "sgl_jev",
+            "dense_reward_weight",
             "bi_attn",
             "backend",
             "ckpt",
@@ -255,8 +256,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         if args.algo not in {"gspo", "jev", "label_jev"}:
             raise click.UsageError("--sgl-jev cannot be combined with another training algorithm")
         args.algo = "label_jev"
-    if getattr(args, "bi_attn", None) is not None and args.algo != "label_jev":
-        raise click.UsageError("--bi-attn requires --sgl-jev or --algo label_jev")
+    if getattr(args, "bi_attn", None) is not None and args.algo not in {"label_jev", "sgl-jev-dense"}:
+        raise click.UsageError("--bi-attn requires --sgl-jev, --algo label_jev, or --algo sgl-jev-dense")
+    if getattr(args, "dense_reward_weight", None) is not None and args.algo != "sgl-jev-dense":
+        raise click.UsageError("--dense-reward-weight requires --algo sgl-jev-dense")
     backend = getattr(args, "backend", None)
     if backend is None:
         from areno.api.config import default_backend_type
@@ -1068,7 +1071,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             reference_mode=args.reference_mode,
             **runtime_options,
         )
-    if algorithm.name in {"sft", "jev", "label_jev"}:
+    if algorithm.name in {"sft", "jev", "label_jev", "sgl-jev-dense"}:
         config = TrainerConfig(
             algo=algorithm.name,
             ckpt=args.ckpt,
@@ -1130,10 +1133,14 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             reference_mode=args.reference_mode,
             **runtime_options,
         )
-        if algorithm.name == "label_jev":
-            from areno.api.jev.labels.config import LabelJevTrainerConfig
+        if algorithm.name in {"label_jev", "sgl-jev-dense"}:
+            from areno.api.jev.labels.config import DenseLabelJevTrainerConfig, LabelJevTrainerConfig
 
-            return LabelJevTrainerConfig(
+            dense_weight = getattr(args, "dense_reward_weight", None)
+            label_config = DenseLabelJevTrainerConfig if algorithm.name == "sgl-jev-dense" else LabelJevTrainerConfig
+            dense_options = {"dense_reward_weight": dense_weight} if dense_weight is not None else {}
+            return label_config(
+                **dense_options,
                 **{field.name: getattr(config, field.name) for field in fields(config)},
                 bi_attn=getattr(args, "bi_attn", None),
             )
@@ -1747,6 +1754,12 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Run a registered training algorithm with the areno backend.",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
+@click.option(
+    "--dense-reward-weight",
+    default=None,
+    type=click.FloatRange(min=0.0),
+    help="Dense reward coefficient for sgl-jev-dense (defaults to 0.1).",
+)
 @click.option(
     "--bi-attn/--no-bi-attn",
     default=None,

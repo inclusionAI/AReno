@@ -48,10 +48,26 @@ Inputs, dataset loader, the algorithm and run length, and device counts.
    ``--algo label_jev``. Uses the existing LM head without a scalar decision
    head. See :doc:`../concepts/jev`.
 
+``--algo sgl-jev-dense``
+   Train CUDA LM-label JEV with teacher cross-entropy and Brier supervision, plus
+   a differentiable Capability proxy. Each question supplies
+   ``capability: {"tier": "standard", "gold": "<candidate name>"}``.
+   Other tiers are ``easy``, ``hard`` and ``judge``. Choice questions may
+   also provide a ``gold_probs`` map. The proxy uses chance-adjusted correct-label
+   probability for choice, a smooth 80% decision gate for noul, and normalized
+   expected-grade error for score. It also rewards probability quality through
+   Brier-style and ranked probability terms. The official score is computed
+   separately by the evaluator.
+
+``--dense-reward-weight FLOAT``
+   For ``--algo sgl-jev-dense``, multiply the proxy reward by this value before
+   subtracting it from teacher cross-entropy plus half the teacher Brier loss.
+   Defaults to 0.1.
+
 ``--bi-attn / --no-bi-attn``
-   With ``--sgl-jev`` (or ``--algo label_jev``), enable bidirectional full
-   attention on CUDA or MLX; linear/recurrent and sliding-window layers stay
-   unchanged. The checkpoint records this mode and restores it on resume.
+   With ``--sgl-jev``, ``--algo label_jev``, or CUDA ``--algo sgl-jev-dense``,
+   enable bidirectional full attention. Linear, recurrent, and sliding-window
+   layers keep their attention behavior. The checkpoint records this mode and restores it on resume.
    Existing checkpoints default to causal attention.
 
 ``--ckpt TEXT``
