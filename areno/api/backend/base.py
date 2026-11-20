@@ -142,6 +142,16 @@ class Backend(ABC):
 
         raise NotImplementedError(f"{type(self).__name__} does not support checkpoint saving")
 
+    def save_optimizer_state(self, ctx: Context, path: str) -> str:
+        """Persist optimizer state for exact resume, or raise when unsupported."""
+
+        raise NotImplementedError(f"{type(self).__name__} does not support optimizer state checkpoints")
+
+    def load_optimizer_state(self, ctx: Context, path: str) -> int:
+        """Restore optimizer state and return the optimizer step, or raise when unsupported."""
+
+        raise NotImplementedError(f"{type(self).__name__} does not support optimizer state checkpoints")
+
     def export_adapter(self, ctx: Context, path: str) -> str:
         """Persist a standard adapter artifact, or raise when unsupported."""
 
