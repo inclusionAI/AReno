@@ -1,0 +1,21 @@
+tests/test_train_cli_config_cpu.py
+  s_7779b565419f0e::t_7107f34b02b24e 198-230,243-247
+tests/test_moe_sequence_parallel_cpu.py
+  s_7779b565419f0e::t_7107f34b02b24e 205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7d61b18983178777ced7a0e750216932ce2d0b4a",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

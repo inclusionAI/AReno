@@ -1,0 +1,21 @@
+scripts/benchmark_recompute_policies_cuda.py
+  s_7779b565419f0e::t_847da66bf9198c 157,244
+  s_7779b565419f0e::t_6e3e2c3d7b8e2f 1-50,60-91,108-109,118-156,158-161,180-184,196-204,210-211,218,232-243,245-270,274-276,280-283,287-291
+  s_7779b565419f0e::t_f54c9f84487ce1 51-59,92-107,110-117,162-179,185-195,205-209,212-217,219-231,271-273,277-279,284-286
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "4cfe9a514763aff9e08592b914b3d2b3481d0dc3",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

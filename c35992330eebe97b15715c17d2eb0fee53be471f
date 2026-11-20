@@ -1,0 +1,36 @@
+areno/models/bailing_v3/model.py
+  s_7779b565419f0e::t_16e834af7b337c 121,1646,1726-1727,1758-1762
+areno/engine/runtime/tokenwise_checkpoint.py
+  s_7779b565419f0e::t_16e834af7b337c 1-39,41-99
+  s_7779b565419f0e::t_eee69e042e9a7b 40
+docs/concepts/selective-recompute.rst
+  s_7779b565419f0e::t_ba4c754b199107 76-93
+tests/test_tokenwise_checkpoint_cpu.py
+  s_7779b565419f0e::t_ba4c754b199107 56-85
+  s_7779b565419f0e::t_c6f29f9e005af4 16,23
+  s_7779b565419f0e::t_e0a1a45fc7e3e8 1,7,12,17-22,24-47,52-53
+tests/test_recompute_config_cpu.py
+  s_7779b565419f0e::t_e0a1a45fc7e3e8 167-168,178,200,202-204,206
+areno/engine/runtime/training_plan.py
+  s_7779b565419f0e::t_e0a1a45fc7e3e8 51-59
+scripts/validate_ling_recompute_config_cuda.py
+  s_7779b565419f0e::t_da83b2ba2e8b8e 35-36,120-162,185-190,235-236,245-246,252-267,284
+areno/engine/runtime/recompute.py
+  s_7779b565419f0e::t_16e834af7b337c 12,15,81-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c35992330eebe97b15715c17d2eb0fee53be471f",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

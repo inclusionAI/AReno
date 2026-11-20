@@ -1,0 +1,19 @@
+scripts/fingerprint_grouped_linear_cuda.py
+  s_7779b565419f0e::t_15c2b49aab5cc0 1-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "28badecfbe8550bade546d0653bc21b115d3738d",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}

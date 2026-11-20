@@ -1,0 +1,19 @@
+scripts/diagnose_mst_replay_cuda.py
+  s_7779b565419f0e::t_96526be475195c 1-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "fdeccb9f2e9acc381e4d6813a73a587bb7d9b04f",
+  "prompts": {},
+  "sessions": {
+    "s_7779b565419f0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19af7-317b-7243-ad04-71dcffa5d9d7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "wufan <wufan@U-6VTRJFJJ-0240.local>"
+    }
+  }
+}
