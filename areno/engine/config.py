@@ -44,6 +44,10 @@ class OptimizerConfig:
     grad_clip_norm: float | None = None
     adam_8bit: bool = False
     adam_4bit: bool = False
+    galore: bool = False
+    galore_rank: int = 128
+    galore_refresh_interval: int = 200
+    galore_alpha: float = 1.0
     paged: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
     unfreeze_multimodal_tower: bool = False
@@ -60,6 +64,14 @@ class OptimizerConfig:
     def __post_init__(self) -> None:
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("optimizer.adam_4bit and optimizer.adam_8bit are mutually exclusive")
+        if self.galore and (self.adam_4bit or self.adam_8bit or self.paged):
+            raise ValueError("optimizer.galore is mutually exclusive with adam_4bit, adam_8bit and paged")
+        if self.galore_rank < 1:
+            raise ValueError("optimizer.galore_rank must be >= 1")
+        if self.galore_refresh_interval < 1:
+            raise ValueError("optimizer.galore_refresh_interval must be >= 1")
+        if self.galore_alpha <= 0.0:
+            raise ValueError("optimizer.galore_alpha must be > 0")
 
 
 @dataclass(slots=True)
