@@ -102,7 +102,7 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev", "sgl-jev-dense"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
             distributed=True,

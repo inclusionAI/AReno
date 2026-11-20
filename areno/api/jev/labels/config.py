@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from areno.api.config import MlxConfig
 from areno.api.trainer_config import TrainerConfig
 
+DEFAULT_DENSE_REWARD_WEIGHT = 0.1
+
 
 @dataclass
 class LabelJevMlxConfig(MlxConfig):
@@ -47,3 +49,22 @@ class LabelJevTrainerConfig(TrainerConfig):
 
         base = TrainerConfig.mlx_config(self)
         return LabelJevMlxConfig(**{field.name: getattr(base, field.name) for field in fields(base)})
+
+
+@dataclass
+class DenseLabelJevTrainerConfig(LabelJevTrainerConfig):
+    """CUDA label training with teacher supervision and a dense reward."""
+
+    dense_reward_weight: float = DEFAULT_DENSE_REWARD_WEIGHT
+
+    def __post_init__(self):
+        import math
+
+        super().__post_init__()
+        if self.backend != "cuda":
+            raise ValueError("sgl-jev-dense currently requires CUDA")
+        if not math.isfinite(self.dense_reward_weight) or self.dense_reward_weight < 0:
+            raise ValueError("dense_reward_weight must be finite and nonnegative")
+        accumulation = self.gradient_accumulation_steps
+        if accumulation is not None and accumulation * self.mini_bs < self.batch_size:
+            raise ValueError("sgl-jev-dense requires one optimizer update per batch")
