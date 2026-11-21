@@ -42,6 +42,12 @@ def _format_gsm8k_record(record: dict) -> dict:
     # GSM8K answers usually include a rationale followed by `#### final`.
     answer = str(record["answer"])
     final = answer.rsplit("####", 1)[-1].strip() if "####" in answer else answer.strip()
+    # SFT target: the full gsm8k reasoning (calculator markers stripped) followed
+    # by the boxed final, matching the chat-template-free ``prompt`` layout used
+    # by ``SFTTrainer`` so the model sees a real thinking + boxed target rather
+    # than a single-token final answer.
+    reasoning = answer.split("####")[0].strip().replace("<<", "").replace(">>", "")
+    sft_response = f"{reasoning}\n\nFinal answer: \\boxed{{{final}}}"
     return {
         "prompt": (
             "Solve the following grade-school math problem. Show your reasoning "
@@ -50,6 +56,7 @@ def _format_gsm8k_record(record: dict) -> dict:
         ),
         "solutions": [final],
         "solution": final,
+        "response": sft_response,
     }
 
 
