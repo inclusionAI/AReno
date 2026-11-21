@@ -13,6 +13,7 @@ from torch import nn
 
 from areno.engine.config import ModelConfig
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
+from areno.engine.layers.attention_backend.kivi import KiviInferBackend, KiviKVCache
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
 from areno.engine.layers.linear import QKVParallelLinear, RowParallelLinear
 from areno.engine.layers.norm import RMSNorm
@@ -72,6 +73,9 @@ class CausalSelfAttention(nn.Module):
         self.infer_backend: FlashAttnInferBackend | None = None
         self.k_cache = torch.tensor([])
         self.v_cache = torch.tensor([])
+        # Opt-in KIVI low-bit cache; replaces k_cache/v_cache when attached.
+        self.kivi_cache: KiviKVCache | None = None
+        self.kivi_backend: KiviInferBackend | None = None
 
     def forward(
         self,
@@ -130,6 +134,12 @@ class CausalSelfAttention(nn.Module):
     def forward_infer(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, infer_meta: InferMeta) -> torch.Tensor:
         """Run inference attention against the per-layer paged KV cache."""
 
+        if self.kivi_cache is not None:
+            if self.kivi_backend is None:
+                self.kivi_backend = KiviInferBackend(self.attn_backend)
+            out = self.kivi_backend(q, k, v, self.kivi_cache, infer_meta)
+            out = out.contiguous().view(q.shape[0], q.shape[1], self.local_heads * self.head_dim)
+            return self.o_proj(out)
         if self.k_cache.numel() == 0 or self.v_cache.numel() == 0:
             raise RuntimeError("inference requires per-layer KV cache tensors")
         # Lazy backend init so the FlashAttention functions are only bound when
@@ -146,9 +156,16 @@ class CausalSelfAttention(nn.Module):
         self.k_cache = k_cache
         self.v_cache = v_cache
 
+    def set_kivi_cache(self, cache: KiviKVCache) -> None:
+        """Attach a KIVI low-bit cache owned by the runtime."""
+
+        self.kivi_cache = cache
+
     def clear_kv_cache(self) -> None:
         """Detach KV-cache buffers and the cached inference backend."""
 
         self.k_cache = torch.tensor([])
         self.v_cache = torch.tensor([])
         self.infer_backend = None
+        self.kivi_cache = None
+        self.kivi_backend = None
