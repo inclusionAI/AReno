@@ -179,3 +179,48 @@ ______________________________________________________________________
 - New / unstable algorithms enter `areno/experimental/` first and graduate to `api/` once stable.
 - A new model family is a directory under `areno/models/<family>/` registered through `areno/models/registry.py` -- no core changes needed.
 - Runtime-critical paths use areno-owned code in `areno/engine` and `areno/accel`, not third-party runtime deps.
+
+______________________________________________________________________
+
+## Greppability conventions for new seams
+
+New protocol boundaries should be discoverable with one exact `rg` query. Name
+symbols for the capability they own, not only for their structural role:
+
+| Role | Pattern | Future rollout example | Future weight-sync example |
+| --- | --- | --- | --- |
+| Protocol | `<Capability>Protocol` | `RolloutEngineProtocol` | `WeightSyncProtocol` |
+| Configuration | `<Capability>Config` | `RolloutEngineConfig` | `WeightSyncConfig` |
+| Per-operation context | `<Capability>Context` | `RolloutEngineContext` | `WeightSyncContext` |
+| Registry entry/spec | `<Capability>Spec` | `RolloutEngineSpec` | `WeightSyncSpec` |
+
+- Avoid standalone names such as `Protocol`, `Config`, `Context`, `Entry`, or
+  `Registry` when the owning capability can be named.
+- Use the same capability stem across its protocol, config, context, spec,
+  resolver, tests, and documentation. A reviewer should be able to run, for
+  example, `rg "WeightSync"` and find the complete seam.
+- Prefer a specific resolver name such as `resolve_rollout_engine` over generic
+  helpers such as `resolve` or `get_impl`. Registry keys may stay concise for
+  user-facing configuration, but the Python symbols that register and resolve
+  them should remain descriptive.
+- These examples reserve naming patterns only; they do not create APIs or
+  require existing symbols to be renamed.
+
+When documenting a registry-backed capability, show the resolution path in
+this order: **user key -> registration call -> spec/adapter -> resolver ->
+consumer**. Cite the exact symbols and owning files so each hop is searchable.
+Do not replace registry lookup with imports, conditionals, or factory branches
+just to make the path look more direct.
+
+The existing extension model remains authoritative:
+
+- Algorithms continue through `register_algorithm(AlgorithmSpec(...))` in
+  `areno/api/algorithms.py` and are selected by their registered `--algo` key.
+- Model families continue through `register_adapter(...)` in
+  `areno/models/registry.py`; checkpoint resolution selects the registered
+  `ModelAdapter` implementation.
+
+Future rollout-engine and weight-sync seams should follow the same documented
+registry path when they need pluggable implementations. If a seam is not
+pluggable, document its direct owner and call path instead of introducing a
+registry solely for naming symmetry.
