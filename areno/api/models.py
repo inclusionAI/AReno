@@ -70,6 +70,9 @@ class RolloutResult(BaseModel):
 
     sequences: list[RolloutSequence] = Field(default_factory=list)
     adapter_version: int | None = Field(default=None)
+    # Policy weight version the sequences were generated under (distinct from
+    # the adapter registry version above); drives async staleness control.
+    policy_version: int | None = Field(default=None)
 
 
 class TrainSequence(BaseModel):

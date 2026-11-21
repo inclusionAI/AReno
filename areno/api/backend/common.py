@@ -150,6 +150,7 @@ def group_rollout_sequences(
     n_samples: int,
     *,
     adapter_version: int | None = None,
+    policy_version: int | None = None,
 ) -> list[RolloutResult]:
     """Restore a flat prompt-major sequence list to the public result layout."""
 
@@ -160,6 +161,7 @@ def group_rollout_sequences(
         RolloutResult(
             sequences=sequences[start : start + n_samples],
             adapter_version=adapter_version,
+            policy_version=policy_version,
         )
         for start in range(0, expected, n_samples)
     ]
