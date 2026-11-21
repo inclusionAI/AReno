@@ -44,6 +44,8 @@ class Op(Enum):
     ROLLOUT_SESSION_SYNC = auto()
     ROLLOUT_SESSION_END = auto()
     SAVE_CHECKPOINT = auto()
+    SAVE_TRAINING_STATE = auto()
+    LOAD_TRAINING_STATE = auto()
     EXPORT_ADAPTER = auto()
     EXPORT_GGUF = auto()
     POLICY_SYNC_PLAN = auto()

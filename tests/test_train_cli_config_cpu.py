@@ -9,7 +9,13 @@ import pytest
 from click import UsageError, unstyle
 from click.testing import CliRunner
 
-from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
+from areno.api.trainer_config import (
+    DPOTrainerConfig,
+    PolicyTrainerConfig,
+    PPOTrainerConfig,
+    SFTTrainerConfig,
+    TrainerConfig,
+)
 from areno.cli import train as train_cli
 from areno.cli.train import (
     TRAIN_OPTION_GROUPS,
@@ -45,6 +51,20 @@ def test_train_config_validates_model_hub():
 def test_train_config_requires_dataset_loader_for_sft():
     with pytest.raises(UsageError, match="--dataset-loader-fn is required for --algo sft"):
         _trainer_config_from_options(**_options(algo="sft", dataset_loader_fn=None))
+
+
+def test_sft_training_state_cli_options_are_restricted_to_single_cuda_worker():
+    config = _trainer_config_from_options(
+        **_options(algo="sft", backend="cuda", tp_size=1, world_size=1, save_path="output", save_training_state=True)
+    )
+    assert isinstance(config, SFTTrainerConfig)
+    assert config.save_training_state
+    with pytest.raises(UsageError, match="require --algo sft"):
+        _trainer_config_from_options(**_options(algo="gspo", resume_from="snapshot"))
+    with pytest.raises(ValueError, match="one worker"):
+        _trainer_config_from_options(
+            **_options(algo="sft", backend="cuda", tp_size=1, world_size=2, resume_from="snapshot")
+        )
 
 
 def test_train_config_requires_reward_source_for_rollout_algorithms():
