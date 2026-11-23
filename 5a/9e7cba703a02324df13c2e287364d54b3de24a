@@ -1,0 +1,21 @@
+areno/accel/native_delta.py
+  s_96c85c504cbee2::t_ecb7efeab12cc1 67-102,131
+tests/test_native_attention_gpu.py
+  s_96c85c504cbee2::t_6366819a8ffbae 530-531,552-554,564-573
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "5a9e7cba703a02324df13c2e287364d54b3de24a",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
