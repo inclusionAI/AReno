@@ -1,0 +1,27 @@
+areno/accel/kernels/invariant_linear.py
+  s_96c85c504cbee2::t_3fe3c0a9a23010 1-45
+areno/engine/layers/linear.py
+  s_96c85c504cbee2::t_b5e8a52bdac035 316-326
+areno/engine/layers/vocab.py
+  s_96c85c504cbee2::t_19ba7b88bedc32 17,86
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_48becd0603564d 76,165,193-197,986-994,999-1007,1949-1954
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_5f315c3199cc34 1185-1190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6cdd49f7ff5c0dca5b41c6e708876cae9423ee82",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
