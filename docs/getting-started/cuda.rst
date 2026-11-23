@@ -114,8 +114,8 @@ The main CUDA controls are:
    reduce it to lower CPU staging memory or increase it to reduce I/O calls.
 
 ``--attn-backend flash``
-   Uses FlashAttention when the model and GPU support it. Use ``native`` for
-   compatibility diagnostics or unsupported GPUs.
+   Selects FlashAttention when the model and GPU support it. Training and
+   rollout default to native attention.
 
 ``--eager-decode``
    Disables CUDA graph replay for rollout decode. Use it to isolate graph

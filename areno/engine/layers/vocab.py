@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 from areno.accel import areno_vocab_embedding
-from areno.engine.layers.linear import _areno_linear_forward, _shard_range, mark_tensor_parallel_parameter
+from areno.engine.layers.linear import _projection_forward, _shard_range, mark_tensor_parallel_parameter
 from areno.engine.parallel.collectives import (
     all_reduce,
     copy_to_tensor_parallel_region,
@@ -83,4 +83,4 @@ class VocabParallelLMHead(nn.Module):
             if is_sequence_parallel_active()
             else copy_to_tensor_parallel_region(hidden_states)
         )
-        return _areno_linear_forward(hidden_states, self.weight, None)
+        return _projection_forward(self, hidden_states, None)

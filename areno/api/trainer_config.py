@@ -87,7 +87,7 @@ class TrainerConfig:
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
-    attn_backend: str = "flash"
+    attn_backend: str = "native"
     # Opt-in auxiliary MTP loss for checkpoints that ship MTP layers; None keeps
     # the layers unbuilt unless speculative decoding needs them.
     mtp_loss_scale: float | None = None

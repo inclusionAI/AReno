@@ -85,6 +85,27 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(config.model_type, "fake")
         self.assertEqual(config.hidden_size, 8)
 
+    def test_native_projections_apply_to_new_adapters(self):
+        from areno.engine.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+        from areno.engine.layers.vocab import VocabParallelLMHead
+
+        class ProjectionAdapter(FakeAdapter):
+            def build(self, config):
+                return nn.ModuleList(
+                    [
+                        ColumnParallelLinear(8, 8),
+                        MergedColumnParallelLinear(8, (8, 8)),
+                        RowParallelLinear(8, 8),
+                        VocabParallelLMHead(8, 16),
+                    ]
+                )
+
+        registry.register_adapter(ProjectionAdapter())
+        for backend in ("native", "flash"):
+            model = registry.build_model(ModelConfig(model_type="fake", attn_backend=backend))
+            for projection in model:
+                self.assertEqual(getattr(projection, "native_projection", False), backend == "native")
+
     def test_unknown_hf_config_lists_registered_adapters(self):
         """Unknown HF configs should produce a useful error for debugging."""
         registry.register_adapter(FakeAdapter())

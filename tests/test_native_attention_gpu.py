@@ -471,3 +471,183 @@ def test_ling_kda_chunked_outputs_and_recurrent_state(budget):
         torch.testing.assert_close(got, ref, atol=0.005, rtol=0.02)
     assert torch.count_nonzero(attn.state_cache[0]) == 0
     assert torch.count_nonzero(attn.conv_cache[0]) == 0
+
+
+@pytest.mark.parametrize("kv_heads,dim", [(4, 32), (4, 64), (4, 96), (4, 128), (4, 256), (16, 192)])
+@pytest.mark.parametrize("window", [None, 17])
+def test_bf16_native_packed_paged_bitwise_equivalence(kv_heads, dim, window):
+    torch.manual_seed(42)
+    lengths = [65, 259]
+    q, k, v = [
+        torch.randn(sum(lengths), heads, dim, dtype=torch.bfloat16, device="cuda") for heads in (16, kv_heads, kv_heads)
+    ]
+    bounds = torch.tensor([0, 65, 324], device="cuda", dtype=torch.int32)
+    q.requires_grad_()
+    k.requires_grad_()
+    v.requires_grad_()
+    actual = areno_varlen_causal_attention(q, k, v, bounds, window_left=window)
+    reference = _varlen_reference(q.float(), k.float(), v.float(), bounds, window_left=window, softmax_scale=dim**-0.5)
+    torch.testing.assert_close(actual.float(), reference, rtol=0.012, atol=0.012)
+    grad = torch.randn_like(actual)
+    grads = torch.autograd.grad(actual, (q, k, v), grad)
+    expected = torch.autograd.grad(reference, (q, k, v), grad.float())
+    for dx, ref in zip(grads, expected, strict=True):
+        torch.testing.assert_close(dx.float(), ref.float(), rtol=0.03, atol=0.03)
+    with torch.no_grad():
+        table = torch.tensor([[1, 3], [2, 0]], device="cuda", dtype=torch.int32)
+        kc, vc = [q.new_zeros(4, 256, kv_heads, dim) for _ in range(2)]
+        for i, length in enumerate(lengths):
+            pos = torch.arange(length - 1, device="cuda")
+            start = sum(lengths[:i])
+            kc[table[i, pos // 256], pos % 256] = k[start + pos]
+            vc[table[i, pos // 256], pos % 256] = v[start + pos]
+        last = bounds[1:] - 1
+        pos = torch.tensor(lengths, dtype=torch.int32, device="cuda") - 1
+        decoded = areno_paged_causal_attention_decode(q[last], k[last], v[last], kc, vc, table, pos, window_left=window)
+        torch.testing.assert_close(decoded, actual[last], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dim,value_dim,kv", [(256, 256, 4), (192, 128, 16)])
+def test_packed_native_training_gradients(dim, value_dim, kv):
+    from areno.accel.kernels.native_attention import PackedAttention
+
+    torch.manual_seed(91)
+    q, k, v = [
+        torch.randn(113, h, d, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        for h, d in [(16, dim), (kv, dim), (kv, value_dim)]
+    ]
+    cu = torch.tensor([0, 47, 113], device=q.device, dtype=torch.int32)
+    actual = PackedAttention.apply(q, k, v, cu, -1, dim**-0.5)
+    ref = _varlen_reference(q.float(), k.float(), v.float(), cu, window_left=None, softmax_scale=dim**-0.5)
+    g = torch.randn_like(actual)
+    for got, want in zip(
+        torch.autograd.grad(actual, (q, k, v), g), torch.autograd.grad(ref, (q, k, v), g.float()), strict=True
+    ):
+        torch.testing.assert_close(got.float(), want.float(), atol=0.04, rtol=0.04)
+
+
+@pytest.mark.parametrize("kda", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_native_delta_packed_gradients(kda, dtype):
+    from areno.accel.native_delta import _differentiable_block, _TrainDelta
+
+    torch.manual_seed(91)
+    n, h, d = 39, 4, 32
+
+    def random(*shape):
+        return torch.randn(*shape, device="cuda", requires_grad=True)
+
+    q, k, v, a, b, decay, bias = xs = [
+        random(*shape)
+        for shape in [
+            (1, n, 4 if kda else 2, d),
+            (1, n, 4 if kda else 2, d),
+            (1, n, h, d),
+            (1, n, h, d) if kda else (1, n, h),
+            (1, n, h),
+            (h,),
+            (h * d if kda else h,),
+        ]
+    ]
+    if dtype == torch.bfloat16:
+        q, k, v, a, b = [x.detach().to(dtype).requires_grad_() for x in xs[:5]]
+        xs = [q, k, v, a, b, decay, bias]
+    bound = -5 if kda else None
+    cu = torch.tensor([0, 4, n], device=q.device, dtype=torch.int32)
+    out = _TrainDelta.apply(*xs, cu, bound)
+    ref = []
+    for lo, hi in [(0, 4), (4, n)]:
+        y, _ = _differentiable_block(*(x[0, lo:hi] for x in xs[:5]), decay, bias, v.new_zeros(h, d, d), bound)
+        ref.append(y)
+    ref = torch.cat(ref)[None]
+    g = torch.randn_like(out)
+    torch.testing.assert_close(
+        out.float(),
+        ref.float(),
+        atol=0.008 if dtype == torch.bfloat16 else 1e-5,
+        rtol=0.008 if dtype == torch.bfloat16 else 1e-4,
+    )
+    for got, want in zip(torch.autograd.grad(out, xs, g), torch.autograd.grad(ref, xs, g.float()), strict=True):
+        torch.testing.assert_close(
+            got, want, atol=0.025 if dtype == torch.bfloat16 else 2e-5, rtol=0.025 if dtype == torch.bfloat16 else 2e-4
+        )
+
+
+def test_native_routed_expert_gradients():
+    from areno.accel.kernels.fused_moe import NativeSiluExperts
+    from areno.accel.ops import FusedMoeConfig
+
+    torch.manual_seed(36)
+    tokens, hidden, ffn, experts, topk = 37, 64, 32, 5, 2
+    config = FusedMoeConfig(experts, hidden, ffn, topk, routed_scaling_factor=1.25)
+    inputs = [
+        (torch.randn(shape, device="cuda", dtype=torch.bfloat16) * scale).requires_grad_()
+        for shape, scale in [((tokens, hidden), 1), ((experts, 2 * ffn, hidden), 0.1), ((experts, hidden, ffn), 0.1)]
+    ]
+    ids = torch.rand(tokens, experts - 1, device="cuda").topk(topk).indices
+    weights = torch.rand_like(ids, dtype=torch.float32).requires_grad_()
+    output = NativeSiluExperts.apply(*inputs, weights, ids, config)
+    x, w1, w2 = [t.detach().float().requires_grad_() for t in inputs]
+    route = weights.detach().requires_grad_()
+    gate, up = torch.einsum("mkrh,mh->mkr", w1[ids], x).to(inputs[0].dtype).float().chunk(2, -1)
+    act = (torch.nn.functional.silu(gate) * up).to(inputs[0].dtype).float()
+    projected = torch.einsum("mkhr,mkr->mkh", w2[ids], act)
+    ref = (projected * route[..., None]).to(inputs[0].dtype).float().sum(1) * config.routed_scaling_factor
+    g = torch.randn_like(output)
+    torch.testing.assert_close(output.float(), ref, atol=0.01, rtol=0.01)
+    grads = torch.autograd.grad(output, (*inputs, weights), g)
+    expected = torch.autograd.grad(ref, (x, w1, w2, route), g.float())
+    for actual, reference in zip(grads, expected, strict=True):
+        torch.testing.assert_close(actual.float(), reference, atol=0.025, rtol=0.025)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_native_head_scores_and_derivatives(dtype):
+    from areno.accel.kernels.invariant_linear import InvariantLinear
+    from areno.engine.runtime.logprobs import _NativePackedLogprobs, _VocabParallelSelectedLogprobs
+
+    torch.manual_seed(18)
+    x = torch.randn(260, 32, device="cuda", dtype=dtype).requires_grad_()
+    w = torch.randn(2560, 32, device="cuda", dtype=dtype).requires_grad_()
+    labels = torch.randint(w.shape[0], (x.shape[0],), device="cuda")
+    ref = _VocabParallelSelectedLogprobs.apply(InvariantLinear.apply(x, w, None), labels, 0, None, 1)
+    scored = _NativePackedLogprobs.apply(x, w, labels, 128)
+    torch.testing.assert_close(scored, ref, atol=0, rtol=0)
+    dout = torch.randn_like(scored) / 8
+    dout[:97] = 0
+    for gradient in [torch.zeros_like(dout), dout]:
+        actual = torch.autograd.grad(scored, (x, w), gradient, retain_graph=True)
+        expected = torch.autograd.grad(ref, (x, w), gradient, retain_graph=True)
+        for got, want in zip(actual, expected, strict=True):
+            torch.testing.assert_close(got, want, atol=0.005 if dtype == torch.bfloat16 else 1e-5, rtol=0.01)
+
+
+def test_native_projection_across_large_matrix_boundary():
+    from areno.accel.kernels.invariant_linear import InvariantLinear
+
+    torch.manual_seed(314)
+    w = torch.randn(1536, 1536, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(4099, 1536, device="cuda", dtype=w.dtype)
+    actual = InvariantLinear.apply(x, w, None)
+    for index in (0, 9, 2047, 2048, 4095, 4096, 4098):
+        single = InvariantLinear.apply(x[index : index + 1], w, None)
+        torch.testing.assert_close(single[0], actual[index], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("sizes", [[257], [0, 65, 1, 0, 191]])
+def test_native_delta_conv_gradients(sizes):
+    from areno.accel.conv import areno_packed_depthwise_causal_conv1d_silu
+    from areno.accel.kernels.native_delta_conv import native_packed_conv
+
+    torch.manual_seed(55)
+    x = torch.randn(1, sum(sizes), 192, dtype=torch.bfloat16, device="cuda")[..., :127].requires_grad_()
+    w = torch.randn(127, 1, 4, device="cuda", requires_grad=True)
+    cu = torch.tensor([0, *sizes], device="cuda").cumsum(0, dtype=torch.int32)
+    ref = areno_packed_depthwise_causal_conv1d_silu(x, w, cu)
+    y = native_packed_conv(x, w, cu)
+    torch.testing.assert_close(y, ref, atol=0, rtol=0)
+    g = torch.randn_like(y)
+    actual = torch.autograd.grad(y, (x, w), g)
+    expected = torch.autograd.grad(ref, (x, w), g)
+    torch.testing.assert_close(actual[0], expected[0], atol=0.004, rtol=0.005)
+    torch.testing.assert_close(actual[1], expected[1], atol=0.0001, rtol=0.0001)

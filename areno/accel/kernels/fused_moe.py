@@ -370,7 +370,8 @@ def fused_experts(
     bias2: torch.Tensor | None = None,
     activation_alpha: float = 1.702,
     activation_limit: float = 7.0,
-) -> torch.Tensor:
+    save_activation: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """End-to-end fused MoE forward.
 
     Pipeline:
@@ -407,13 +408,17 @@ def fused_experts(
 
     # Single backing buffer reused across both matmul outputs; w1 and w2 may
     # have different output widths so we size to the max and slice as views.
-    max_intermediate = max(w1.shape[1], w2.shape[1])
+    max_intermediate = w1.shape[1] if save_activation else max(w1.shape[1], w2.shape[1])
     cache = torch.empty(num_tokens * top_k * max_intermediate, device=hidden_states.device, dtype=hidden_states.dtype)
     intermediate1 = cache[: num_tokens * top_k * w1.shape[1]].view(num_tokens, top_k, w1.shape[1])
     intermediate2 = torch.empty(
         (num_tokens * top_k, w1.shape[1] // 2), device=hidden_states.device, dtype=hidden_states.dtype
     )
-    intermediate3 = cache[: num_tokens * top_k * w2.shape[1]].view(num_tokens, top_k, w2.shape[1])
+    intermediate3 = (
+        hidden_states.new_empty((num_tokens, top_k, w2.shape[1]))
+        if save_activation
+        else cache[: num_tokens * top_k * w2.shape[1]].view(num_tokens, top_k, w2.shape[1])
+    )
 
     # Gate-up projection (no routed weight applied here — that happens in matmul2).
     _invoke_matmul(
@@ -460,4 +465,105 @@ def fused_experts(
 
     out = torch.empty_like(hidden_states)
     _sum_reduce(intermediate3, out, config.routed_scaling_factor)
+    if save_activation:
+        return out, intermediate1.view(num_tokens * top_k, w1.shape[1]), intermediate2
+    return out
+
+
+class NativeSiluExperts(torch.autograd.Function):
+    """Train with the same weighted-down-projection and top-k sum as rollout."""
+
+    @staticmethod
+    def forward(ctx, x, w1, w2, weights, indices, config):
+        out, gate_up, activated = fused_experts(x, w1, w2, weights, indices, config, save_activation=True)
+        ctx.save_for_backward(x, w1, w2, weights, indices, gate_up, activated)
+        ctx.scale = config.routed_scaling_factor
+        return out
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, w1, w2, weights, indices, saved_gate_up, saved_activated = ctx.saved_tensors
+        dx = torch.zeros_like(x, dtype=torch.float32)
+        dw1, dw2, dr = (torch.zeros_like(t) for t in (w1, w2, weights))
+        from areno.accel._extension import extension
+
+        ext = extension(x.device)
+        routes = indices.flatten().long()
+        order = torch.argsort(routes, stable=True)
+        counts = torch.bincount(routes, minlength=w1.shape[0])
+        sizes = counts.tolist()
+        offset = 0
+        for first in range(0, w1.shape[0], 16):
+            group = slice(first, first + 16)
+            lengths = sizes[group]
+            count = sum(lengths)
+            if count == 0:
+                continue
+            pairs = order.narrow(0, offset, count)
+            offset += count
+            rows = pairs // indices.shape[1]
+            xx = x.index_select(0, rows)
+            route = weights.flatten().index_select(0, pairs)
+            bounds = torch.nn.functional.pad(counts[group].cumsum(0, dtype=torch.int32), (1, 0))
+            gate_up = saved_gate_up.index_select(0, pairs)
+            activated = saved_activated.index_select(0, pairs)
+            grad = (dy.index_select(0, rows).float() * ctx.scale).to(x.dtype)
+            # d(route) = <grad, W2 @ activation> = <W2.T @ grad, activation>.
+            # Reuse the unweighted activation derivative for both gradients.
+            unweighted = _routed_projection_fp32(grad, w2[group].transpose(1, 2), bounds)
+            dr.flatten()[pairs] = (unweighted * activated).sum(-1).to(weights.dtype)
+            down_grad = (grad * route[:, None]).to(x.dtype)
+            _, dw2[group] = ext.areno_grouped_linear_backward(down_grad, activated, w2[group], lengths, False, True)
+            dact = (unweighted * route[:, None]).to(x.dtype)
+            din = torch.empty_like(gate_up)
+            ext.areno_d_silu_and_mul(din, dact, gate_up)
+            _, dw1[group] = ext.areno_grouped_linear_backward(din, xx, w1[group], lengths, False, True)
+            dx.index_add_(0, rows, _routed_projection_fp32(din, w1[group].transpose(1, 2), bounds))
+        return dx.to(x.dtype), dw1, dw2, dr, None, None
+
+
+@triton.jit
+def _routed_projection(
+    X,
+    W,
+    Y,
+    BOUNDS,
+    EXPERTS: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    SN: tl.constexpr,
+    SK: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+):
+    tile = tl.program_id(0)
+    lo, hi = 0, EXPERTS
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if tl.load(BOUNDS + mid) // BM + mid <= tile:
+            lo = mid
+        else:
+            hi = mid
+    start, end = tl.load(BOUNDS + lo), tl.load(BOUNDS + lo + 1)
+    row = start + (tile - start // BM - lo) * BM + tl.arange(0, BM)
+    if tl.min(row, 0) >= end:
+        return
+    col = tl.program_id(1) * BN + tl.arange(0, BN)
+    k = tl.arange(0, BK)
+    acc = tl.full((BM, BN), 0, tl.float32)
+    for off in range(tl.cdiv(K, BK)):
+        kk = off * BK + k
+        x = tl.load(X + row[:, None] * K + kk[None, :], (row[:, None] < end) & (kk[None, :] < K), 0)
+        w = tl.load(W + lo * N * K + kk[:, None] * SK + col[None, :] * SN, (kk[:, None] < K) & (col[None, :] < N), 0)
+        acc = tl.dot(x, w, acc)
+    tl.store(Y + row[:, None] * N + col[None, :], acc, (row[:, None] < end) & (col[None, :] < N))
+
+
+def _routed_projection_fp32(x, w, bounds):
+    experts, n, k = w.shape
+    out = x.new_empty((x.shape[0], n), dtype=torch.float32)
+    _routed_projection[(triton.cdiv(x.shape[0], 32) + experts - 1, triton.cdiv(n, 64))](
+        x, w, out, bounds, experts, n, k, w.stride(1), w.stride(2), 32, 64, 32
+    )
     return out

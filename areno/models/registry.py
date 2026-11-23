@@ -72,7 +72,17 @@ def config_from_hf(model_path: str | Path) -> ModelConfig:
 def build_model(config: ModelConfig):
     """Instantiate the nn.Module for ``config`` using its model_type adapter."""
 
-    return _adapter(config.model_type).build(config)
+    model = _adapter(config.model_type).build(config)
+    if config.attn_backend == "native":
+        from areno.engine.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+        from areno.engine.layers.vocab import VocabParallelLMHead
+
+        for module in model.modules():
+            if isinstance(
+                module, ColumnParallelLinear | MergedColumnParallelLinear | RowParallelLinear | VocabParallelLMHead
+            ):
+                module.native_projection = True
+    return model
 
 
 def load_model_weights(model, config: ModelConfig, model_path: str | Path) -> None:

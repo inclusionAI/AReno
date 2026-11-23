@@ -78,6 +78,7 @@ from areno.engine.layers.linear import (
     RowParallelLinear,
     _shard_range,
     mark_tensor_parallel_parameter,
+    native_projection,
     projection_dtype,
 )
 from areno.engine.layers.norm import GroupRMSNormSigmoidGate, RMSNorm
@@ -161,6 +162,7 @@ class BailingGate(nn.Module):
         self.n_group = config.n_group
         self.topk_group = config.topk_group
         self.routed_scaling_factor = config.routed_scaling_factor
+        self.native_projection = config.attn_backend == "native"
         self.router_dtype = config.moe_router_dtype
         self.routing_layer_slot = routing_layer_slot
         # Router projection: hidden_size -> num_experts logits. Replicated
@@ -188,7 +190,11 @@ class BailingGate(nn.Module):
         x = hidden_states.view(-1, hidden_states.shape[-1])
         # Promote to router_dtype (typically fp32) for numerical stability of
         # the sigmoid/top-k selection.
-        logits = _areno_linear_no_compile(x.to(dtype=self.weight.dtype), self.weight)
+        logits = (
+            native_projection(self, x.to(self.weight.dtype))
+            if self.native_projection and x.is_cuda
+            else _areno_linear_no_compile(x.to(dtype=self.weight.dtype), self.weight)
+        )
         topk_idx, topk_weight = self._forward_grouped_topk(logits)
         if self.routing_layer_slot is not None:
             # A None slot opts out of rollout capture and training replay
@@ -325,7 +331,7 @@ class BailingSparseMoeBlock(nn.Module):
                 out = self._forward_nf4_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             elif self.training or not self._infer_weights_ready:
                 # Permute/unpermute path is autograd-friendly.
-                out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+                out = self._train_experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             else:
                 # Inference: fused-MoE kernel over the stacked w1/w2 weights.
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
@@ -353,7 +359,7 @@ class BailingSparseMoeBlock(nn.Module):
             if not self.training and getattr(self.experts.linear_fc1, "quantized_weight", None) is not None:
                 out = self._forward_nf4_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             elif self.training or not self._infer_weights_ready:
-                out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+                out = self._train_experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             else:
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
         if moe_sequence_parallel:
@@ -362,6 +368,44 @@ class BailingSparseMoeBlock(nn.Module):
             shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
             out = out + self.shared_experts(shared_input)
         return out
+
+    def _can_share_native_expert_weights(self):
+        # Native training consumes the same two packed matrices as fused decode.
+        # Quantized and merged-adapter rollout still use their derived layouts.
+        w1, w2 = self.experts.linear_fc1.weight, self.experts.linear_fc2.weight
+        return (
+            self.config.attn_backend == "native"
+            and w1 is not None
+            and w2 is not None
+            and w1.is_cuda
+            and w1.dtype == w2.dtype == self.config.dtype
+            and w1.dtype in (torch.bfloat16, torch.float16)
+            and not self.experts.has_active_lora()
+            and getattr(self.experts.linear_fc1, "quantized_weight", None) is None
+        )
+
+    def _train_experts(self, flat, indices, weights):
+        if (
+            self.config.attn_backend == "native"
+            and flat.is_cuda
+            and flat.dtype in (torch.float16, torch.bfloat16)
+            and not self.experts.has_active_lora()
+            and getattr(self.experts.linear_fc1, "quantized_weight", None) is None
+        ):
+            from areno.accel.kernels.fused_moe import NativeSiluExperts
+
+            local_indices, local_weights = self.experts.local_routes(indices, weights)
+            return all_reduce(
+                NativeSiluExperts.apply(
+                    flat,
+                    self.experts.linear_fc1.weight,
+                    self.experts.linear_fc2.weight,
+                    local_weights,
+                    local_indices,
+                    self._fused_moe_config,
+                )
+            )
+        return self.experts(flat, indices, weights)
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -374,6 +418,10 @@ class BailingSparseMoeBlock(nn.Module):
         """
         if getattr(self.experts.linear_fc1, "quantized_weight", None) is not None:
             self.clear_infer_weights()
+            return
+        if self._can_share_native_expert_weights():
+            self.clear_infer_weights()
+            self._infer_weights_ready = True
             return
         gate_weights, up_weights, down_weights = self.experts.inference_weights()
         self._infer_gate_weight = self._updated_infer_weight(
@@ -432,7 +480,10 @@ class BailingSparseMoeBlock(nn.Module):
         return all_reduce(out)
 
     def _forward_fused_moe(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
-        if self._infer_w1_weight.numel() == 0:
+        w1, w2 = self._infer_w1_weight, self._infer_w2_weight
+        if self._infer_weights_ready and w1.numel() == 0 and self._can_share_native_expert_weights():
+            w1, w2 = self.experts.linear_fc1.weight, self.experts.linear_fc2.weight
+        if w1.numel() == 0:
             raise RuntimeError("fused MoE inference weights are not prepared")
         log_once("areno_fused_moe", "using areno fused MoE expert kernel")
         # Drop routes pointing at experts owned by other ranks (their weight
@@ -441,8 +492,8 @@ class BailingSparseMoeBlock(nn.Module):
         local_idx, local_weight = self.experts.local_routes(topk_idx, topk_weight)
         out = _areno_fused_experts_no_compile(
             flat.contiguous(),
-            self._infer_w1_weight,
-            self._infer_w2_weight,
+            w1,
+            w2,
             local_weight.float(),
             local_idx.int(),
             self._fused_moe_config,
@@ -975,12 +1026,28 @@ class BailingSoftmaxAttention(nn.Module):
             q = self.q_proj(mla_input)
         else:
             assert self.q_a_proj is not None and self.q_a_layernorm is not None and self.q_b_proj is not None
-            q_a = self._with_lora("q_a_proj", mla_input, self.q_a_proj(mla_input))
+            q_a = self._with_lora(
+                "q_a_proj",
+                mla_input,
+                (
+                    native_projection(self.q_a_proj, mla_input)
+                    if self.attn_backend == "native" and mla_input.is_cuda
+                    else self.q_a_proj(mla_input)
+                ),
+            )
             q = self.q_b_proj(self.q_a_layernorm(q_a))
         bsz, seqlen = q.shape[:2]
         q = q.view(bsz, seqlen, self.local_heads, self.head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        kv_a = self._with_lora("kv_a_proj_with_mqa", mla_input, self.kv_a_proj_with_mqa(mla_input))
+        kv_a = self._with_lora(
+            "kv_a_proj_with_mqa",
+            mla_input,
+            (
+                native_projection(self.kv_a_proj_with_mqa, mla_input)
+                if self.attn_backend == "native" and mla_input.is_cuda
+                else self.kv_a_proj_with_mqa(mla_input)
+            ),
+        )
         compressed_kv, k_rope = kv_a.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if is_sequence_parallel_active():
             k_rope = gather_from_sequence_parallel_region(k_rope)
@@ -1276,6 +1343,7 @@ class BailingKDAAttention(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
         ctx = get_tp_context()
+        self.native_delta = config.attn_backend == "native"
         self.layer_idx = layer_idx
         self.num_heads = config.num_attention_heads
         self.local_heads = self.num_heads // ctx.world_size
@@ -1391,7 +1459,27 @@ class BailingKDAAttention(nn.Module):
         q = q.view(batch, seqlen, self.local_heads, self.head_dim)
         k = k.view(batch, seqlen, self.local_heads, self.head_dim)
         v = v.view(batch, seqlen, self.local_heads, self.v_head_dim)
-        if infer_meta is not None:
+        if (
+            self.native_delta
+            and hidden_states.is_cuda
+            and (infer_meta is None or infer_meta.tokens_per_seq == 1 or infer_meta.mode == "prefill")
+        ):
+            from areno.accel.native_delta import native_delta
+
+            out = native_delta(
+                q,
+                k,
+                v,
+                f,
+                beta,
+                self.A_log,
+                self.dt_bias,
+                train_meta,
+                infer_meta,
+                self.state_cache,
+                self.kda_lower_bound if self.kda_safe_gate else None,
+            )
+        elif infer_meta is not None:
             out = self._forward_infer(q, k, v, f, beta, infer_meta)
         else:
             out = self._forward_train(q, k, v, f, beta, train_meta)
@@ -1411,6 +1499,10 @@ class BailingKDAAttention(nn.Module):
         if train_meta is not None and train_meta.packed and train_meta.cu_seqlens is not None:
             if x.shape[0] != 1:
                 raise ValueError("packed Bailing V3 KDA causal-conv expects flattened input with batch size 1")
+            if x.is_cuda and self.native_delta and x.shape[1] >= 64:
+                from areno.accel.kernels.native_delta_conv import native_packed_conv
+
+                return native_packed_conv(x, weight, train_meta.cu_seqlens)
             return _areno_packed_depthwise_causal_conv1d_silu_no_compile(x, weight, train_meta.cu_seqlens)
         _require_fla_gdn()
         return _fla_causal_conv1d_no_compile(x, weight=weight.squeeze(1), activation="silu")
@@ -2104,7 +2196,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
     @torch.no_grad()
     def offload_train_weights(self) -> None:
         for layer in self._train_layers():
-            if isinstance(layer.mlp, BailingSparseMoeBlock):
+            if isinstance(layer.mlp, BailingSparseMoeBlock) and not layer.mlp._can_share_native_expert_weights():
                 layer.mlp.experts.offload_to_cpu()
 
     @torch.no_grad()
@@ -2140,7 +2232,12 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 num_blocks,
                 block_size,
                 layer.attention.local_kv_heads,
-                layer.attention.head_dim,
+                layer.attention.v_head_dim
+                if self.config.attn_backend == "native"
+                and device.type == "cuda"
+                and self.config.dtype == torch.bfloat16
+                and layer.attention.head_dim in (128, 192, 256)
+                else layer.attention.head_dim,
                 device=device,
                 dtype=self.config.dtype,
             )
@@ -2168,7 +2265,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         slots = slots.to(device=next(self.parameters()).device, dtype=torch.long)
         for layer in self.layers:
             attn = layer.attention
-            if isinstance(attn, (BailingLinearAttention, BailingKDAAttention)) and attn.state_cache.numel() > 0:
+            if isinstance(attn, BailingLinearAttention | BailingKDAAttention) and attn.state_cache.numel() > 0:
                 attn.state_cache.index_fill_(0, slots, 0)
             if isinstance(attn, BailingKDAAttention) and attn.conv_cache.numel() > 0:
                 attn.conv_cache.index_fill_(0, slots, 0)

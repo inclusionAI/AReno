@@ -133,14 +133,14 @@ class ConfigAndDataTest(unittest.TestCase):
 
         torch.testing.assert_close(actual, expected)
 
-    def test_native_train_rollout_matching_is_opt_in(self):
+    def test_native_train_rollout_matching_defaults_to_the_selected_backend(self):
         from areno.engine.layers.attention_backend.train import build_train_attention_backend
 
-        default_backend = build_train_attention_backend("native")
-        matching_backend = build_train_attention_backend("native", native_train_matches_rollout=True)
-
-        self.assertFalse(default_backend.native_train_matches_rollout)
-        self.assertTrue(matching_backend.native_train_matches_rollout)
+        self.assertTrue(build_train_attention_backend("native").native_train_matches_rollout)
+        self.assertFalse(build_train_attention_backend("flash").native_train_matches_rollout)
+        self.assertFalse(
+            build_train_attention_backend("native", native_train_matches_rollout=False).native_train_matches_rollout
+        )
 
     def test_model_config_allows_replicated_kv_for_qwen35_vl_moe(self):
         """Qwen3.5-VL-MoE uses replicated KV heads when TP is a multiple of KV heads."""
