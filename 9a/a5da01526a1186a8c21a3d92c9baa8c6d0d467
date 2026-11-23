@@ -1,0 +1,21 @@
+areno/accel/kernels/native_attention.py
+  s_96c85c504cbee2::t_16bb80bb436227 374
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_17e388db98061d 311
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9aa5da01526a1186a8c21a3d92c9baa8c6d0d467",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
