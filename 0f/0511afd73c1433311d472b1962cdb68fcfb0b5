@@ -1,0 +1,23 @@
+areno/accel/kernels/native_attention.py
+  s_96c85c504cbee2::t_811e8184c8aca7 38,46,83-88,111,120,143-156,159,161,173,184-185,192
+areno/engine/layers/attention_backend/infer.py
+  s_96c85c504cbee2::t_83c3b13fb349fd 108-126
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_a44e872f2f39b7 2215-2220
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0f0511afd73c1433311d472b1962cdb68fcfb0b5",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
