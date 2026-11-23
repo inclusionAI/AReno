@@ -1,0 +1,21 @@
+areno/accel/attention.py
+  s_96c85c504cbee2::t_a5c0c0cc0a7f00 3-4,164-171,226-239
+areno/engine/layers/attention_backend/infer.py
+  s_96c85c504cbee2::t_a53c05808fb584 73-75,84-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0fd056b2175454a214d50f1e9fd79272c1fc78f1",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
