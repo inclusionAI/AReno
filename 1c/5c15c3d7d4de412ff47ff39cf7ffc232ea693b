@@ -1,0 +1,21 @@
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_a8359975926005 81,1996,2270
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_cb3817b75c9b07 1188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1c5c15c3d7d4de412ff47ff39cf7ffc232ea693b",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
