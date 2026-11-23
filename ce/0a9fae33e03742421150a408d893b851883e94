@@ -1,0 +1,19 @@
+scripts/validation/ling_long_prompt_logprobs.py
+  s_96c85c504cbee2::t_c0ac62b40a2c81 26,61,138-145,168-169,206-214,257,298
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ce0a9fae33e03742421150a408d893b851883e94",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
