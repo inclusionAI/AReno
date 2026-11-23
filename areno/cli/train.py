@@ -2147,9 +2147,9 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--attn-backend",
     type=click.Choice(["flash", "native"]),
-    default="flash",
+    default="native",
     show_default=True,
-    help="Attention backend. Use native for slower areno_accel attention consistency diagnostics.",
+    help="Attention backend for training and rollout. Select flash to use FlashAttention.",
 )
 @click.option(
     "--disable-thinking",

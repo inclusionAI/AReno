@@ -259,12 +259,9 @@ different visible GPUs for rollout:
    lower setup overhead. Supported by both CUDA and MLX.
 
 ``--attn-backend [flash|native]``
-   Attention backend. Default: ``flash``. Use ``native`` to run without
-   ``flash-attn`` on the areno_accel native compatibility path. AReno
-   automatically falls back to ``native`` on flash-attn-unsupported GPUs such
-   as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
-   supported GPUs.
-   CUDA only; MLX uses its model-native attention implementation.
+   Training and rollout default to ``native``. Select ``flash`` to use
+   FlashAttention on a supported GPU and model. MLX uses its own attention
+   implementation.
 
 ``--disable-thinking``
    Pass ``enable_thinking=False`` to tokenizer chat templates when supported.

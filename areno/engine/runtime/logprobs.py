@@ -160,6 +160,20 @@ def packed_next_token_logprobs_from_hidden(
     labels = flat_tokens[positions + 1]
     flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
     cap = float(logit_softcap or 0.0)
+    if recompute and not cap and getattr(lm_head, "native_projection", False) and torch.is_grad_enabled():
+        from areno.engine.layers.vocab import VocabParallelLMHead
+
+        if (
+            type(lm_head) is VocabParallelLMHead
+            and flat_hidden.is_cuda
+            and get_tp_context().world_size == 1
+            and not lm_head._forward_hooks
+            and not lm_head._forward_pre_hooks
+            and getattr(lm_head, "quantized_weight", None) is None
+        ):
+            return _NativePackedLogprobs.apply(
+                flat_hidden.index_select(0, positions).to(lm_head.weight.dtype), lm_head.weight, labels, chunk_size
+            )
     projection_parameters = None
     if torch.is_grad_enabled() and lm_head.weight.dtype in (torch.bfloat16, torch.float16):
         projection_dtype = lm_head(flat_hidden[:0].to(lm_head.weight.dtype).unsqueeze(0)).dtype
@@ -378,3 +392,57 @@ class _VocabParallelSelectedLogprobs(torch.autograd.Function):
             (local_mask.to(dtype=grad.dtype) * grad_output.to(dtype=grad.dtype)).unsqueeze(-1),
         )
         return grad, None, None, None, None
+
+
+class _NativePackedLogprobs(torch.autograd.Function):
+    """Tile the native head by token in forward and by vocabulary in backward."""
+
+    @staticmethod
+    def forward(ctx, hidden, weight, labels, chunk_size):
+        from areno.accel.kernels.invariant_linear import InvariantLinear
+
+        scores = hidden.new_empty(labels.shape, dtype=torch.float32)
+        lse = torch.empty_like(scores)
+        for start in range(0, labels.numel(), chunk_size):
+            rows = slice(start, start + chunk_size)
+            logits = InvariantLinear.apply(hidden[rows], weight, None)
+            scores[rows], lse[rows], _, _ = _selected_logprobs_components(logits, labels[rows], 0, None, 1)
+            del logits
+        ctx.save_for_backward(hidden, weight, labels, lse)
+        return scores
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        from areno.accel.kernels.invariant_linear import InvariantLinear
+
+        hidden, weight, labels, lse = ctx.saved_tensors
+        # Prompt logprobs commonly have zero loss weight. Their derivatives are
+        # identically zero. Gather active positions once for all vocab tiles.
+        active = grad_output.nonzero().flatten()
+        x, g, norm, target = (v.index_select(0, active) for v in (hidden, grad_output, lse, labels))
+        need_x, need_w = ctx.needs_input_grad[:2]
+        dx = torch.zeros_like(hidden) if need_x else None
+        dw = torch.empty_like(weight) if need_w else None
+        if not active.numel():
+            return dx, dw.zero_() if need_w else None, None, None
+        tile = 2048
+        dactive = torch.zeros_like(x, dtype=torch.float32) if need_x else None
+        for col in range(0, weight.shape[0], tile):
+            w = weight[col : col + tile]
+            grad_w = torch.zeros_like(w, dtype=torch.float32) if need_w else None
+            for row in range(0, active.numel(), 2048):
+                r = slice(row, row + 2048)
+                logits = InvariantLinear.apply(x[r], w, None)
+                dl = ((logits.float() - norm[r, None]).exp() * -g[r, None]).to(w.dtype)
+                local = target[r] - col
+                idx = local.clamp(0, w.shape[0] - 1)
+                dl.scatter_add_(1, idx[:, None], ((local == idx) * g[r]).to(w.dtype)[:, None])
+                if need_x:
+                    dactive[r].add_((dl @ w).float())
+                if need_w:
+                    grad_w.add_((dl.T @ x[r]).float())
+            if need_w:
+                dw[col : col + tile].copy_(grad_w)
+        if need_x:
+            dx.index_copy_(0, active, dactive.to(hidden.dtype))
+        return dx, dw, None, None

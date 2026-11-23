@@ -249,6 +249,7 @@ class Qwen35GatedDeltaNet(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
         ctx = get_tp_context()
+        self.native_delta = config.attn_backend == "native"
         self.layer_idx = layer_idx
         self.num_key_heads = config.linear_num_key_heads
         self.num_value_heads = config.linear_num_value_heads
@@ -305,7 +306,13 @@ class Qwen35GatedDeltaNet(nn.Module):
         query, key = query_key.split((self.local_key_heads, self.local_key_heads), dim=2)
         value = value.view(batch, seqlen, self.local_value_heads, self.head_v_dim)
         z = z.view(batch, seqlen, self.local_value_heads, self.head_v_dim)
-        if infer_meta is not None:
+        if hidden_states.is_cuda and self.native_delta:
+            from areno.accel.native_delta import native_delta
+
+            out = native_delta(
+                query, key, value, a_gate, b_gate, self.A_log, self.dt_bias, train_meta, infer_meta, self.state_cache
+            )
+        elif infer_meta is not None:
             out = self._forward_infer(query, key, value, a_gate, b_gate, infer_meta)
         else:
             g = -self.A_log.float().exp().view(1, 1, -1) * F.softplus(
@@ -331,6 +338,10 @@ class Qwen35GatedDeltaNet(nn.Module):
         if x.shape[0] != 1:
             raise ValueError("packed ARENO causal-conv expects flattened packed input with batch size 1")
         log_once("qwen35_gdn_areno_packed_conv", "using ARENO packed causal-conv training kernel")
+        if x.is_cuda and self.native_delta and x.shape[1] >= 64:
+            from areno.accel.kernels.native_delta_conv import native_packed_conv
+
+            return native_packed_conv(x, self.conv1d_weight, cu_seqlens)
         return _areno_packed_depthwise_causal_conv1d_silu_no_compile(x, self.conv1d_weight, cu_seqlens)
 
     def _causal_conv_dense(self, x: torch.Tensor) -> torch.Tensor:
@@ -356,23 +367,44 @@ class Qwen35GatedDeltaNet(nn.Module):
         if infer_meta.mode == "prefill":
             if infer_meta.cu_seqlens is None:
                 raise RuntimeError("Qwen3.5 GDN prefill requires cu_seqlens")
-            return self._causal_conv_infer_prefill(x, infer_meta.cu_seqlens, slots)
+            return self._causal_conv_infer_prefill(x, infer_meta.cu_seqlens, slots, infer_meta.cache_seqlens)
         raise ValueError(f"unsupported inference mode: {infer_meta.mode}")
 
     @torch._dynamo.disable
     def _causal_conv_infer_prefill(
-        self, x: torch.Tensor, cu_seqlens: torch.Tensor, slots: torch.Tensor
+        self, x: torch.Tensor, cu_seqlens: torch.Tensor, slots: torch.Tensor, cached_prefix: torch.Tensor | None = None
     ) -> torch.Tensor:
         out = torch.empty_like(x)
         cu = cu_seqlens.to(device=x.device, dtype=torch.long)
+        history_size = self.conv_kernel_size - 1
         for idx, slot in enumerate(slots):
             start, end = int(cu[idx].item()), int(cu[idx + 1].item())
-            segment = x[:, start:end]
-            out[:, start:end] = self._causal_conv_dense(segment)
-            tail = segment.reshape(-1, x.shape[-1])[-(self.conv_kernel_size - 1) :]
-            cache = torch.zeros(x.shape[-1], self.conv_kernel_size - 1, device=x.device, dtype=self.conv_cache.dtype)
-            cache[:, -tail.shape[0] :] = tail.transpose(0, 1).to(dtype=self.conv_cache.dtype)
-            self.conv_cache[slot] = cache
+            if start == end:
+                continue
+            history = None
+            if cached_prefix is not None:
+                history = self.conv_cache[slot].T.unsqueeze(0).to(dtype=x.dtype)
+                history = history * (cached_prefix[idx] > 0).to(dtype=x.dtype)
+            # The dense conv also returns an FP32 preactivation workspace. Bound
+            # its lifetime to a tile, keeping the exact left convolution halo.
+            tile = 1024 if self.native_delta else end - start
+            for left in range(start, end, tile):
+                right = min(end, left + tile)
+                source = x[:, max(start, left - history_size) : right]
+                missing = max(0, history_size - (left - start))
+                if missing and history is not None:
+                    source = torch.cat((history[:, -missing:], source), dim=1)
+                out[:, left:right] = self._causal_conv_dense(source)[:, -(right - left) :]
+            if history_size:
+                tail = x[:, max(start, end - history_size) : end]
+                if tail.shape[1] < history_size:
+                    padding = (
+                        x.new_zeros((1, history_size - tail.shape[1], x.shape[-1]))
+                        if history is None
+                        else history[:, tail.shape[1] :]
+                    )
+                    tail = torch.cat((padding, tail), dim=1)
+                self.conv_cache[slot] = tail[0].T
         return out
 
     def _forward_train(

@@ -20,6 +20,17 @@ from areno.cli.train import (
 )
 
 
+def test_training_attention_defaults_agree():
+    from areno.engine.config import RuntimeConfig
+
+    with train_cli.train_command.make_context("train", [], resilient_parsing=True) as ctx:
+        assert ctx.params["attn_backend"] == "native"
+    cfg = TrainerConfig(algo="sft", ckpt="actor", dataset_path="dataset")
+    assert cfg.cuda_config().runtime["attn_backend"] == "native"
+    assert RuntimeConfig().attn_backend == "native"
+    assert replace(cfg, attn_backend="flash").cuda_config().runtime["attn_backend"] == "flash"
+
+
 def test_train_config_requires_ckpt():
     with pytest.raises(UsageError, match="--ckpt is required"):
         _trainer_config_from_options(**_options(ckpt=None, algo="sft"))
@@ -408,7 +419,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "reward_fn       none" in summary
     assert "reward_ckpt     reward-model" in summary
     assert "dp_size       4" in summary
-    assert "attn_backend  flash" in summary
+    assert "attn_backend  native" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
     assert re.search(r"(?m)^  max_steps\s+11$", summary)
@@ -419,7 +430,9 @@ def test_training_config_summary_shows_resolved_values_and_warning():
 
 
 def test_training_config_summary_warns_about_native_attention_fallback(monkeypatch):
-    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, world_size=1))
+    cfg = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, world_size=1, attn_backend="flash")
+    )
     monkeypatch.setattr(
         train_cli,
         "flash_attention_unsupported_gpu_reason",
@@ -1074,7 +1087,7 @@ def _options(**overrides):
         eager_decode=False,
         speculative_draft_tokens=0,
         mtp_loss_scale=None,
-        attn_backend="flash",
+        attn_backend="native",
         disable_thinking=False,
         metrics_log_dir=None,
         agent_fn=None,

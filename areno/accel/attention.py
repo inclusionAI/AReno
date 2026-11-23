@@ -1,10 +1,7 @@
-"""Unified causal attention shim for consistency diagnostics.
+"""Native causal attention for training and rollout.
 
-This backend intentionally routes train full-forward, rollout prefill, and
-rollout decode through the same CUDA forward kernel. It is slower than
-flash-attn, but keeps causal/window masking and softmax accumulation identical
-across paths so rollout old-logp and train logp can be compared without mixing
-attention implementations.
+Packed training, paged decode, and prefill use the same tiled softmax reduction
+order for supported BF16 CUDA shapes. Other layouts use the extension kernels.
 
 Ascend uses flash-attn-npu when available for supported layouts. Native C
 kernels handle other cases; ``force_native=True`` bypasses the library entirely.
@@ -16,6 +13,8 @@ import torch
 
 from areno.accel._extension import extension as _extension
 from areno.accel.utils import on_kernel_device
+
+TILED_HEAD_DIMS = (32, 64, 96, 128, 192, 256)
 
 
 def _window_left(window_left: int | None) -> int:
@@ -226,6 +225,20 @@ def areno_varlen_causal_attention(
         return varlen_causal_attention(
             q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale), force_native=force_native
         )
+    if q.dtype == k.dtype == v.dtype == torch.bfloat16 and q.shape[-1] in TILED_HEAD_DIMS:
+        from areno.accel.kernels.native_attention import PackedAttention, tiled_forward
+
+        args = (
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            cu_seqlens.contiguous(),
+            _window_left(window_left),
+            _scale(q, softmax_scale),
+        )
+        if torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v)):
+            return PackedAttention.apply(*args)
+        return tiled_forward(*args)
     return _ArenoVarlenCausalAttention.apply(q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale))
 
 
@@ -244,18 +257,44 @@ class _ArenoPagedCausalAttentionDecode(torch.autograd.Function):
         num_splits: int,
         softmax_scale: float,
     ) -> torch.Tensor:
-        out = _extension(q.device).areno_paged_causal_attention_decode_forward(
-            q.contiguous(),
-            k_update.contiguous(),
-            v_update.contiguous(),
-            k_cache.contiguous(),
-            v_cache.contiguous(),
-            block_table.contiguous(),
-            cache_seqlens.contiguous(),
-            int(window_left),
-            int(num_splits),
-            float(softmax_scale),
-        )
+        if (
+            q.is_cuda
+            and q.dtype == k_cache.dtype == v_cache.dtype == k_update.dtype == v_update.dtype == torch.bfloat16
+            and q.shape[-1] in TILED_HEAD_DIMS
+            and k_cache.shape == v_cache.shape
+            and k_update.shape == v_update.shape == (q.shape[0], k_cache.shape[2], q.shape[-1])
+            and k_cache.shape[-1] == q.shape[-1]
+            and q.shape[1] % k_cache.shape[2] == 0
+            and block_table.shape[0] == cache_seqlens.numel() == q.shape[0]
+            and k_cache.is_contiguous()
+            and v_cache.is_contiguous()
+        ):
+            from areno.accel.kernels.native_attention import tiled_forward
+
+            out = tiled_forward(
+                q.contiguous(),
+                k_cache,
+                v_cache,
+                cache_seqlens.contiguous(),
+                window_left,
+                softmax_scale,
+                table=block_table.contiguous(),
+                update_k=k_update.contiguous(),
+                update_v=v_update.contiguous(),
+            )
+        else:
+            out = _extension(q.device).areno_paged_causal_attention_decode_forward(
+                q.contiguous(),
+                k_update.contiguous(),
+                v_update.contiguous(),
+                k_cache.contiguous(),
+                v_cache.contiguous(),
+                block_table.contiguous(),
+                cache_seqlens.contiguous(),
+                int(window_left),
+                int(num_splits),
+                float(softmax_scale),
+            )
         ctx.save_for_backward(q, k_cache, v_cache, block_table, cache_seqlens)
         ctx.window_left = int(window_left)
         ctx.num_splits = int(num_splits)

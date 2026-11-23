@@ -166,7 +166,7 @@ def test_npu_initializes_shared_engine_with_tp_dp_and_optimizer(monkeypatch, opt
     assert captured["runtime_config"].activation_checkpointing
     assert not captured["runtime_config"].eager_decode
     assert not captured["runtime_config"].compile_model
-    assert captured["runtime_config"].attn_backend == "flash"
+    assert captured["runtime_config"].attn_backend == "native"
     assert config.runtime == {"activation_checkpointing": True}
     backend.close()
 

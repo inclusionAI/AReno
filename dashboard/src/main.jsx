@@ -274,7 +274,7 @@ const defaultTrainConfig = {
   max_steps: 5,
   world_size: 1,
   tp_size: 1,
-  attn_backend: "flash",
+  attn_backend: "native",
   activation_checkpointing: true,
   drop_rollout_state: false,
   eager_decode: false,

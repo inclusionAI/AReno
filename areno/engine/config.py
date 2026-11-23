@@ -67,7 +67,7 @@ class RuntimeConfig:
     """Runtime allocation config for rollout decode and device graphs."""
 
     kv_block_size: int = 256
-    attn_backend: Literal["flash", "native"] = "flash"
+    attn_backend: Literal["flash", "native"] = "native"
     compile_model: bool = True
     activation_checkpointing: bool = True
     recompute_modules: tuple[str, ...] | str | None = field(default=None, kw_only=True)
@@ -274,7 +274,7 @@ class ModelConfig:
     linear_value_head_dim: int = 128
     linear_num_key_heads: int = 16
     linear_num_value_heads: int = 16
-    attn_backend: Literal["flash", "native"] = "flash"
+    attn_backend: Literal["flash", "native"] = "native"
 
     def validate_tp(self, tp_size: int) -> None:
         """Validate tensor-parallel divisibility required by local kernels."""

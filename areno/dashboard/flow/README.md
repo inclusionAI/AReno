@@ -21,7 +21,7 @@ GPU training still runs remotely; local CUDA is not required for the control pla
 - Plans appear inline in Agent chat (including plans prepared from Launcher).
   Edit, add or delete parameters there; saving validates the changes and refreshes
   the fee estimate before execution. Required fields cannot be removed.
-- Training defaults to Flash attention and Adam 4-bit, with editable optimizer
+- Training defaults to native attention and Adam 4-bit, with editable optimizer
   controls. Serving defaults to Flash attention. Plans fetch
   `ghcr.io/inclusionai/areno:latest` and pin its current digest; if no latest tag is
   published, registry resolution falls back to the highest stable version. The

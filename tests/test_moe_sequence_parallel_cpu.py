@@ -139,6 +139,10 @@ def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
             shared_experts=shared_experts,
         )
 
+        if module is bailing_v3:
+            block.config = SimpleNamespace(attn_backend="native")
+            block._train_experts = module.BailingSparseMoeBlock._train_experts.__get__(block)
+
         output = module.BailingSparseMoeBlock.forward(block, torch.ones((1, 2, 2)))
 
         assert output.shape == (1, 2, 2)
@@ -158,6 +162,7 @@ def test_bailing_router_load_ignores_alignment_tokens(monkeypatch):
         gate = SimpleNamespace(
             weight=torch.zeros((2, 2)),
             routing_layer_slot=0,
+            native_projection=True,
             num_experts=2,
             local_tokens_per_expert=torch.zeros(2),
             _forward_grouped_topk=lambda logits: (topk_idx, topk_weight),

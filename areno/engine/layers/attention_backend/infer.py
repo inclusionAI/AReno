@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from areno.accel.attention import areno_paged_causal_attention_decode, areno_varlen_causal_attention
+from areno.accel.attention import TILED_HEAD_DIMS, areno_paged_causal_attention_decode, areno_varlen_causal_attention
 from areno.engine.layers.attention_backend.common import (
     AttnBackend,
     build_attention_call,
@@ -65,6 +65,93 @@ class FlashAttnInferBackend(nn.Module):
         q_flat = q.reshape(-1, q.shape[-2], q.shape[-1])
         k_flat = k.reshape(-1, k.shape[-2], k.shape[-1])
         v_flat = v.reshape(-1, v.shape[-2], v.shape[-1])
+        if (
+            self.attn_backend == "native"
+            and q.is_cuda
+            and q.dtype == k.dtype == v.dtype == k_cache.dtype == v_cache.dtype == torch.bfloat16
+            and q.shape[-1] in TILED_HEAD_DIMS
+            and q_flat.shape[0] == k_flat.shape[0] == v_flat.shape[0]
+            and q.device == k.device == v.device == k_cache.device == v_cache.device
+            and k_cache.ndim == v_cache.ndim == 4
+            and k.shape[-1] == k_cache.shape[-1] == q.shape[-1]
+            and q_flat.shape[1] % k_flat.shape[1] == 0
+            and k_flat.shape[1] == v_flat.shape[1] == k_cache.shape[2]
+            and k_cache.shape[:-1] == v_cache.shape[:-1]
+            and v.shape[-1] <= v_cache.shape[-1] <= q.shape[-1]
+            and k_cache.is_contiguous()
+            and v_cache.is_contiguous()
+            and meta.block_table is not None
+            and meta.block_table.device == q.device
+            and meta.block_table.ndim == 2
+            and not (torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v, k_cache, v_cache)))
+        ):
+            from areno.accel.kernels.native_attention import tiled_forward
+
+            scale = q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
+            window = _window_left(window_size or (-1, -1))
+            window = -1 if window is None else window
+            if (
+                meta.mode == "prefill"
+                and meta.cache_seqlens is None
+                and meta.cu_seqlens is not None
+                and meta.max_seqlen is not None
+            ):
+                store = None
+                if update_cache:
+                    if meta.cache_block_ids is None or meta.cache_block_offsets is None:
+                        raise ValueError("prefill inference requires cache_block_ids and cache_block_offsets")
+                    store = (k_cache, v_cache, meta.cache_block_ids.contiguous(), meta.cache_block_offsets.contiguous())
+                return tiled_forward(
+                    q_flat.contiguous(),
+                    k_flat.contiguous(),
+                    v_flat.contiguous(),
+                    meta.cu_seqlens.contiguous(),
+                    window,
+                    scale,
+                    store_cache=store,
+                ).view(*q.shape[:-1], v.shape[-1])
+            if (
+                meta.mode == "prefill"
+                and meta.cache_seqlens is not None
+                and meta.cu_seqlens is not None
+                and meta.max_seqlen is not None
+            ):
+                if update_cache:
+                    _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
+                return tiled_forward(
+                    q_flat.contiguous(),
+                    k_cache,
+                    v_cache,
+                    meta.cu_seqlens.contiguous(),
+                    window,
+                    scale,
+                    table=meta.block_table.contiguous(),
+                    prefix=meta.cache_seqlens.contiguous(),
+                    value_dim=v.shape[-1],
+                ).view(*q.shape[:-1], v.shape[-1])
+            if (
+                meta.mode == "decode"
+                and meta.tokens_per_seq == 1
+                and update_cache
+                and meta.cache_seqlens is not None
+                and meta.block_table.dtype == meta.cache_seqlens.dtype == torch.int32
+                and q_flat.shape[0]
+                == k_flat.shape[0]
+                == v_flat.shape[0]
+                == meta.cache_seqlens.numel()
+                == meta.block_table.shape[0]
+            ):
+                return tiled_forward(
+                    q_flat.contiguous(),
+                    k_cache,
+                    v_cache,
+                    meta.cache_seqlens.contiguous(),
+                    window,
+                    scale,
+                    table=meta.block_table.contiguous(),
+                    update_k=k_flat.contiguous(),
+                    update_v=v_flat.contiguous(),
+                ).view(*q.shape[:-1], v.shape[-1])
         v_cache_dim = v_cache.shape[-1]
         call = build_attention_call(q_flat, k_flat, v_flat, window_size, softmax_scale)
 

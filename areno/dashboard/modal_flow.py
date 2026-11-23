@@ -92,7 +92,7 @@ class ModalFlow:
         request = resolve_request(request, self.app.controller.store)
         for stage in request.get("stages", []):
             params = stage.setdefault("params", {})
-            params.setdefault("attn_backend", "flash")
+            params.setdefault("attn_backend", "native")
             if "adam_4bit" not in params and not params.get("adam_8bit"):
                 params["adam_4bit"] = True
         if request.get("kind") == "deployment":
