@@ -1,0 +1,51 @@
+README.md
+  s_96c85c504cbee2::t_e80ed1fbcfaff1 34
+areno/api/trainer_config.py
+  s_96c85c504cbee2::t_9c76162480eb85 90
+areno/cli/train.py
+  s_96c85c504cbee2::t_5a8e359d8777ba 2150,2152
+areno/dashboard/dist/assets/index-C7gqIpIU.js
+  s_96c85c504cbee2::t_ec833e7ade738c 227
+areno/dashboard/dist/index.html
+  s_96c85c504cbee2::t_7974f479ace64d 7
+areno/dashboard/flow/README.md
+  s_96c85c504cbee2::t_427e51a384e4b2 24
+areno/dashboard/modal_flow.py
+  s_96c85c504cbee2::t_f9beb18f0d0b8d 95
+areno/engine/config.py
+  s_96c85c504cbee2::t_0accf16a9e2f07 70,277
+areno/engine/layers/attention_backend/train.py
+  s_96c85c504cbee2::t_f8183e4d7a9b95 159,161
+dashboard/src/main.jsx
+  s_96c85c504cbee2::t_e488c0edb0192f 277
+docs/cli/training.rst
+  s_96c85c504cbee2::t_c805da73a5f3bf 262-264
+docs/getting-started/cuda.rst
+  s_96c85c504cbee2::t_154d469cd23fe9 117-118
+docs/sdk/trainer.rst
+  s_96c85c504cbee2::t_da9541c6228ebf 403-405
+tests/test_dashboard_modal_cpu.py
+  s_96c85c504cbee2::t_8bb94c342685b3 203
+tests/test_native_policy_logprobs_e2e.py
+  s_96c85c504cbee2::t_6636959db4c23b 1-60
+tests/test_npu_backend_cpu.py
+  s_96c85c504cbee2::t_9d185443d194e5 169
+tests/test_train_cli_config_cpu.py
+  s_96c85c504cbee2::t_f17418e9ba3c62 23-33,422,433-435,1090
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3323e99f99392494cc1650b11835eeace30a5855",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
