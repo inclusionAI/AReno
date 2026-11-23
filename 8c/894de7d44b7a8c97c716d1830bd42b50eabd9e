@@ -1,0 +1,19 @@
+areno/accel/kernels/fused_moe.py
+  s_96c85c504cbee2::t_8cc14cee1dac54 503-506,509
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8c894de7d44b7a8c97c716d1830bd42b50eabd9e",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
