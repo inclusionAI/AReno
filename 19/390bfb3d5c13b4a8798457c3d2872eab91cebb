@@ -1,0 +1,19 @@
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_d57678f2c62d5a 377,380-385,387-401
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "19390bfb3d5c13b4a8798457c3d2872eab91cebb",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
