@@ -1,0 +1,23 @@
+areno/accel/kernels/fused_moe.py
+  s_96c85c504cbee2::t_f40a1cfbd4c662 464-496
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_d0b43aa6229ae2 334,362,372-394,1974
+scripts/validation/ling_long_prompt_logprobs.py
+  s_96c85c504cbee2::t_b88877c172f3d0 40,50,193-194,222-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "345575493d2c1d7013ef2a4e805e4fcaa6ce988f",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
