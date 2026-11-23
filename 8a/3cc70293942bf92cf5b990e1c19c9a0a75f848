@@ -1,0 +1,19 @@
+areno/accel/kernels/invariant_linear.py
+  s_96c85c504cbee2::t_123f2b1fc830a6 43-45,47-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8a3cc70293942bf92cf5b990e1c19c9a0a75f848",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
