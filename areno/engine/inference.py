@@ -194,9 +194,8 @@ class InferenceManager:
     def _init_infer_cache(self, spec: InferCacheSpec) -> None:
         """Prepare rollout-only state without rebuilding stable device graph buffers.
 
-        The cache allocation is tied to the engine lifetime. Later rollouts reset
-        KV contents and refresh inference weights, but reuse the same cache and
-        graph objects so capture cost is not paid every RL step.
+        Requests within a rollout session can reuse cache storage and graphs.
+        The next session rebuilds them after a CUDA training handoff.
         """
         max_running_seqs = int(spec.max_running_seqs)
         num_blocks = int(spec.num_blocks)

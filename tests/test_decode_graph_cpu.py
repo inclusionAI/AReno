@@ -88,15 +88,18 @@ def test_graph_uses_selected_device_for_warmup_capture_and_replay(monkeypatch, d
     assert pointers == [t.data_ptr() for t in (captured.input_ids, captured.block_table, captured.recurrent_slots)]
 
 
-def test_graph_sync_brackets_collective_on_selected_device(monkeypatch, device):
+@pytest.mark.parametrize("ranks", [1, 2])
+def test_graph_sync_brackets_collective_on_selected_device(monkeypatch, device, ranks):
     events = []
     monkeypatch.setattr(torch, device.type, SimpleNamespace(synchronize=lambda d: events.append(("sync", d))))
     monkeypatch.setattr(decode_graph.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(decode_graph.dist, "barrier", lambda **kw: events.append(("barrier", kw)))
+    monkeypatch.setattr(decode_graph.dist, "get_world_size", lambda group: ranks)
     group = object()
     decode_graph.sync_before_graph_capture(device, group)
     args = {"group": group, **({"device_ids": [1]} if device.type == "cuda" else {})}
-    assert events == [("sync", device), ("barrier", args), ("sync", device)]
+    barriers = [("barrier", args)] if ranks > 1 else []
+    assert events == [("sync", device), *barriers, ("sync", device)]
 
 
 @pytest.mark.parametrize("free,peer_ready,expected", [(119, True, False), (121, False, False), (121, True, True)])
