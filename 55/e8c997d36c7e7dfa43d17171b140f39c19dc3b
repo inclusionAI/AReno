@@ -1,0 +1,19 @@
+areno/accel/kernels/kda_fla/fused_sigmoid_gating_recurrent.py
+  s_96c85c504cbee2::t_2e564749b177c9 257,280
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "55e8c997d36c7e7dfa43d17171b140f39c19dc3b",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
