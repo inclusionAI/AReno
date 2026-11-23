@@ -1,0 +1,41 @@
+areno/api/backend/cuda/roles.py
+  s_96c85c504cbee2::t_a54c7b49bcfc53 423-426
+areno/engine/inference.py
+  s_96c85c504cbee2::t_8c45804e501773 197-198
+areno/engine/optim/adamw_8bit.py
+  s_96c85c504cbee2::t_e54f720b4cf942 210-212
+areno/engine/policy_sync.py
+  s_96c85c504cbee2::t_1f1994d7b0b10d 190
+areno/engine/runtime/decode_graph.py
+  s_96c85c504cbee2::t_4955cda151a288 42
+areno/engine/training.py
+  s_96c85c504cbee2::t_4e272be1b913d1 61-63,93-95,97-100,102,106-111
+areno/engine/worker.py
+  s_96c85c504cbee2::t_5d2911afc24585 19,21-22,72-77,179,195-196,252-253,255,260-262,528,544,548-549,570-572,578-582,588,602-645,696-698,788-791,793-794,801-808,810-811,816-834
+docs/cli/training.rst
+  s_96c85c504cbee2::t_e07c2cf03367d0 257-259,422-424
+docs/getting-started/cuda.rst
+  s_96c85c504cbee2::t_db6e8fc00eae04 96-97
+tests/test_cuda_phase_memory_gpu.py
+  s_96c85c504cbee2::t_1fe4b6cf349f50 1-44
+tests/test_decode_graph_cpu.py
+  s_96c85c504cbee2::t_3b027e05c6ecb1 91-92,97,101-102
+tests/test_inference_scheduler_cpu.py
+  s_96c85c504cbee2::t_2143ee21a07718 133,1087-1103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "052e551875ecd76dc17c4e1f599fb29fbbd9566a",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
