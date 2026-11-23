@@ -1,0 +1,30 @@
+.github/workflows/cpu_unit_tests.yml
+  h_8e00c54f303cea 10,21,53-55
+Dockerfile
+  h_8e00c54f303cea 6-7,30
+MANIFEST.in
+  h_8e00c54f303cea 4-5
+areno/cli/diagnostics.py
+  h_8e00c54f303cea 5,19,26-28,115-131,204,211,217-236,241,243,331,350,572-577
+scripts/install.sh
+  h_8e00c54f303cea 2-57,59-60
+scripts/lib/common.sh
+  h_8e00c54f303cea 1-701
+scripts/lib/runtime-profiles.sh
+  h_8e00c54f303cea 1-59
+tests/test_cli_diagnostics_cpu.py
+  h_8e00c54f303cea 84-120,146
+tests/test_install_shell.sh
+  h_8e00c54f303cea 1-868
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e0ebbefb0d1c3df5c633da3ce7709c78eebf6832",
+  "prompts": {},
+  "humans": {
+    "h_8e00c54f303cea": {
+      "author": "Boris <coolhzb@gmail.com>"
+    }
+  }
+}

@@ -1,0 +1,57 @@
+Dockerfile
+  s_a53ba6c088df55::t_b509c99358abff 6-7,30
+tests/test_cli_diagnostics_cpu.py
+  s_a53ba6c088df55::t_a7852f2eb231b9 84-120,146
+areno/cli/diagnostics.py
+  s_a53ba6c088df55::t_b509c99358abff 19,26-28,115-131,204,211,217-230,232-236,241,243,331,350,572-577
+  s_a53ba6c088df55::t_434058a59f0946 5,231
+.github/workflows/cpu_unit_tests.yml
+  s_a53ba6c088df55::t_c8558c68c2425b 10-11,21
+  s_a53ba6c088df55::t_fb681fd1df77a3 53-55
+  s_a53ba6c088df55::t_4119693bf66387 22
+scripts/install.sh
+  s_a53ba6c088df55::t_3f88a4dd996717 16-22,24-25,28,31,37-41,43-44,46-60
+  s_a53ba6c088df55::t_e82db5105ad90a 32
+  s_a53ba6c088df55::t_25488f7a9c5f48 2-15,23,29,45
+  s_a53ba6c088df55::t_55811929aa9659 30
+  s_a53ba6c088df55::t_809da8a6bb7151 33-36,42
+  s_a53ba6c088df55::t_970264190387af 26-27
+scripts/lib/common.sh
+  s_a53ba6c088df55::t_e82db5105ad90a 21-22,38-62,67-68,108-109,130,302-305,322,374,416,434,437,440,474-475,479,481,483,514,560,566,585,637,639,655,657
+  s_a53ba6c088df55::t_809da8a6bb7151 63-66,172-228,230-246,248-286,341-344,385-389,606-608
+  s_a53ba6c088df55::t_36682f462ec448 23-27,299,310-316
+  s_a53ba6c088df55::t_55811929aa9659 29-30,94-95,97-100
+  s_a53ba6c088df55::t_25488f7a9c5f48 1-20,28,31-37,69-93,96,101-107,110-129,131-168,170,229,247,287-298,300-301,306-309,317-321,323-340,345-373,375-384,390-415,417-433,435-436,438-439,441-473,476-478,480,482,484-513,515-559,561-565,567-584,586-605,609-636,638,640-654,656,658-701
+  s_a53ba6c088df55::t_a11c374cc81847 169,171
+MANIFEST.in
+  s_a53ba6c088df55::t_c8558c68c2425b 4-5
+scripts/lib/runtime-profiles.sh
+  s_a53ba6c088df55::t_e82db5105ad90a 32-34,37-39
+  s_a53ba6c088df55::t_25488f7a9c5f48 1-31,35-36,40-59
+README.md
+  s_a53ba6c088df55::t_b772aacc7b2cf9 51,59-64,66-73,76-78,80
+docs/getting-started/installation.rst
+  s_a53ba6c088df55::t_b388be755f837c 4,12-56,60,63-66,68-69,71-72,74,76-77,79-99,101-115,119-135,137-141
+docs/getting-started/mlx.rst
+  s_a53ba6c088df55::t_dbcfea75bd21df 24-25,31-36
+docs/troubleshooting/installation.rst
+  s_a53ba6c088df55::t_66824f6108f0d5 21-43
+requirements/INSTALL.md
+  s_a53ba6c088df55::t_87682863cb8b6a 1-53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6f7ee25eda5ccd04d1d7d07fab755a506b91cbe0",
+  "prompts": {},
+  "sessions": {
+    "s_a53ba6c088df55": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd0-699b-7141-aef4-ae901158214f",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Boris <coolhzb@gmail.com>"
+    }
+  }
+}

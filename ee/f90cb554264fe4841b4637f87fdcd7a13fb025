@@ -1,0 +1,33 @@
+docs/getting-started/mlx.rst
+  s_a53ba6c088df55::t_40c9f11245a7c1 24-25,31-34
+docs/troubleshooting/installation.rst
+  s_a53ba6c088df55::t_40c9f11245a7c1 21-29
+docs/getting-started/cuda.rst
+  s_a53ba6c088df55::t_40c9f11245a7c1 33-36
+README.md
+  s_a53ba6c088df55::t_40c9f11245a7c1 51,59,61-67,70-71,73
+scripts/lib/common.sh
+  s_a53ba6c088df55::t_40c9f11245a7c1 47,82-83,381-394,396,399,407-416,468-471,477,493-513,526-537,563,575,578,586-598,633,636,641,646-648,652-656,658-659,665-693,702-704,707
+scripts/install.sh
+  s_a53ba6c088df55::t_40c9f11245a7c1 46
+tests/test_install_shell.sh
+  s_a53ba6c088df55::t_40c9f11245a7c1 1-1133
+docs/getting-started/installation.rst
+  s_a53ba6c088df55::t_40c9f11245a7c1 4-19,27-48,54-55,57-58,60-61,63-86,90-95,97-98,100,102,104-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "eef90cb554264fe4841b4637f87fdcd7a13fb025",
+  "prompts": {},
+  "sessions": {
+    "s_a53ba6c088df55": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1cdd0-699b-7141-aef4-ae901158214f",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Boris <coolhzb@gmail.com>"
+    }
+  }
+}

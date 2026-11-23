@@ -1,0 +1,45 @@
+areno/api/algorithms.py
+  s_6e0866bb649c5a::t_d258322feeac6c 264-275,277-284
+areno/api/backend/base.py
+  s_6e0866bb649c5a::t_53847724daa083 209-212
+areno/api/backend/cuda/backend.py
+  s_6e0866bb649c5a::t_85556b8ccc02c5 105,621-630
+areno/api/backend/mlx/backend.py
+  s_6e0866bb649c5a::t_ba3110e5fbe937 64,334,353,359-363,385,506-519,699
+areno/api/jev/labels/config.py
+  s_6e0866bb649c5a::t_090aab89eb3e65 50-76
+areno/api/jev/labels/mlx.py
+  s_6e0866bb649c5a::t_854a5f27a2aaed 37-52,66-78
+areno/api/jev/labels/rl.py
+  s_6e0866bb649c5a::t_a7922073acff37 1-197
+areno/api/jev/labels/trainer.py
+  s_6e0866bb649c5a::t_7d49cd073b7590 52-67,117,123-132
+areno/api/trainer.py
+  s_6e0866bb649c5a::t_5d7e8fa158f22d 483-492
+areno/cli/train.py
+  s_6e0866bb649c5a::t_8ea1f23b030a1e 258-259,1071,1133-1134,1136-1137
+docs/cookbook/jev/capability-rl.md
+  s_6e0866bb649c5a::t_72ab3c8924f1ae 1-57
+tests/test_label_jev_mlx_cpu.py
+  s_6e0866bb649c5a::t_5a6bfb91582918 46-81
+tests/test_label_jev_rl_cpu.py
+  s_6e0866bb649c5a::t_9058994fa8641c 1-128
+tests/test_train_cli_config_cpu.py
+  s_6e0866bb649c5a::t_a59c61f003b5b3 1266-1277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1ef0ec95a87c120b094478c186559e7cf14e5ea9",
+  "prompts": {},
+  "sessions": {
+    "s_6e0866bb649c5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e39a-3142-7493-a4d8-fbd757d0bb3a",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}

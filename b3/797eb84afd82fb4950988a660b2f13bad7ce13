@@ -1,0 +1,32 @@
+docs/cli/training.rst
+  s_6e0866bb649c5a::t_d3f4f224b07367 51-66,68-70
+areno/api/jev/labels/dense.py
+  s_6e0866bb649c5a::t_9a5a57c69400b9 1-146
+areno/api/jev/labels/config.py
+  s_6e0866bb649c5a::t_9a5a57c69400b9 8-9,52-70
+areno/api/algorithms.py
+  s_6e0866bb649c5a::t_9a5a57c69400b9 264-275,277-284
+tests/test_sgl_jev_dense_cpu.py
+  s_6e0866bb649c5a::t_d3f4f224b07367 1-78
+  s_6e0866bb649c5a::t_722d56ded109ff 79-106
+areno/api/backend/cuda/backend.py
+  s_6e0866bb649c5a::t_9a5a57c69400b9 105
+areno/cli/train.py
+  s_6e0866bb649c5a::t_9a5a57c69400b9 89,259-262,1074,1136-1143,1757-1762
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b3797eb84afd82fb4950988a660b2f13bad7ce13",
+  "prompts": {},
+  "sessions": {
+    "s_6e0866bb649c5a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e39a-3142-7493-a4d8-fbd757d0bb3a",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
