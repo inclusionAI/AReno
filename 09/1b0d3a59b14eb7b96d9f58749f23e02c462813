@@ -1,0 +1,143 @@
+scripts/validation/ling_long_prompt_logprobs.py
+  s_96c85c504cbee2::t_e027fb6f241d0b 52-53,95,241,257-258,344-346
+  s_96c85c504cbee2::t_b88877c172f3d0 44,54,265-266,319
+  s_96c85c504cbee2::t_36db6ea6b1abfe 21,27,55-56,156-158,187-202,237,242-243,289-290,362-366
+  s_96c85c504cbee2::t_014c64309ca0cd 14,20,24-25,50,57-60,66-67,129-147,304,309-313,315-318,320-326,330-331,334,337-338,339,342
+  s_96c85c504cbee2::t_c0ac62b40a2c81 26,61,148,150-155,178-179,216-224,314
+  s_96c85c504cbee2::t_97867fecc731e0 3-4,23,110-122,268-269,305-308,340-341
+  s_96c85c504cbee2::t_a0ff0cde5ce765 327-329,332-333
+  s_96c85c504cbee2::t_366d9e81ee0359 62,64-65,103-105,149,267,274-287,291-303,336
+scripts/validation/benchmark_native_attention.py
+  s_96c85c504cbee2::t_92f8063ff6bbb0 2-16,18-22,24-35,37,39-40,47-51,60-63,65-69,75-78
+  s_96c85c504cbee2::t_37886ff15f8043 1,17,23,38,41,52-59,64,70-74
+  s_96c85c504cbee2::t_fd15e856035b35 36,42-46
+areno/accel/attention.py
+  s_96c85c504cbee2::t_4b2c059f939eb5 258-259,261-265,268-270,282-294
+  s_96c85c504cbee2::t_7af7412c4992a1 266-267,271-281
+  s_96c85c504cbee2::t_19ae51092a4988 260
+  s_96c85c504cbee2::t_a5c0c0cc0a7f00 3-4,164-171,226-239
+areno/accel/kernels/native_attention.py
+  s_96c85c504cbee2::t_557f710e3ff3cf 1-9,39-43,47-54,57,64-82,89,101-105,148,154-155,172,178,181-182,298,508
+  s_96c85c504cbee2::t_8ec2f86b7b637d 10-17,22-24,30-36,143,183-188,190,192-194,202-204,209
+  s_96c85c504cbee2::t_e47ad66d671eda 25,44,55,58,99,151,153,179-180,195,205-206
+  s_96c85c504cbee2::t_d3f08bc1c8ec47 209-210
+  s_96c85c504cbee2::t_cc1a4d76a84dd5 18-21,26-29,45,56,59-63,90-98,100,144,152,176,191,196-199
+  s_96c85c504cbee2::t_bcee1ab4f7ed66 37,149-150,156,171,207,213-373,375
+  s_96c85c504cbee2::t_811e8184c8aca7 38,46,83-88,157-170,173,177,189,200-201,208
+  s_96c85c504cbee2::t_ca2482e406ef56 106-142,145-147,174-175,376-508
+  s_96c85c504cbee2::t_16bb80bb436227 374
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_09bc42a1cfc294 961-963
+  s_96c85c504cbee2::t_8310d17ea76cbb 1348,1464-1484
+  s_96c85c504cbee2::t_48becd0603564d 165,193-197,1031-1039,1044-1052,1998-1999,2001
+  s_96c85c504cbee2::t_d0b43aa6229ae2 334,362,387-409
+  s_96c85c504cbee2::t_a44e872f2f39b7 2241-2246
+  s_96c85c504cbee2::t_81c323ff0ee25a 372-386,422-425,483-486,495-496,2205
+  s_96c85c504cbee2::t_a8359975926005 81,2000,2274
+  s_96c85c504cbee2::t_7eebe6430bff9f 1504-1507
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_01877d1b7190f5 133-135,372,377,387-389
+  s_96c85c504cbee2::t_156ca50fc13c2c 254,312-317
+  s_96c85c504cbee2::t_5f315c3199cc34 1206-1208,1210-1211
+  s_96c85c504cbee2::t_cb3817b75c9b07 1209
+  s_96c85c504cbee2::t_d57678f2c62d5a 381,384-385,390-396,398-402,409
+  s_96c85c504cbee2::t_dccdcdbbbef475 386-388,397,403-408
+  s_96c85c504cbee2::t_17e388db98061d 311
+  s_96c85c504cbee2::t_15748f1ffb9b6e 343-346
+tests/test_native_attention_gpu.py
+  s_96c85c504cbee2::t_709888a73eb55e 474-507
+  s_96c85c504cbee2::t_b5952e57ee9c5d 508-529,532-551,555-563
+  s_96c85c504cbee2::t_6366819a8ffbae 530-531,552-554,564-573
+  s_96c85c504cbee2::t_1f980239f382aa 574-601
+  s_96c85c504cbee2::t_bb2e210ef12979 602-622
+  s_96c85c504cbee2::t_5aa4bb15379623 623-634
+  s_96c85c504cbee2::t_711d88fdb3e67c 635-653
+areno/accel/native_delta.py
+  s_96c85c504cbee2::t_90578b159d6ab5 1-26,28-67,104-131,133-146
+  s_96c85c504cbee2::t_ecb7efeab12cc1 68-103,132
+  s_96c85c504cbee2::t_babca5e821c85f 27
+areno/accel/kernels/invariant_linear.py
+  s_96c85c504cbee2::t_3fe3c0a9a23010 1-8,28-35,49-54,104-116
+  s_96c85c504cbee2::t_a5d5c8e41157c5 9-27,92
+  s_96c85c504cbee2::t_123f2b1fc830a6 90-91,93-95,97-103
+  s_96c85c504cbee2::t_827581db6f0e96 36-48,76-80,82-89
+  s_96c85c504cbee2::t_de24ae165bce14 55-75,81,96
+areno/engine/layers/linear.py
+  s_96c85c504cbee2::t_b5e8a52bdac035 316-326
+areno/engine/layers/vocab.py
+  s_96c85c504cbee2::t_19ba7b88bedc32 17,86
+areno/accel/kernels/fused_moe.py
+  s_96c85c504cbee2::t_f40a1cfbd4c662 471-477,480,482-484,486-487,501,522
+  s_96c85c504cbee2::t_19c751733f0483 491-492,500,504-506,515
+  s_96c85c504cbee2::t_a57d7988c8147d 510
+  s_96c85c504cbee2::t_e19b1ecf38fb84 493,494,523-524
+  s_96c85c504cbee2::t_39fb8e7b20d4e2 488-490,495-499,502-507,510,515-516,518-521,525-569
+  s_96c85c504cbee2::t_8cc14cee1dac54 511-514,517
+  s_96c85c504cbee2::t_77d78c087e4c47 373-374,411,417-421,468-469,478-479,481,485,508-509
+areno/engine/layers/attention_backend/infer.py
+  s_96c85c504cbee2::t_6b731f99646ff6 68-72,76-83,86-112,132-154
+  s_96c85c504cbee2::t_83c3b13fb349fd 113-131
+  s_96c85c504cbee2::t_a53c05808fb584 73-75,84-85
+areno/engine/layers/attention_backend/train.py
+  s_96c85c504cbee2::t_0fc80357e1098e 75-87,88,90-91,98-105
+  s_96c85c504cbee2::t_6adf9e2d5e6b75 89,92-97
+  s_96c85c504cbee2::t_f8183e4d7a9b95 159,161
+scripts/validation/tune_native_attention.py
+  s_96c85c504cbee2::t_95d9c6cc8fce09 1-71
+areno/accel/kernels/kda_fla/fused_sigmoid_gating_recurrent.py
+  s_96c85c504cbee2::t_2e564749b177c9 257,280
+areno/engine/runtime/logprobs.py
+  s_96c85c504cbee2::t_3e04d4cf0ed3d7 163-176,395-409,411-448
+  s_96c85c504cbee2::t_e3bec5fbd80ed7 410
+areno/accel/kernels/native_delta_conv.py
+  s_96c85c504cbee2::t_d42f56f4db66f7 1-39,41-106
+  s_96c85c504cbee2::t_4781ed71cf8f8c 40
+README.md
+  s_96c85c504cbee2::t_e80ed1fbcfaff1 34
+areno/api/trainer_config.py
+  s_96c85c504cbee2::t_9c76162480eb85 90
+areno/cli/train.py
+  s_96c85c504cbee2::t_5a8e359d8777ba 2150,2152
+areno/dashboard/dist/assets/index-C7gqIpIU.js
+  s_96c85c504cbee2::t_ec833e7ade738c 227
+areno/dashboard/dist/index.html
+  s_96c85c504cbee2::t_7974f479ace64d 7
+areno/dashboard/flow/README.md
+  s_96c85c504cbee2::t_427e51a384e4b2 24
+areno/dashboard/modal_flow.py
+  s_96c85c504cbee2::t_f9beb18f0d0b8d 95
+areno/engine/config.py
+  s_96c85c504cbee2::t_0accf16a9e2f07 70,277
+dashboard/src/main.jsx
+  s_96c85c504cbee2::t_e488c0edb0192f 277
+docs/cli/training.rst
+  s_96c85c504cbee2::t_c805da73a5f3bf 262-264
+docs/getting-started/cuda.rst
+  s_96c85c504cbee2::t_154d469cd23fe9 117-118
+docs/sdk/trainer.rst
+  s_96c85c504cbee2::t_da9541c6228ebf 403-405
+tests/test_dashboard_modal_cpu.py
+  s_96c85c504cbee2::t_8bb94c342685b3 203
+tests/test_native_policy_logprobs_e2e.py
+  s_96c85c504cbee2::t_6636959db4c23b 1-60
+tests/test_npu_backend_cpu.py
+  s_96c85c504cbee2::t_9d185443d194e5 169
+tests/test_train_cli_config_cpu.py
+  s_96c85c504cbee2::t_f17418e9ba3c62 23-33,422,433-435,1090
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "091b0d3a59b14eb7b96d9f58749f23e02c462813",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
