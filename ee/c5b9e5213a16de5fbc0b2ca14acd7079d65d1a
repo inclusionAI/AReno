@@ -1,0 +1,67 @@
+areno/accel/kernels/native_attention.py
+  s_96c85c504cbee2::t_dc5ed5d4b5ce5d 179-183
+areno/accel/kernels/nf4_moe.py
+  s_96c85c504cbee2::t_d4fab8cf4e5773 1,4,98-138,140-145,148-167,169,174-184,186-192
+areno/accel/nf4.py
+  s_96c85c504cbee2::t_5d4f2d19340b4e 100,103-108,114,118-119
+areno/adapters/config.py
+  s_96c85c504cbee2::t_0129fa900e9621 38-42
+areno/adapters/lora.py
+  s_96c85c504cbee2::t_83719da5c3b019 9,16,124-127,289-290,306-308
+areno/adapters/qlora.py
+  s_96c85c504cbee2::t_ae33eefa07abd8 14,21-24,26-27,29-38
+areno/api/backend/cuda/backend.py
+  s_96c85c504cbee2::t_06f7a190242985 529-542
+areno/engine/config.py
+  s_96c85c504cbee2::t_cbba89963a36ac 171
+areno/engine/layers/linear.py
+  s_96c85c504cbee2::t_a16ed8ab3b9422 315
+areno/engine/runtime/_logprob_kernels.py
+  s_96c85c504cbee2::t_3cb8c707406fe3 17,30,33-35,46
+areno/engine/runtime/logprobs.py
+  s_96c85c504cbee2::t_8fdab5f4e89582 255-258,291,294-300
+areno/engine/runtime/metadata.py
+  s_96c85c504cbee2::t_db54090e87b8f0 37
+areno/engine/runtime/train_step.py
+  s_96c85c504cbee2::t_8558963507e71e 67
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_b682933c4b6246 330-332,361-363,472,475
+areno/models/phi4mm/model.py
+  s_96c85c504cbee2::t_796218368a21a7 6,29,172-179,214-221,253-260,289,519-529,601-630,670-686,700-706,961-964,1203-1227,1232-1236
+areno/models/qwen3/model.py
+  s_96c85c504cbee2::t_51b7f965817b4e 116-149,250,276-282,307-309,322,640
+areno/models/qwen3_5/lora.py
+  s_96c85c504cbee2::t_bb7459c381b29a 3,42-58
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_c03b6c32a1cec9 33,556,601-607,617-619,636,641-648,654-657,1759
+docs/concepts/native-lora.rst
+  s_96c85c504cbee2::t_ba2c3f30626937 45-52
+tests/test_bailing_v3_lora_cpu.py
+  s_96c85c504cbee2::t_28803d678b7af5 262-264,266
+tests/test_native_attention_gpu.py
+  s_96c85c504cbee2::t_d8001fbac24bf1 510-528
+tests/test_phi4mm_adapter_cpu.py
+  s_96c85c504cbee2::t_89bef1aa091931 597-641
+tests/test_qlora.py
+  s_96c85c504cbee2::t_e0e671b617e777 156,190-195,229-239
+tests/test_qlora_cpu.py
+  s_96c85c504cbee2::t_2182920290956d 117-118,122,124-125,127-131
+tests/test_qwen35_lora_cpu.py
+  s_96c85c504cbee2::t_964bd8a3577637 72,74-78,110-111,155-180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "eec5b9e5213a16de5fbc0b2ca14acd7079d65d1a",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
