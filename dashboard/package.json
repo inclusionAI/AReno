@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^6.0.7",
+    "vite": "^6.4.5",
     "typescript": "^5.7.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
