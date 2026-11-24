@@ -1,0 +1,26 @@
+areno/engine/runtime/logprobs.py
+  s_96c85c504cbee2::t_f268adbd875a01 255-258,291,294-300
+areno/accel/kernels/native_attention.py
+  s_96c85c504cbee2::t_eea1c347a61d4c 179-183
+tests/test_native_attention_gpu.py
+  s_96c85c504cbee2::t_ef4591c2f4c921 510-528
+areno/engine/runtime/_logprob_kernels.py
+  s_96c85c504cbee2::t_ef4591c2f4c921 33-35
+  s_96c85c504cbee2::t_bd600968a8e1b6 17,30,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "4dfe62c0175696fd8aa442aeb356f24bcefb5247",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
