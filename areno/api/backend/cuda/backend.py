@@ -35,7 +35,9 @@ from areno.api.backend.cuda.checkpoint import save_checkpoint
 from areno.api.backend.cuda.generation import rollout_options
 from areno.api.backend.cuda.losses import dispatch_loss
 from areno.api.backend.cuda.training import (
+    annotate_opd_token_mean_packs,
     annotate_sft_token_mean_packs,
+    is_opd_loss_fn,
     is_sft_loss_fn,
     make_train_pack,
     pad_token_id,
@@ -102,8 +104,8 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev", "sgl-jev-dense"}),
-            model_roles=frozenset({"actor", "ref", "reward", "critic"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev", "sgl-jev-dense", "opd"}),
+            model_roles=frozenset({"actor", "ref", "reward", "critic", "teacher"}),
             multimodal=True,
             distributed=True,
             custom_loss=True,
@@ -523,7 +525,8 @@ class CudaBackend(Backend):
         # forward worker can call it without having to know about the loss API.
         packs = []
         is_sft = is_sft_loss_fn(loss_fn)
-        sft_target_counts = [] if is_sft else None
+        is_opd = is_opd_loss_fn(loss_fn)
+        token_counts = [] if is_sft or is_opd else None
         for seqs in train_microbatches(batch_data, mini_bs):
             pack = make_train_pack(seqs)
             if engine.config.model.model_type == "phi4mm" and any(seq.logprobs for seq in seqs):
@@ -554,12 +557,18 @@ class CudaBackend(Backend):
                     raise ValueError("cannot mix causal and bidirectional label rows")
                 pack["_bi_attn"] = modes.pop()
             packs.append(pack)
-            if is_sft:
-                sft_target_counts.append(sft_target_token_count(seqs))
+            if is_sft or is_opd:
+                token_counts.append(sft_target_token_count(seqs))
         if is_sft:
             annotate_sft_token_mean_packs(
                 packs,
-                sft_target_counts,
+                token_counts,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+            )
+        elif is_opd:
+            annotate_opd_token_mean_packs(
+                packs,
+                token_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
         if packs and "_label_questions" in packs[0]:

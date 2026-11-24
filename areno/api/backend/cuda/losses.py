@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from areno.api.backend.common import LOGP_METRIC_WEIGHT, TrainMetric
+from areno.api.backend.common import LOGP_METRIC_WEIGHT, OPD_K3_DELTA_MAX, OPD_K3_DELTA_MIN, TrainMetric
 
 if TYPE_CHECKING:
     import torch
@@ -279,6 +279,79 @@ def _kl_penalty(logprob, ref_logprob, kl_type: str):
     raise NotImplementedError(f"unsupported PPO kl_loss_type: {kl_type}")
 
 
+def opd_loss_fn(
+    data_pack,
+    logprobs,
+    *,
+    opd_coef: float = 1.0,
+    opd_loss_type: str = "pg",
+    opd_clip: float = 5.0,
+):
+    """Token-level on-policy distillation loss (``pg`` or ``k3``)."""
+
+    import torch
+
+    layout = response_layout(
+        data_pack,
+        logprobs,
+        need_old_logprobs=True,
+        need_ref_logprobs=True,
+        need_sequences=True,
+    )
+    if layout.ref_logprobs is None:
+        raise ValueError(
+            "OPD requires teacher logprobs in packed_ref_logprobs; check that the teacher role scored this batch"
+        )
+
+    student = logprobs.to(torch.float32)
+    old = layout.old_logprobs.to(torch.float32)
+    teacher = layout.ref_logprobs.to(torch.float32)
+    if teacher.shape != student.shape:
+        raise ValueError("teacher logprobs must align with student logprobs")
+    if not torch.isfinite(teacher).all():
+        raise ValueError("teacher logprobs contain non-finite values")
+
+    loss_type = str(opd_loss_type).lower()
+    raw_signal = teacher - old
+    if loss_type == "pg":
+        advantage = raw_signal.clamp(-float(opd_clip), float(opd_clip)).detach()
+        token_loss = -advantage * student
+        clipped = raw_signal.abs() > float(opd_clip)
+        advantage_mean = masked_mean(advantage, layout).detach()
+    elif loss_type == "k3":
+        # Bound only the exponent input; clamping the loss would zero gradients.
+        delta = (teacher - student).clamp(OPD_K3_DELTA_MIN, OPD_K3_DELTA_MAX)
+        token_loss = torch.exp(delta) - delta - 1.0
+        clipped = torch.zeros_like(student, dtype=torch.bool)
+        advantage_mean = torch.zeros((), device=student.device, dtype=student.dtype)
+    else:
+        raise ValueError(f"unsupported opd_loss_type: {opd_loss_type!r}")
+
+    coef = float(opd_coef)
+    token_mean = masked_mean(token_loss, layout)
+    total_tokens = data_pack.get("_opd_total_response_tokens")
+    if total_tokens is None:
+        loss = token_mean * coef
+    else:
+        denominator = torch.as_tensor(total_tokens, device=student.device, dtype=torch.float32).clamp_min(1)
+        grad_scale = torch.as_tensor(data_pack.get("_opd_grad_scale", 1), device=student.device, dtype=torch.float32)
+        loss = (token_loss * layout.response_mask).sum() / denominator * grad_scale * coef
+    reported = token_mean * coef
+
+    return loss, {
+        "opd_loss": reported.detach(),
+        "total_loss": reported.detach(),
+        "opd_advantage_mean": advantage_mean,
+        "opd_teacher_logprob_mean": masked_mean(teacher, layout).detach(),
+        "opd_teacher_student_gap": masked_mean((teacher - student).detach(), layout).detach(),
+        "opd_clipfrac": masked_mean(clipped.float(), layout).detach(),
+        "response_len": layout.response_len.mean().detach(),
+        LOGP_METRIC_WEIGHT: layout.valid_count.detach(),
+        TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(old, layout).detach(),
+        TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(student.detach(), layout).detach(),
+    }
+
+
 def dispatch_loss(pack: dict, logprobs):
     """Invoke the loss callable carried by a CUDA training pack."""
 
@@ -294,6 +367,7 @@ __all__ = [
     "grpo_loss_fn",
     "gspo_loss_fn",
     "masked_mean",
+    "opd_loss_fn",
     "ppo_loss_fn",
     "response_layout",
     "sequence_sum",
