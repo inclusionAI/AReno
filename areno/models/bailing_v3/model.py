@@ -80,6 +80,7 @@ from areno.engine.layers.linear import (
     mark_tensor_parallel_parameter,
     native_projection,
     projection_dtype,
+    projection_weight,
 )
 from areno.engine.layers.norm import GroupRMSNormSigmoidGate, RMSNorm
 from areno.engine.layers.rotary import PartialRotaryEmbedding
@@ -712,7 +713,7 @@ class ArenoGroupedLinear(nn.Module):
         self.num_gemms = num_gemms
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(num_gemms, out_features, in_features, dtype=dtype))
+        self.weight = projection_weight(num_gemms, out_features, in_features, dtype=dtype)
 
     def forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor | Sequence[int]) -> torch.Tensor:
         quantized = getattr(self, "quantized_weight", None)

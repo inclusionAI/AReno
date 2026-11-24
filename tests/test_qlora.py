@@ -11,6 +11,51 @@ from areno.accel.nf4 import NF4Weight, nf4_grouped_linear, nf4_linear
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="QLoRA requires CUDA")
 
 
+def test_host_staged_projections_pack_identically_on_cuda():
+    from areno.adapters import LoraConfig
+    from areno.adapters.lora import initialize_lora
+    from areno.adapters.qlora import initialize_qlora
+    from areno.engine.config import EngineConfig, ModelConfig
+    from areno.engine.layers.linear import MergedColumnParallelLinear, stage_qlora_projections
+    from areno.engine.modeling import build_model_on_device
+
+    config = EngineConfig(
+        model=ModelConfig(
+            model_type="qwen3",
+            vocab_size=256,
+            hidden_size=128,
+            intermediate_size=256,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            head_dim=64,
+            dtype=torch.bfloat16,
+        ),
+        model_path="checkpoint",
+        devices=[0],
+    )
+    device = torch.device("cuda", torch.cuda.current_device())
+    dense = build_model_on_device(config, device)
+    with torch.no_grad():
+        for param in dense.parameters():
+            param.uniform_(-0.05, 0.05)
+    with stage_qlora_projections(device):
+        staged = build_model_on_device(config, device)
+    projections = [m.weight for m in staged.modules() if isinstance(m, MergedColumnParallelLinear)]
+    assert projections and all(weight.device.type == "cpu" for weight in projections)
+    assert any(param.is_cuda for param in staged.parameters())
+    staged.load_state_dict(dense.state_dict())
+    for model in (dense, staged):
+        initialize_lora(model, LoraConfig(qlora=True), seed=153)
+        initialize_qlora(model)
+    expected = dense.state_dict()
+    actual = staged.state_dict()
+    assert actual.keys() == expected.keys()
+    for name, tensor in actual.items():
+        assert tensor.device == device
+        torch.testing.assert_close(tensor, expected[name], rtol=0, atol=0)
+
+
 def test_qlora_model_loss_and_all_adapter_gradients():
     from areno.adapters import LoraConfig
     from areno.adapters.lora import initialize_lora

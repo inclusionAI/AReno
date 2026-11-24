@@ -22,6 +22,19 @@ def single_rank_cpu_context():
         set_tp_context(previous)
 
 
+def test_projection_staging_scopes_device_and_restores_after_failure_cpu():
+    from areno.engine.layers.linear import ColumnParallelLinear, projection_device, stage_qlora_projections
+
+    with torch.device("meta"):
+        with pytest.raises(RuntimeError, match="interrupted load"), stage_qlora_projections(torch.device("cuda:0")):
+            layer = ColumnParallelLinear(8, 16, bias=True)
+            assert layer.weight.device.type == "cpu"
+            assert projection_device(layer.weight) == torch.device("cuda:0")
+            assert layer.bias.device.type == "meta"
+            raise RuntimeError("interrupted load")
+        assert ColumnParallelLinear(8, 16).weight.device.type == "meta"
+
+
 def test_qlora_config_enables_paging_and_preserves_base_layout_cpu(monkeypatch):
     from areno.api.config import CudaConfig, MlxConfig
     from areno.engine.config import EngineConfig, ModelConfig, RuntimeConfig

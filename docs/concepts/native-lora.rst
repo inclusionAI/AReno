@@ -51,6 +51,11 @@ All built-in CUDA model adapters project only the positions needed for
 sampling during prefill. Decoder hidden states remain available for every
 token, including image, video, and audio placeholders.
 
+Set ``ARENO_QLORA_HOST_STAGING=1`` to load quantizable checkpoint projections
+into system RAM and transfer one dense projection at a time to the GPU for
+NF4 conversion. Allow host RAM for the dense projections on each local rank.
+Adapters and packed weights reside on the training device after conversion.
+
 Set ``ARENO_OFFLOAD_ACTIVATIONS=1`` to store tensors saved for decoder
 backward in host RAM. This trades host memory and transfer time for GPU
 memory. In multimodal models the setting covers the language decoder.

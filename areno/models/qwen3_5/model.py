@@ -31,6 +31,7 @@ from areno.engine.layers.linear import (
     _shard_range,
     mark_tensor_parallel_parameter,
     projection_dtype,
+    projection_weight,
 )
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
@@ -230,7 +231,7 @@ class Qwen35ReplicatedKVQKVLinear(MergedColumnParallelLinear):
         self.local_out_features = [q_range[1] - q_range[0], head_dim, head_dim]
         self.shard_ranges = (q_range, kv_range, kv_range)
         self.bias = None
-        self.weight = nn.Parameter(torch.empty(sum(self.local_out_features), hidden_size))
+        self.weight = projection_weight(sum(self.local_out_features), hidden_size)
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         self._kv_grad_group, self._kv_grad_replication = _replicated_kv_grad_group(num_kv_heads)
         self.weight.register_hook(self._sync_replicated_kv_grad)

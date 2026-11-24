@@ -33,6 +33,7 @@ from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
 from areno.engine.data.sampling import _truncate_generated
 from areno.engine.inference import InferCacheSpec, InferenceManager
+from areno.engine.layers.linear import stage_qlora_projections
 from areno.engine.modeling import build_model_on_device, build_optimizer, configure_multimodal_training, param_grad
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weights
@@ -78,7 +79,16 @@ class ArenoWorker:
         configure_unified_memory_budget(self.device)
         # Build the actor model directly on the shard's device, then wrap in
         # torch.compile so subsequent forward calls use the compiled graph.
-        self.model = build_model_on_device(config, self.device)
+        host_staging = (
+            self.device.type == "cuda"
+            and config.lora is not None
+            and config.lora.qlora
+            and config.model_path is not None
+            and not config.dummy_load
+            and os.environ.get("ARENO_QLORA_HOST_STAGING") == "1"
+        )
+        with stage_qlora_projections(self.device if host_staging else None):
+            self.model = build_model_on_device(config, self.device)
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")

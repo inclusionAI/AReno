@@ -37,7 +37,7 @@ from areno.engine.checkpoints.common import (
 )
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
-from areno.engine.layers.linear import mark_tensor_parallel_parameter
+from areno.engine.layers.linear import mark_tensor_parallel_parameter, projection_weight
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
@@ -104,11 +104,11 @@ class Qwen3MoeExperts(nn.Module):
         self.local_expert_end = self.local_expert_start + self.local_num_experts
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size
-        self.gate_up_weight = nn.Parameter(
-            torch.empty(self.local_num_experts, 2 * self.intermediate_size, self.hidden_size, dtype=config.dtype)
+        self.gate_up_weight = projection_weight(
+            self.local_num_experts, 2 * self.intermediate_size, self.hidden_size, dtype=config.dtype
         )
-        self.down_weight = nn.Parameter(
-            torch.empty(self.local_num_experts, self.hidden_size, self.intermediate_size, dtype=config.dtype)
+        self.down_weight = projection_weight(
+            self.local_num_experts, self.hidden_size, self.intermediate_size, dtype=config.dtype
         )
         self.lora_slots = nn.ModuleDict()
         mark_tensor_parallel_parameter(self.gate_up_weight, True, sequence_parallel=False, tp_grad_allreduce=False)

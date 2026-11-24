@@ -12,6 +12,9 @@ parallelism is on) to recover the global output.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import torch
 import torch.nn.functional as F
@@ -27,6 +30,31 @@ from areno.engine.parallel.collectives import (
     reduce_scatter_to_sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+
+_qlora_target: ContextVar[torch.device | None] = ContextVar("qlora_target", default=None)
+
+
+@contextmanager
+def stage_qlora_projections(target: torch.device | None) -> Iterator[None]:
+    """Keep dense checkpoint destinations on the host until NF4 conversion."""
+    token = _qlora_target.set(target)
+    try:
+        yield
+    finally:
+        _qlora_target.reset(token)
+
+
+def projection_weight(*shape: int, dtype: torch.dtype | None = None) -> nn.Parameter:
+    target = _qlora_target.get()
+    if target is None:
+        return nn.Parameter(torch.empty(shape, dtype=dtype))
+    weight = nn.Parameter(torch.empty(shape, dtype=dtype, device="cpu"))
+    weight._areno_qlora_device = target
+    return weight
+
+
+def projection_device(weight: nn.Parameter) -> torch.device:
+    return getattr(weight, "_areno_qlora_device", weight.device)
 
 
 def mark_tensor_parallel_parameter(
@@ -94,7 +122,7 @@ class ColumnParallelLinear(nn.Module):
         self.local_out_features = end - start
         self.gather_output = gather_output
         self.input_grad_allreduce = input_grad_allreduce
-        self.weight = nn.Parameter(torch.empty(self.local_out_features, in_features))
+        self.weight = projection_weight(self.local_out_features, in_features)
         self.bias = nn.Parameter(torch.empty(self.local_out_features)) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
@@ -156,7 +184,7 @@ class MergedColumnParallelLinear(nn.Module):
         for size in self.out_features:
             start, end = _shard_range(size, ctx.rank, ctx.world_size)
             self.local_out_features.append(end - start)
-        self.weight = nn.Parameter(torch.empty(sum(self.local_out_features), in_features))
+        self.weight = projection_weight(sum(self.local_out_features), in_features)
         self.bias = nn.Parameter(torch.empty(sum(self.local_out_features))) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
@@ -232,7 +260,7 @@ class QKVParallelLinear(MergedColumnParallelLinear):
         self.out_features = (q_size, kv_size, kv_size)
         self.shard_ranges = (q_range, k_range, k_range)
         self.local_out_features = [end - start for start, end in self.shard_ranges]
-        self.weight = nn.Parameter(torch.empty(sum(self.local_out_features), hidden_size))
+        self.weight = projection_weight(sum(self.local_out_features), hidden_size)
         self.bias = nn.Parameter(torch.empty(sum(self.local_out_features))) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
@@ -257,7 +285,7 @@ class RowParallelLinear(nn.Module):
         self.local_in_features = end - start
         self.input_is_parallel = input_is_parallel
         self.lora_slot: nn.Module | None = None
-        self.weight = nn.Parameter(torch.empty(out_features, self.local_in_features))
+        self.weight = projection_weight(out_features, self.local_in_features)
         # Bias lives on each rank as a replica (not TP-sharded) and is added
         # post-reduction so it is not summed `world_size` times.
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None

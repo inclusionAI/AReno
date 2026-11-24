@@ -5,7 +5,12 @@ from __future__ import annotations
 import torch
 
 from areno.accel.nf4 import NF4Weight
-from areno.engine.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from areno.engine.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+    projection_device,
+)
 
 
 @torch.no_grad()
@@ -30,7 +35,7 @@ def initialize_qlora(model):
             weight = getattr(module, name)
             if weight.requires_grad:
                 raise ValueError("initialize native LoRA before quantizing the frozen base")
-            packed = NF4Weight(weight)
+            packed = NF4Weight(weight.to(projection_device(weight)))
             setattr(module, packed_name, packed)
             setattr(module, name, None)
             total_original += weight.numel() * weight.element_size()
