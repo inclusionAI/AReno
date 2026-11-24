@@ -132,6 +132,25 @@ def test_mtp_layer_uses_softmax_attention_and_bypasses_routing_replay():
         assert isinstance(getattr(layer, name), torch.nn.Module)
 
 
+@pytest.mark.parametrize("indices", [[], [3], [3, 1]])
+def test_prefill_projects_only_sampled_rows_and_preserves_hidden_states(indices):
+    from areno.models.bailing_v3.model import BailingMoeV3ForCausalLM
+
+    model = BailingMoeV3ForCausalLM.__new__(BailingMoeV3ForCausalLM)
+    torch.nn.Module.__init__(model)
+    model.word_embeddings = torch.nn.Embedding(7, 8, dtype=torch.bfloat16)
+    model.layers = torch.nn.ModuleList()
+    model.norm = torch.nn.Identity()
+    model.mtp_layers = None
+    model.lm_head = torch.nn.Linear(8, 7, bias=False)
+    tokens = torch.tensor([[1, 4, 5, 2]])
+    rows = torch.tensor(indices, dtype=torch.long)
+    expected = model(tokens)
+    actual = model(tokens, logits_indices=rows)
+    torch.testing.assert_close(actual.logits_shard, expected.logits_shard[:, rows])
+    torch.testing.assert_close(actual.hidden_states, expected.hidden_states)
+
+
 def test_model_builds_mtp_layers_only_when_configured():
     pytest.importorskip("fla")
     from areno.models.bailing_v3.model import BailingMoeV3ForCausalLM

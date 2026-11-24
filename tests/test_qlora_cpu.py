@@ -22,10 +22,11 @@ def single_rank_cpu_context():
         set_tp_context(previous)
 
 
-def test_qlora_config_enables_paging_and_preserves_base_layout_cpu():
+def test_qlora_config_enables_paging_and_preserves_base_layout_cpu(monkeypatch):
     from areno.api.config import CudaConfig, MlxConfig
     from areno.engine.config import EngineConfig, ModelConfig, RuntimeConfig
 
+    monkeypatch.delenv("ARENO_QLORA_DISABLE_PAGING", raising=False)
     lora = LoraConfig(qlora=True)
     config = EngineConfig(model=ModelConfig(), lora=lora, devices=[0])
     assert config.optimizer.paged
@@ -37,6 +38,17 @@ def test_qlora_config_enables_paging_and_preserves_base_layout_cpu():
     assert MlxConfig(lora=lora).lora.qlora
     with pytest.raises(ValueError, match="explicit optimizer state offload"):
         EngineConfig(model=ModelConfig(), lora=lora, runtime=RuntimeConfig(optimizer_state_offload="cpu"), devices=[0])
+
+
+def test_qlora_config_can_keep_optimizer_state_on_device_cpu(monkeypatch):
+    from areno.engine.config import EngineConfig, ModelConfig
+
+    monkeypatch.setenv("ARENO_QLORA_DISABLE_PAGING", "1")
+    lora = LoraConfig(qlora=True)
+    config = EngineConfig(model=ModelConfig(), lora=lora, devices=[0])
+
+    assert config.lora.qlora
+    assert not config.optimizer.paged
 
 
 @pytest.mark.parametrize("shape", [(1, 1), (7, 65), (64, 256), (3, 129, 65)])

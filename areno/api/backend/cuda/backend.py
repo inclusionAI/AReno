@@ -23,6 +23,7 @@ from pathlib import Path
 from threading import Lock
 
 from areno import _configure_torch_runtime
+from areno.api.algorithms import grpo_loss_fn
 from areno.api.backend.base import Backend, BackendCapabilities, register_backend
 from areno.api.backend.common import (
     expand_prompt_features,
@@ -544,6 +545,8 @@ class CudaBackend(Backend):
                     for row, seq in enumerate(seqs)
                 ]
             pack["_loss_fn"] = loss_fn
+            if getattr(loss_fn, "func", loss_fn) is grpo_loss_fn:
+                pack["_score_only_response"] = True
             label_features = [seq.features.get("label_jev") if isinstance(seq.features, dict) else None for seq in seqs]
             if any(feature is not None for feature in label_features):
                 if not all(feature is not None for feature in label_features):

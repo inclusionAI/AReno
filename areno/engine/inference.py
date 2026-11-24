@@ -1203,6 +1203,9 @@ class InferenceManager:
             infer_meta = payload_to_infer_meta(payload.raw, self.device)
         infer_meta.capture_routing = self.config.runtime.rollout_routing_replay
         model_kwargs = {"input_ids": input_ids, "position_ids": position_ids, "infer_meta": infer_meta}
+        if getattr(self.model, "supports_prefill_logits_indices", False):
+            # No sampling on this chunk. MTP still consumes the full hidden states.
+            model_kwargs["defer_lm_head"] = True
         if payload.raw.get("features") is not None:
             model_kwargs["features"] = payload.raw["features"]
         with routing_replay_context(infer_meta):
@@ -1537,18 +1540,21 @@ class InferenceManager:
             infer_meta = payload_to_infer_meta(payload.raw, self.device)
         infer_meta.capture_routing = self.config.runtime.rollout_routing_replay
         model_kwargs = {"input_ids": input_ids, "position_ids": position_ids, "infer_meta": infer_meta}
+        preselected = getattr(self.model, "supports_prefill_logits_indices", False)
+        if preselected:
+            model_kwargs["logits_indices"] = sample_indices
         if payload.raw.get("features") is not None:
             model_kwargs["features"] = payload.raw["features"]
         with routing_replay_context(infer_meta):
             out = self.model(**model_kwargs)
         self._last_routing_capture = captured_routing(infer_meta)
-        logits_shard = out.logits_shard
+        sampled_logits = out.logits_shard[0] if preselected else out.logits_shard[0, sample_indices]
         sampling_params = payload.sampling_params
         if sampling_params.temperature == 0.0:
             # Greedy across TP-sharded vocab: each rank argmaxes its shard,
             # then a cross-rank reduction picks the global argmax.
             next_tokens = _sample_greedy_sharded(
-                logits_shard[0, sample_indices],
+                sampled_logits,
                 self.config.model.vocab_size,
                 self.config.tp_size,
                 eos_token_id=payload.eos_token_id,
@@ -1560,7 +1566,7 @@ class InferenceManager:
             # Temperature/top-k/top-p path: gathers the full vocab to rank 0
             # for sampling, since the noise injection isn't shardable.
             next_tokens = _sample_full_vocab(
-                logits_shard[0, sample_indices],
+                sampled_logits,
                 sampling_params,
                 self.config.model.vocab_size,
                 self.config.tp_size,
@@ -1578,7 +1584,7 @@ class InferenceManager:
         if payload.return_logprobs:
             _check_token_ids(next_tokens, self.config.model.vocab_size, "sampled next_tokens")
             token_logprobs = _policy_token_logprobs(
-                logits_shard[0, sample_indices],
+                sampled_logits,
                 next_tokens,
             )
             return next_tokens, token_logprobs

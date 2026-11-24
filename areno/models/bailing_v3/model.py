@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections.abc import Iterator, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -1947,6 +1949,8 @@ class BailingMTPLayer(BailingDecoderLayer):
 class BailingMoeV3ForCausalLM(nn.Module):
     """Top-level Bailing-MoE V3 causal LM."""
 
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -2005,6 +2009,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -2016,8 +2021,15 @@ class BailingMoeV3ForCausalLM(nn.Module):
             # SP shards the sequence dim before entering the layer stack.
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            for layer in self.layers:
-                hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
+            offload_saved = (
+                train_meta is not None
+                and hidden_states.is_cuda
+                and torch.is_grad_enabled()
+                and os.environ.get("ARENO_BAILING_OFFLOAD_ACTIVATIONS") == "1"
+            )
+            with torch.autograd.graph.save_on_cpu() if offload_saved else nullcontext():
+                for layer in self.layers:
+                    hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
             mtp_logits_shard = None
             if self.mtp_layers is not None and train_meta is not None and train_meta.mtp_enabled:
@@ -2044,9 +2056,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 # The caller projects the trunk hidden states in chunks; MTP
                 # logits are still returned so the MTP loss stays active.
                 return CausalLMOutput(logits_shard=None, hidden_states=hidden_states, mtp_logits_shard=mtp_logits_shard)
-            logits_input = hidden_states
+            logits_input = hidden_states if logits_indices is None else hidden_states.index_select(1, logits_indices)
             if self.lm_head.weight.dtype == torch.float32:
-                logits_input = hidden_states.float()
+                logits_input = logits_input.float()
             return CausalLMOutput(
                 logits_shard=self.lm_head(logits_input),
                 hidden_states=hidden_states,
