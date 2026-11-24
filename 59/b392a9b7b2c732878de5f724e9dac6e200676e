@@ -1,0 +1,33 @@
+areno/api/trainer_config.py
+  s_96c85c504cbee2::t_abd7a81c0b22f5 321,371
+areno/cli/train.py
+  s_96c85c504cbee2::t_878932cd6e7350 135,427-428,1033,1266,1351,1490,2196
+areno/engine/config.py
+  s_96c85c504cbee2::t_814bef7cf2c609 71,153,155-158,404
+areno/engine/runtime/routing_replay.py
+  s_96c85c504cbee2::t_85ecc6280a425c 122-126
+docs/cli/training.rst
+  s_96c85c504cbee2::t_2a61f31bb1dee1 199-208
+tests/test_config_data_cpu.py
+  s_96c85c504cbee2::t_4119ebd10db423 424-438,716
+tests/test_routing_replay_cpu.py
+  s_96c85c504cbee2::t_ed2879610a2e03 58-73
+tests/test_train_cli_config_cpu.py
+  s_96c85c504cbee2::t_3159ebb1cdb661 196-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "59b392a9b7b2c732878de5f724e9dac6e200676e",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
