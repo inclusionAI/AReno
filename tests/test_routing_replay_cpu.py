@@ -55,6 +55,22 @@ def test_sigmoid_routing_replay_recomputes_normalized_weights():
     assert torch.allclose(replay_weight, expected)
 
 
+def test_sigmoid_replay_preserves_matching_router_weights_and_gradients():
+    logits = torch.tensor([[0.0, 1.0, 2.0]], requires_grad=True)
+    ids = torch.tensor([[2, 1]])
+    scores = logits.gather(-1, ids).sigmoid()
+    normalized = scores / scores.sum(-1, keepdim=True)
+    # A fused router may round its normalization differently.
+    fused = torch.nextafter(normalized.detach(), torch.zeros_like(scores))
+    with routing_replay_context(TrainMeta(routing_replay=ids.unsqueeze(1))):
+        replay_ids, weights = resolve_sigmoid_routes(0, logits, ids, fused)
+    assert torch.equal(replay_ids, ids)
+    assert torch.equal(weights, fused)
+    (actual_grad,) = torch.autograd.grad(weights[0, 0], logits)
+    (expected_grad,) = torch.autograd.grad(normalized[0, 0], logits)
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+
+
 def test_train_pack_pads_last_token_with_dynamic_route_sentinel():
     routes = [
         [[0, 1], [2, 3]],

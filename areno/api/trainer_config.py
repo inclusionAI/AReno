@@ -318,6 +318,7 @@ class SFTTrainerConfig(TrainerConfig):
 class RolloutTrainerConfig(TrainerConfig):
     """Sampling/rollout settings used by online RL trainers."""
 
+    rollout_routing_replay: bool = field(default=False, kw_only=True)
     # Rollout speculative decoding with the checkpoint's MTP layer: draft this
     # many tokens per step and verify them in one target forward. 0 disables it.
     speculative_draft_tokens: int = 0
@@ -367,9 +368,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "attn_backend": self.attn_backend,
                 "mtp_loss_scale": self.mtp_loss_scale,
                 "speculative_draft_tokens": self.speculative_draft_tokens,
-                # R3 is the default CUDA path for rollout-based MoE training.
-                # EngineConfig disables it again when the checkpoint is dense.
-                "rollout_routing_replay": True,
+                "rollout_routing_replay": self.rollout_routing_replay,
             },
             lora=self.lora,
             reference_mode=self.reference_mode,
