@@ -114,14 +114,21 @@ def test_qlora_adapter_metadata_cpu(tmp_path):
     assert LoraConfig(adapter_path=str(tmp_path)).qlora
 
 
-def test_qlora_native_projection_replacement_cpu():
+@pytest.mark.parametrize("moe", [False, True])
+def test_qlora_native_projection_replacement_cpu(moe):
     from areno.adapters.lora import initialize_lora
     from areno.adapters.qlora import initialize_qlora
     from areno.engine.config import ModelConfig
-    from areno.models.qwen3.model import Qwen3ForCausalLM
+    from areno.models.qwen3.model import Qwen3ForCausalLM, Qwen3MoeForCausalLM
 
-    model = Qwen3ForCausalLM(
+    model_class = Qwen3MoeForCausalLM if moe else Qwen3ForCausalLM
+    model = model_class(
         ModelConfig(
+            model_type="qwen3_moe" if moe else "qwen3",
+            enable_moe_block=moe,
+            num_experts=4 if moe else None,
+            num_experts_per_tok=2 if moe else 1,
+            moe_intermediate_size=32,
             hidden_size=64,
             intermediate_size=128,
             num_hidden_layers=1,

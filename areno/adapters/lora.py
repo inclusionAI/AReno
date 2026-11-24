@@ -6,13 +6,14 @@ import hashlib
 import math
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from areno.accel import areno_grouped_linear
-from areno.adapters.config import LoraConfig, read_adapter_quantization
+from areno.adapters.config import PHI4MM_TARGETS, QWEN3_DENSE_TARGETS, LoraConfig, read_adapter_quantization
 from areno.engine.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -120,6 +121,10 @@ class LoraSlot(nn.Module):
         self.lora_B.zero_()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "native_projection", False) and x.is_cuda:
+            from areno.accel.kernels.invariant_linear import InvariantLinear
+
+            return InvariantLinear.apply(InvariantLinear.apply(x, self.lora_A, None), self.lora_B, None) * self.scale
         return F.linear(F.linear(x, self.lora_A), self.lora_B) * self.scale
 
     @property
@@ -281,6 +286,8 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
         raise ValueError("native CUDA LoRA cannot restore an MLX affine QLoRA checkpoint")
     model_config = getattr(model, "config", None)
     model_type = getattr(model_config, "model_type", None)
+    if model_type == "phi4mm" and config.adapter_path is None and config.target_modules == QWEN3_DENSE_TARGETS:
+        config = replace(config, target_modules=PHI4MM_TARGETS)
     initializer = _adapter(model_type).lora_initializer
     if initializer is None:
         raise ValueError(f"native LoRA is not supported for {model_type}")
@@ -296,6 +303,9 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
     missing = requested - matched
     if missing:
         raise ValueError(f"target_modules are not present in {model_type}: {', '.join(sorted(missing))}")
+    for slot in slots.values():
+        if isinstance(slot, LoraSlot):
+            slot.native_projection = getattr(model_config, "attn_backend", None) == "native"
     return AdapterRegistry(slots, config, runtime_state)
 
 

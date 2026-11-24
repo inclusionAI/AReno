@@ -42,9 +42,14 @@ for multimodal checkpoints. Combining these adapters with an unfrozen vision
 tower or projector is rejected.
 
 Use ``--qlora --lora-rank 8`` for a frozen NF4 base with double quantization.
-QLoRA supports Qwen3 dense, Qwen3.5 dense language backbones, Gemma4 dense
-language backbones, and Bailing-MoE V3.
-Qwen3.5-MoE LoRA and QLoRA are not supported by this adapter path.
+CUDA QLoRA supports the dense and MoE variants of Qwen3 and Qwen3.5,
+the Phi-4 Multimodal and Gemma4 dense language backbones, and Bailing-MoE V3. Qwen3.5-MoE packs both
+routed expert matrices in NF4 and supports adapters on routed and shared
+experts as well as attention projections.
+
+Phi-4 Multimodal uses its checkpoint projection names ``qkv_proj``,
+``o_proj``, ``gate_up_proj``, and ``down_proj``. Its vision and speech LoRA
+weights remain part of the frozen base during adapter training.
 
 Gemma4 uses the default attention and MLP target names. Full-attention layers
 with ``attention_k_eq_v`` share one ``k_proj`` adapter between the K and V

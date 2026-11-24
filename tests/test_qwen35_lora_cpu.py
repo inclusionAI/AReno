@@ -69,9 +69,13 @@ def qwen35_module():
                         delattr(parent, child_name)
 
 
-def build_model(module, *, vision=False):
+def build_model(module, *, vision=False, moe=False):
     config = ModelConfig(
-        model_type="qwen3_5_vl" if vision else "qwen3_5",
+        model_type=("qwen3_5_vl" if vision else "qwen3_5") + ("_moe" if moe else ""),
+        num_experts=4 if moe else None,
+        num_experts_per_tok=2 if moe else 1,
+        moe_intermediate_size=16 if moe else 0,
+        shared_expert_intermediate_size=16 if moe else 0,
         vocab_size=128,
         hidden_size=32,
         intermediate_size=64,
@@ -103,6 +107,8 @@ def build_model(module, *, vision=False):
         else None,
     )
     cls = module.Qwen35VLForConditionalGeneration if vision else module.Qwen35ForCausalLM
+    if moe:
+        cls = module.Qwen35MoeVLForConditionalGeneration if vision else module.Qwen35MoeForCausalLM
     model = cls(config)
     with torch.no_grad():
         for parameter in model.parameters():
@@ -144,6 +150,32 @@ def test_qwen35_targets_frozen_base_and_roundtrip_cpu(qwen35_module, tmp_path, v
         torch.testing.assert_close(value, restored.state_dict()[key], atol=0, rtol=0)
     if vision:
         assert all(not p.requires_grad for p in model.visual.parameters())
+
+
+@pytest.mark.parametrize("vision", [False, True], ids=["text", "vl"])
+def test_qwen35_moe_qlora_quantizes_routed_experts_and_restores_adapters(qwen35_module, tmp_path, vision):
+    model = build_model(qwen35_module, vision=vision, moe=True)
+    restored = copy.deepcopy(model)
+    config = LoraConfig(rank=2, alpha=4, target_modules=QWEN35_TARGETS, qlora=True)
+    registry = initialize_lora(model, config, seed=9)
+    initialize_qlora(model)
+    language = model.language_model if vision else model
+    for layer in language.layers:
+        routed = layer.mlp.experts
+        assert routed.gate_up_weight is None and routed.down_weight is None
+        assert routed.quantized_gate_up.packed.dtype == routed.quantized_down.packed.dtype == torch.uint8
+        assert set(routed.lora_slots) == {"gate_proj", "up_proj", "down_proj"}
+        assert layer.mlp.shared_expert.down_proj.lora_slot is not None
+    assert {id(p) for p in model.parameters() if p.requires_grad} == {id(p) for p in registry.parameters()}
+    with torch.no_grad():
+        for slot in registry.slots.values():
+            slot.lora_B.normal_(0, 0.02)
+    export_peft_adapter(registry, tmp_path, base_model_name_or_path="test-base")
+    restored_registry = initialize_lora(restored, LoraConfig(adapter_path=str(tmp_path)), seed=23)
+    initialize_qlora(restored)
+    load_peft_adapter(restored_registry, tmp_path)
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(value, restored.state_dict()[key], atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("qlora", [False, True], ids=["lora", "qlora"])

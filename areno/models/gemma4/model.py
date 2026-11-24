@@ -54,6 +54,7 @@ from areno.engine.layers.linear import (
     RowParallelLinear,
     _areno_linear_forward,
     mark_tensor_parallel_parameter,
+    native_projection,
 )
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.rotary import Gemma4RotaryEmbedding
@@ -102,13 +103,22 @@ class Gemma4ReplicatedLinear(nn.Module):
     """
 
     def __init__(
-        self, in_features: int, out_features: int, *, sequence_parallel: bool, dtype: torch.dtype | None = None
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        sequence_parallel: bool,
+        dtype: torch.dtype | None = None,
+        invariant: bool = False,
     ):
         super().__init__()
+        self.native_projection = invariant
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype))
         mark_tensor_parallel_parameter(self.weight, False, sequence_parallel=sequence_parallel, tp_grad_allreduce=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.native_projection and x.is_cuda:
+            return native_projection(self, x)
         return _areno_linear_forward(x, self.weight, None)
 
 
@@ -535,11 +545,13 @@ class Gemma4DecoderLayer(nn.Module):
                 config.hidden_size,
                 self.hidden_size_per_layer_input,
                 sequence_parallel=config.sequence_parallel,
+                invariant=config.attn_backend == "native",
             )
             self.per_layer_projection = Gemma4ReplicatedLinear(
                 self.hidden_size_per_layer_input,
                 config.hidden_size,
                 sequence_parallel=config.sequence_parallel,
+                invariant=config.attn_backend == "native",
             )
             self.post_per_layer_input_norm = Gemma4RMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
@@ -654,6 +666,7 @@ class Gemma4ForCausalLM(nn.Module):
                 config.hidden_size,
                 config.num_hidden_layers * self.hidden_size_per_layer_input,
                 sequence_parallel=config.sequence_parallel,
+                invariant=config.attn_backend == "native",
             )
             self.per_layer_projection_norm = RMSNorm(self.hidden_size_per_layer_input, config.rms_norm_eps)
             # Static scales used when combining the embedding signal with the

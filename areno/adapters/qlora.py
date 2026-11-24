@@ -11,24 +11,31 @@ from areno.engine.layers.linear import ColumnParallelLinear, MergedColumnParalle
 @torch.no_grad()
 def initialize_qlora(model):
     from areno.models.bailing_v3.model import ArenoGroupedLinear
+    from areno.models.qwen3.model import Qwen3MoeExperts
     from areno.models.registry import _adapter
 
     if not _adapter(model.config.model_type).supports_qlora:
         raise ValueError(f"QLoRA is not supported for {model.config.model_type}")
     total_original = total_quantized = count = 0
     for module in list(model.modules()):
-        if not isinstance(
-            module, (ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear, ArenoGroupedLinear)
+        if isinstance(module, Qwen3MoeExperts):
+            weights = (("gate_up_weight", "quantized_gate_up"), ("down_weight", "quantized_down"))
+        elif isinstance(
+            module, ColumnParallelLinear | MergedColumnParallelLinear | RowParallelLinear | ArenoGroupedLinear
         ):
+            weights = (("weight", "quantized_weight"),)
+        else:
             continue
-        weight = module.weight
-        if weight.requires_grad:
-            raise ValueError("initialize native LoRA before quantizing the frozen base")
-        total_original += weight.numel() * weight.element_size()
-        module.quantized_weight = NF4Weight(weight)
-        module.weight = None
-        total_quantized += module.quantized_weight.storage_bytes
-        count += 1
+        for name, packed_name in weights:
+            weight = getattr(module, name)
+            if weight.requires_grad:
+                raise ValueError("initialize native LoRA before quantizing the frozen base")
+            packed = NF4Weight(weight)
+            setattr(module, packed_name, packed)
+            setattr(module, name, None)
+            total_original += weight.numel() * weight.element_size()
+            total_quantized += packed.storage_bytes
+            count += 1
     if not count:
         raise ValueError("QLoRA found no supported linear projections")
     model.qlora_memory = {

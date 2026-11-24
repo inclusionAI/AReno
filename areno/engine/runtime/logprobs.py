@@ -252,40 +252,10 @@ def _selected_logprobs_components_forward(
 ) -> torch.Tensor:
     """Forward-only selected logprobs without materializing full-vocab probs."""
 
-    labels = labels.to(device=logits_shard.device, dtype=torch.long)
-    local_vocab = logits_shard.shape[-1]
-    local_labels = labels - int(vocab_start)
-    local_mask = (local_labels >= 0) & (local_labels < local_vocab)
-
-    local_max = logits_shard.max(dim=-1).values.float()
-    global_max = local_max.clone()
-    if world_size > 1:
-        dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
-
-    if (
-        world_size == 1
-        and logits_shard.ndim == 2
-        and logits_shard.device.type == "cuda"
-        and logits_shard.dtype != torch.float64
-    ):
-        from areno.engine.runtime._logprob_kernels import row_logsumexp
-
-        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
-    else:
-        exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
-        for start in range(0, local_vocab, vocab_chunk_size):
-            end = min(start + vocab_chunk_size, local_vocab)
-            exp_sum += torch.exp(logits_shard[..., start:end].float() - global_max.unsqueeze(-1)).sum(dim=-1)
-        if world_size > 1:
-            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
-        logsumexp = global_max + exp_sum.log()
-
-    safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
-    target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
-    target = target.masked_fill(~local_mask, 0.0)
-    if world_size > 1:
-        dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
-    return target - logsumexp
+    scores, _, _, _ = _selected_logprobs_components(
+        logits_shard, labels, vocab_start, group, world_size, vocab_chunk_size=vocab_chunk_size
+    )
+    return scores
 
 
 def _selected_logprobs_components(
@@ -318,15 +288,16 @@ def _selected_logprobs_components(
     if world_size > 1:
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
 
-    if (
-        world_size == 1
-        and logits_shard.ndim == 2
-        and logits_shard.device.type == "cuda"
-        and logits_shard.dtype != torch.float64
-    ):
+    if logits_shard.ndim == 2 and logits_shard.is_cuda and logits_shard.dtype != torch.float64:
         from areno.engine.runtime._logprob_kernels import row_logsumexp
 
-        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+        if world_size == 1:
+            logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+        else:
+            # Reduce each vocab shard in the same order for a decode row and a packed batch.
+            exp_sum = row_logsumexp(logits_shard, global_max, vocab_chunk_size, local_sum=True)
+            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
+            logsumexp = exp_sum.log_().add_(global_max)
     else:
         exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
         for start in range(0, local_vocab, vocab_chunk_size):

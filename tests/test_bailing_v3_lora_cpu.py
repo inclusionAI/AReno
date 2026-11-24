@@ -259,8 +259,11 @@ def test_bailing_v3_routed_lora_keeps_cuda_graph_decode_enabled() -> None:
     assert not bailing_runtime.eager_decode
 
     qwen_runtime = RuntimeConfig()
+    qwen_runtime.resolve_eager_decode(model=ModelConfig(model_type="qwen3_moe"), lora=lora)
+    assert not qwen_runtime.eager_decode
+
     with pytest.warns(RuntimeWarning, match="routed-expert LoRA"):
-        qwen_runtime.resolve_eager_decode(model=ModelConfig(model_type="qwen3_moe"), lora=lora)
+        qwen_runtime.resolve_eager_decode(model=ModelConfig(model_type="qwen3_moe", dtype=torch.float32), lora=lora)
     assert qwen_runtime.eager_decode
 
 

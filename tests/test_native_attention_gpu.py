@@ -507,7 +507,29 @@ def test_bf16_native_packed_paged_bitwise_equivalence(kv_heads, dim, window):
         torch.testing.assert_close(decoded, actual[last], rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("dim,value_dim,kv", [(256, 256, 4), (192, 128, 16)])
+@pytest.mark.parametrize("cache_blocks", [16, 32])
+@pytest.mark.parametrize("dim,scale", [(256, None), (512, 1.0)])
+def test_native_attention_packed_matches_every_decode_row(cache_blocks, dim, scale):
+    # Cover Qwen3.5 TP2 and Gemma global heads under both paged decode dispatches.
+    torch.manual_seed(123)
+    length, page = 256, 16
+    q, k, v = [torch.randn(length, heads, dim, device="cuda", dtype=torch.bfloat16) for heads in (8, 2, 2)]
+    bounds = torch.tensor([0, length], device=q.device, dtype=torch.int32)
+    expected = areno_varlen_causal_attention(q, k, v, bounds, softmax_scale=scale)
+    table = torch.arange(cache_blocks, device=q.device, dtype=torch.int32)[None, :]
+    kc, vc = [q.new_empty(cache_blocks, page, 2, dim) for _ in range(2)]
+    rows = []
+    for pos in range(length):
+        row = slice(pos, pos + 1)
+        rows.append(
+            areno_paged_causal_attention_decode(
+                q[row], k[row], v[row], kc, vc, table, bounds.new_tensor([pos]), softmax_scale=scale
+            )
+        )
+    torch.testing.assert_close(torch.cat(rows), expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("dim,value_dim,kv", [(256, 256, 4), (192, 128, 16), (512, 512, 2)])
 def test_packed_native_training_gradients(dim, value_dim, kv):
     from areno.accel.kernels.native_attention import PackedAttention
 

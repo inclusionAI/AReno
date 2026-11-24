@@ -526,6 +526,20 @@ class CudaBackend(Backend):
         sft_target_counts = [] if is_sft else None
         for seqs in train_microbatches(batch_data, mini_bs):
             pack = make_train_pack(seqs)
+            if engine.config.model.model_type == "phi4mm" and any(seq.logprobs for seq in seqs):
+                # A real rollout may have used both sides of the LongRoPE cache boundary.
+                pack["rollout_prompt_lengths"] = [
+                    (
+                        seq.prompt_len
+                        if seq.prompt_len is not None
+                        else next(
+                            (i for i, flag in enumerate(pack["prompt_mask"][row].tolist()) if not flag), len(seq.tokens)
+                        )
+                    )
+                    if seq.logprobs
+                    else -1
+                    for row, seq in enumerate(seqs)
+                ]
             pack["_loss_fn"] = loss_fn
             label_features = [seq.features.get("label_jev") if isinstance(seq.features, dict) else None for seq in seqs]
             if any(feature is not None for feature in label_features):

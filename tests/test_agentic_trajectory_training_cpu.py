@@ -64,7 +64,8 @@ def test_microbatches_keep_interleaved_trajectories_whole():
         train_microbatches(rows, 0)
 
 
-def test_cuda_backend_passes_complete_trajectories_to_each_microbatch():
+@pytest.mark.parametrize("model_type", ["qwen3", "phi4mm"])
+def test_cuda_backend_passes_complete_trajectories_to_each_microbatch(model_type):
     from areno.api.backend.cuda.backend import CudaBackend
     from areno.engine.config import RuntimeConfig
 
@@ -76,11 +77,16 @@ def test_cuda_backend_passes_complete_trajectories_to_each_microbatch():
         return [SimpleNamespace(loss=0.0, metrics={}, stepped=True, adapter_version=None) for _ in packs]
 
     backend = CudaBackend()
-    backend._train_engine = SimpleNamespace(config=SimpleNamespace(runtime=RuntimeConfig()), step=step)
+    config = SimpleNamespace(model=SimpleNamespace(model_type=model_type), runtime=RuntimeConfig())
+    backend._train_engine = SimpleNamespace(config=config, step=step)
     backend.train(SimpleNamespace(), _training_rows(), gspo_loss_fn, mini_bs=1)
 
     assert [pack["loss_sequence_ids"].tolist() for pack in received] == [[0, 0], [0]]
     assert [pack["lengths"].tolist() for pack in received] == [[3, 4], [2]]
+    if model_type == "phi4mm":
+        assert [pack["rollout_prompt_lengths"] for pack in received] == [[2, 2], [1]]
+    else:
+        assert all("rollout_prompt_lengths" not in pack for pack in received)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
