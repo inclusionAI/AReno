@@ -1,0 +1,31 @@
+areno/api/trainer_config.py
+  s_96c85c504cbee2::t_2255d43872ea47 321,371
+areno/cli/train.py
+  s_96c85c504cbee2::t_f14e45b1db0c72 135,427-428,1033,1266,1351,1490,2196
+areno/engine/config.py
+  s_96c85c504cbee2::t_bd5d411de87fe9 71,153,155-160,406
+docs/cli/training.rst
+  s_96c85c504cbee2::t_61a27df91f1e70 199-203
+tests/test_config_data_cpu.py
+  s_96c85c504cbee2::t_8f28334a9d92d9 424-434,712
+tests/test_routing_replay_cpu.py
+  s_96c85c504cbee2::t_1b1da28dd450ff 69-70
+tests/test_train_cli_config_cpu.py
+  s_96c85c504cbee2::t_ebebcd306ba5a6 196-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "191f1f78aba35a070bbf106fdf0c4508d724c27b",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
