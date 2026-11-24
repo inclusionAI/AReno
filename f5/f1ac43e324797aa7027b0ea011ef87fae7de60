@@ -1,0 +1,27 @@
+areno/api/backend/cuda/backend.py
+  s_96c85c504cbee2::t_bec79d186ffc07 529-542
+areno/engine/runtime/metadata.py
+  s_96c85c504cbee2::t_e1b81c1d29f2db 37
+areno/engine/runtime/train_step.py
+  s_96c85c504cbee2::t_4fdafe2e9fae87 67
+areno/models/phi4mm/model.py
+  s_96c85c504cbee2::t_37279db0b28819 6,29,519-529,601-630,670-686,700-706
+tests/test_phi4mm_adapter_cpu.py
+  s_96c85c504cbee2::t_2acc8b29ff23d6 628-640
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f5f1ac43e324797aa7027b0ea011ef87fae7de60",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
