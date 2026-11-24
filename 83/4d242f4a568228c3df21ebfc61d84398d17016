@@ -1,0 +1,23 @@
+areno/adapters/lora.py
+  s_96c85c504cbee2::t_0ccc0489c48942 9,16,289-290
+docs/concepts/native-lora.rst
+  s_96c85c504cbee2::t_050f238baf8039 45-46,50-53
+tests/test_phi4mm_adapter_cpu.py
+  s_96c85c504cbee2::t_42e1481a498d7e 620-621
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "834d242f4a568228c3df21ebfc61d84398d17016",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
