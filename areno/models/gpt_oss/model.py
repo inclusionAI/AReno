@@ -32,6 +32,7 @@ from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
 from areno.engine.parallel.collectives import all_reduce, copy_to_tensor_parallel_region
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.recompute import checkpoint_layer
 from areno.engine.runtime.routing_replay import resolve_softmax_routes, routing_replay_context
 from areno.models.base import CausalLMOutput, ModelAdapter
@@ -228,7 +229,9 @@ class GptOssForCausalLM(Qwen3ForCausalLM):
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.lm_head = VocabParallelLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
 
-    def forward(self, input_ids, position_ids=None, train_meta=None, infer_meta=None, defer_lm_head=False):
+    def forward(
+        self, input_ids, position_ids=None, train_meta=None, infer_meta=None, defer_lm_head=False, logits_indices=None
+    ):
         if train_meta is not None and train_meta.sequence_parallel:
             raise ValueError("GPT-OSS sequence parallelism is not yet supported; use sequence_parallel=False")
         if position_ids is None:
@@ -243,19 +246,21 @@ class GptOssForCausalLM(Qwen3ForCausalLM):
                 else torch.bucketize(torch.arange(input_ids.shape[1], device=hidden.device), cu[1:], right=True)
             )
             sequence_starts = sink_sequence_starts(input_ids.shape[1], hidden.device, seq)
-        for layer in self.layers:
-            hidden = checkpoint_layer(
-                layer,
-                hidden,
-                position_ids,
-                train_meta,
-                infer_meta,
-                sequence_starts,
-                train_meta=train_meta,
-                infer_meta=infer_meta,
-            )
+        with decoder_activation_offload(hidden, train_meta):
+            for layer in self.layers:
+                hidden = checkpoint_layer(
+                    layer,
+                    hidden,
+                    position_ids,
+                    train_meta,
+                    infer_meta,
+                    sequence_starts,
+                    train_meta=train_meta,
+                    infer_meta=infer_meta,
+                )
         hidden = self.norm(hidden)
-        return CausalLMOutput(None if defer_lm_head else self.lm_head(hidden), hidden)
+        logits = project_lm_head(self.lm_head, hidden, defer=defer_lm_head, logits_indices=logits_indices)
+        return CausalLMOutput(logits, hidden)
 
 
 class GptOssAdapter(ModelAdapter):

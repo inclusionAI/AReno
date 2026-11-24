@@ -37,9 +37,7 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from collections.abc import Iterator, Sequence
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +93,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, should_checkpoint_layer
 from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
@@ -2021,13 +2020,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
             # SP shards the sequence dim before entering the layer stack.
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            offload_saved = (
-                train_meta is not None
-                and hidden_states.is_cuda
-                and torch.is_grad_enabled()
-                and os.environ.get("ARENO_BAILING_OFFLOAD_ACTIVATIONS") == "1"
-            )
-            with torch.autograd.graph.save_on_cpu() if offload_saved else nullcontext():
+            with decoder_activation_offload(hidden_states, train_meta, legacy_bailing_v3=True):
                 for layer in self.layers:
                     hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
@@ -2052,15 +2045,14 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 if self.lm_head.weight.dtype == torch.float32:
                     mtp_hidden = mtp_hidden.float()
                 mtp_logits_shard = self.lm_head(mtp_hidden)
-            if defer_lm_head:
-                # The caller projects the trunk hidden states in chunks; MTP
-                # logits are still returned so the MTP loss stays active.
-                return CausalLMOutput(logits_shard=None, hidden_states=hidden_states, mtp_logits_shard=mtp_logits_shard)
-            logits_input = hidden_states if logits_indices is None else hidden_states.index_select(1, logits_indices)
-            if self.lm_head.weight.dtype == torch.float32:
-                logits_input = logits_input.float()
             return CausalLMOutput(
-                logits_shard=self.lm_head(logits_input),
+                logits_shard=project_lm_head(
+                    self.lm_head,
+                    hidden_states,
+                    defer=defer_lm_head,
+                    logits_indices=logits_indices,
+                    dtype=torch.float32 if not defer_lm_head and self.lm_head.weight.dtype == torch.float32 else None,
+                ),
                 hidden_states=hidden_states,
                 mtp_logits_shard=mtp_logits_shard,
             )

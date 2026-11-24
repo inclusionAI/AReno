@@ -44,6 +44,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_softmax_routes
@@ -1215,6 +1216,8 @@ def _align_position_ids_to_sequence_len(position_ids: torch.Tensor, seqlen: int)
 
 
 class Qwen35ForCausalLM(nn.Module):
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -1231,6 +1234,7 @@ class Qwen35ForCausalLM(nn.Module):
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
@@ -1242,7 +1246,9 @@ class Qwen35ForCausalLM(nn.Module):
         )
         if feature_position_ids is not None:
             position_ids = feature_position_ids
-        return self.forward_from_embeddings(hidden_states, position_ids, train_meta, infer_meta, defer_lm_head)
+        return self.forward_from_embeddings(
+            hidden_states, position_ids, train_meta, infer_meta, defer_lm_head, logits_indices
+        )
 
     def forward_from_embeddings(
         self,
@@ -1251,6 +1257,7 @@ class Qwen35ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = (
@@ -1262,21 +1269,24 @@ class Qwen35ForCausalLM(nn.Module):
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            for layer in self.layers:
-                if getattr(layer, "handles_activation_checkpointing", False):
-                    hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
-                else:
-                    hidden_states = checkpoint_layer(
-                        layer,
-                        hidden_states,
-                        position_ids,
-                        train_meta,
-                        infer_meta,
-                        train_meta=train_meta,
-                        infer_meta=infer_meta,
-                    )
+            with decoder_activation_offload(hidden_states, train_meta):
+                for layer in self.layers:
+                    if getattr(layer, "handles_activation_checkpointing", False):
+                        hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
+                    else:
+                        hidden_states = checkpoint_layer(
+                            layer,
+                            hidden_states,
+                            position_ids,
+                            train_meta,
+                            infer_meta,
+                            train_meta=train_meta,
+                            infer_meta=infer_meta,
+                        )
             hidden_states = self.norm(hidden_states).to(dtype=hidden_states.dtype)
-            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            logits_shard = project_lm_head(
+                self.lm_head, hidden_states, defer=defer_lm_head, logits_indices=logits_indices
+            )
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     @torch._dynamo.disable
@@ -1503,6 +1513,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         return self.language_model(
             input_ids,
@@ -1511,6 +1522,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             infer_meta=infer_meta,
             features=self._project_pixel_values(features, input_ids.device, input_ids.shape[0]),
             defer_lm_head=defer_lm_head,
+            logits_indices=logits_indices,
         )
 
     @torch._dynamo.disable
