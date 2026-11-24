@@ -34,6 +34,7 @@ class TrainMeta:
     mtp_enabled: bool = False
     mst_chunk_size: int = 0
     recompute_policy: RecomputePolicy | None = None
+    rollout_prompt_lengths: list[int] | None = None
 
 
 @dataclass(slots=True)

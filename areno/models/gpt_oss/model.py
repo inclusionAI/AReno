@@ -116,6 +116,7 @@ class GptOssExperts(nn.Module):
         ctx = get_tp_context()
         if config.num_experts % ctx.world_size:
             raise ValueError("expert count must be divisible by TP")
+        self.native_projection = config.attn_backend == "native"
         self.count = config.num_experts // ctx.world_size
         self.start = ctx.rank * self.count
         h, i = config.hidden_size, config.moe_intermediate_size
@@ -131,14 +132,33 @@ class GptOssExperts(nn.Module):
         self.limit = float(hf.get("swiglu_limit", 7.0))
 
     def forward(self, x, ids, weights):
-        if not torch.is_grad_enabled():
+        if not torch.is_grad_enabled() or (
+            self.native_projection and x.is_cuda and x.dtype in (torch.bfloat16, torch.float16)
+        ):
             local = (ids >= self.start) & (ids < self.start + self.count)
             local_ids = (ids - self.start).clamp(0, self.count - 1).int()
+            local_weights = weights.float() * local
+            if torch.is_grad_enabled():
+                from areno.accel.kernels.nf4_moe import routed_limited_swiglu_experts
+
+                out = routed_limited_swiglu_experts(
+                    x,
+                    self.gate_up_proj,
+                    self.down_proj,
+                    self.gate_up_proj_bias,
+                    self.down_proj_bias,
+                    local_ids,
+                    local_weights,
+                    self.fused_config,
+                    self.alpha,
+                    self.limit,
+                )
+                return all_reduce(out)
             out = areno_fused_experts(
                 x,
                 self.gate_up_proj,
                 self.down_proj,
-                weights.float() * local,
+                local_weights,
                 local_ids,
                 self.fused_config,
                 activation="limited_swiglu",
@@ -162,6 +182,7 @@ class GptOssMLP(nn.Module):
     def __init__(self, config, layer_index):
         super().__init__()
         self.routing_layer_slot = layer_index
+        self.native_projection = config.attn_backend == "native"
         self.top_k = config.num_experts_per_tok
         self.router = nn.Linear(config.hidden_size, config.num_experts, bias=True, dtype=config.dtype)
         for p in self.router.parameters():
@@ -170,7 +191,12 @@ class GptOssMLP(nn.Module):
 
     def forward(self, x, train_meta=None):
         flat = copy_to_tensor_parallel_region(x.reshape(-1, x.shape[-1]))
-        logits = areno_linear(flat, self.router.weight, self.router.bias)
+        if self.native_projection and flat.is_cuda:
+            from areno.accel.kernels.invariant_linear import InvariantLinear
+
+            logits = InvariantLinear.apply(flat, self.router.weight, self.router.bias)
+        else:
+            logits = areno_linear(flat, self.router.weight, self.router.bias)
         ids, weights = areno_topk_softmax(logits, self.top_k, True)
         # Layer checkpoint recompute runs after the outer routing context exits.
         # Restore replay metadata here while preserving inference capture.

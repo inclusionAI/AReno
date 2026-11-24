@@ -312,7 +312,7 @@ def _projection_forward(module, x, bias):
     if quantized is not None:
         from areno.accel.nf4 import nf4_linear
 
-        return nf4_linear(x, quantized, bias)
+        return nf4_linear(x, quantized, bias, invariant=getattr(module, "native_projection", False))
     return (
         native_projection(module, x, bias)
         if getattr(module, "native_projection", False) and x.is_cuda

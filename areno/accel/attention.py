@@ -14,7 +14,7 @@ import torch
 from areno.accel._extension import extension as _extension
 from areno.accel.utils import on_kernel_device
 
-TILED_HEAD_DIMS = (32, 64, 96, 128, 192, 256)
+TILED_HEAD_DIMS = (32, 64, 96, 128, 192, 256, 512)
 
 
 def _window_left(window_left: int | None) -> int:

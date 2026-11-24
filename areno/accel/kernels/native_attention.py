@@ -176,7 +176,12 @@ def tiled_forward(
     out = q.new_empty((tokens, heads, dv))
     packed = table is None or prefix is not None
     sequences = bounds.numel() - 1 if packed else tokens
-    block_m = 64 if packed else 16
+    # On Hopper a 64-row packed tile can select WGMMA while decode uses
+    # warp-level MMA. Keep the same accumulation order across both paths.
+    block_m = 16
+    # A 512-wide head needs smaller query and KV tiles to fit shared memory.
+    if packed and dim < 512:
+        block_m = 32 if torch.cuda.get_device_capability(q.device)[0] == 9 else 64
     tiles = triton.cdiv(tokens, block_m) + sequences - 1 if packed else tokens
     if tokens:
         _forward[(tiles, heads)](
@@ -203,7 +208,7 @@ def tiled_forward(
             window,
             scale,
             block_m,
-            64,
+            32 if dim == 512 else 64,
             LSE=lse,
             PREFIX=prefix,
             num_warps=4,
@@ -347,7 +352,7 @@ class PackedAttention(torch.autograd.Function):
         if t:
             _delta[(t * h,)](o, do, delta, e, triton.next_power_of_2(e))
             seq = bounds.numel() - 1
-            block = 32
+            block = 16 if d == 512 else 32
             args = (
                 q,
                 k,
@@ -419,8 +424,9 @@ def _decode_partial(
     maximum = tl.full((16,), -float("inf"), tl.float32)
     total = tl.full((16,), 0, tl.float32)
     acc = tl.full((16, BE), 0, tl.float32)
-    for base in range(start, tl.minimum(start + 256, pos + 1), 64):
-        c = base + tl.arange(0, 64)
+    N: tl.constexpr = 32 if D == 512 else 64
+    for base in range(start, tl.minimum(start + 256, pos + 1), N):
+        c = base + tl.arange(0, N)
         page = tl.load(TABLE + seq * WIDTH + c // PAGE, c < pos + 1, 0)
         slot = (page * PAGE + c % PAGE) * HK + kv
         keys = tl.load(K + slot[:, None] * D + d[None, :], (c[:, None] < pos) & (d[None, :] < D), 0)

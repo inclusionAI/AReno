@@ -168,7 +168,7 @@ class RuntimeConfig:
     def resolve_eager_decode(self, *, model: ModelConfig, lora: LoraConfig | None) -> None:
         """Use eager decode when routed-expert adapters lack a fused rollout path."""
 
-        if self.eager_decode or lora is None:
+        if self.eager_decode or lora is None or model.dtype in (torch.float16, torch.bfloat16):
             return
         if model.model_type == "qwen3_moe" and {
             "gate_proj",

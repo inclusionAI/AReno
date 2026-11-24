@@ -35,7 +35,11 @@ BAILING_V3_TARGETS = (
 
 QWEN35_TARGETS = (*QWEN3_DENSE_TARGETS, "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
 
-NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS, *QWEN35_TARGETS, "b_proj")))
+PHI4MM_TARGETS = ("qkv_proj", "o_proj", "gate_up_proj", "down_proj")
+
+NATIVE_LORA_TARGETS = tuple(
+    dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS, *QWEN35_TARGETS, *PHI4MM_TARGETS, "b_proj"))
+)
 
 LORA_FA_CONFIG_NAME = "areno_lora_fa_config.json"
 

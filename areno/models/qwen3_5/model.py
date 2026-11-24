@@ -30,6 +30,7 @@ from areno.engine.layers.linear import (
     RowParallelLinear,
     _shard_range,
     mark_tensor_parallel_parameter,
+    projection_dtype,
 )
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
@@ -552,6 +553,7 @@ class Qwen35MoeMLP(nn.Module):
         super().__init__()
         if config.num_experts is None:
             raise ValueError("qwen3_5_moe requires num_experts")
+        self.native_backend = config.attn_backend == "native"
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
@@ -596,7 +598,13 @@ class Qwen35MoeMLP(nn.Module):
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
         with sequence_parallel_region(False):
-            logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
+            gate_input = flat.to(dtype=self.gate.dtype)
+            if self.native_backend and flat.is_cuda:
+                from areno.accel.kernels.invariant_linear import InvariantLinear
+
+                logits = InvariantLinear.apply(gate_input, self.gate, None)
+            else:
+                logits = _areno_linear_no_compile(gate_input, self.gate)
             log_once("qwen35_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3.5-MoE")
             topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
             topk_idx, topk_weight = resolve_softmax_routes(
@@ -606,7 +614,9 @@ class Qwen35MoeMLP(nn.Module):
                 topk_weight,
                 renormalize=self.norm_topk_prob,
             )
-            if self.training:
+            if flat.is_cuda and self.experts.use_native_kernels(self.native_backend):
+                out = self.experts.native_forward(flat, topk_idx, topk_weight, self._fused_moe_config)
+            elif self.training:
                 out = tokenwise_forward(
                     self.experts,
                     flat.to(dtype=self.experts.gate_up_weight.dtype),
@@ -623,17 +633,28 @@ class Qwen35MoeMLP(nn.Module):
             shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
             shared = tokenwise_forward(
                 self.shared_expert,
-                shared_input.to(dtype=self.shared_expert.gate_proj.weight.dtype),
+                shared_input.to(dtype=projection_dtype(self.shared_expert.gate_proj)),
                 train_meta=train_meta,
             )
             if self.shared_expert_gate is not None:
                 gate_input = shared_input.to(dtype=self.shared_expert_gate.dtype)
-                shared = shared * torch.sigmoid(F.linear(gate_input, self.shared_expert_gate.unsqueeze(0)))
+                weight = self.shared_expert_gate.unsqueeze(0)
+                if self.native_backend and gate_input.is_cuda:
+                    from areno.accel.kernels.invariant_linear import InvariantLinear
+
+                    gate = InvariantLinear.apply(gate_input, weight, None)
+                else:
+                    gate = F.linear(gate_input, weight)
+                shared = shared * torch.sigmoid(gate)
             out = out + shared
         return out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
+        if self.experts.use_native_kernels(self.native_backend) and (
+            self.native_backend or getattr(self.experts, "quantized_gate_up", None) is not None
+        ):
+            return
         self._infer_w1_weight = self._updated_infer_weight(
             self._infer_w1_weight,
             self.experts.gate_up_weight.detach().to(dtype=self.experts.gate_up_weight.dtype).contiguous(),
@@ -1735,7 +1756,7 @@ class Qwen35VLAdapter(Qwen35Adapter):
         return save_qwen35_vl_weights(model, output_path, source_path)
 
 
-class Qwen35MoeAdapter(ModelAdapter):
+class Qwen35MoeAdapter(Qwen35Adapter):
     name = "qwen3_5_moe"
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:

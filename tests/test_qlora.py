@@ -153,7 +153,7 @@ def test_paged_optimizer_matches_nonpaged_and_roundtrips(mode):
 def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
     from types import SimpleNamespace
 
-    from areno.accel.kernels.nf4_moe import nf4_experts
+    from areno.accel.kernels.nf4_moe import nf4_experts, routed_adapter_experts
     from areno.accel.ops import FusedMoeConfig
 
     torch.manual_seed(77)
@@ -187,10 +187,12 @@ def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
                 expert = int(ids[t, k])
                 gu = F.linear(x[t], w1[expert])
                 gate, up = gu.chunk(2)
-                for name, target in (("gate_proj", gate), ("up_proj", up)):
-                    if name in slots:
-                        slot = slots[name]
-                        target.add_(F.linear(F.linear(x[t], slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale)
+                if "gate_proj" in slots:
+                    slot = slots["gate_proj"]
+                    gate = gate + F.linear(F.linear(x[t], slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale
+                if "up_proj" in slots:
+                    slot = slots["up_proj"]
+                    up = up + F.linear(F.linear(x[t], slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale
                 # Native SiLU kernel computes the activation and product in FP32.
                 activated = (F.silu(gate.float()) * up.float()).to(dtype) * weights[t, k].to(dtype)
                 y = F.linear(activated, w2[expert])
@@ -224,3 +226,14 @@ def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
         torch.testing.assert_close(output, candidate(), atol=0, rtol=0)
         torch.testing.assert_close(output, reference(), atol=2e-3, rtol=3e-2)
         assert torch.isfinite(output).all()
+
+    leaves = [x, weights] + [p for slot in slots.values() for p in (slot.lora_A, slot.lora_B)]
+    for tensor in leaves:
+        tensor.requires_grad_()
+    training = routed_adapter_experts(x, q1, q2, ids, weights, slots, config)
+    torch.testing.assert_close(training, output, atol=0, rtol=0)
+    grad = torch.randn_like(training)
+    actual = torch.autograd.grad(training, leaves, grad)
+    expected = torch.autograd.grad(reference(), leaves, grad)
+    for got, ref in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got, ref, atol=3e-3, rtol=0.04)

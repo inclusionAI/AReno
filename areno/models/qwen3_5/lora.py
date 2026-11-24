@@ -1,6 +1,6 @@
 """Canonical Qwen3.5 dense language targets over native fused projections."""
 
-from areno.adapters.lora import _install_merged_slot, _install_row_slot
+from areno.adapters.lora import _install_dense_mlp_slots, _install_merged_slot, _install_moe_slots, _install_row_slot
 from areno.models.qwen3_5.model import Qwen35FullAttention
 
 
@@ -39,6 +39,23 @@ def initialize_qwen35_lora(model, requested, config, seed, runtime_state, slots)
         if output_name in requested:
             matched.add(output_name)
             _install_row_slot(f"{attention_prefix}.{output_name}", output, config, seed, runtime_state, slots)
+        if hasattr(layer.mlp, "experts"):
+            matched.update(
+                _install_moe_slots(layer.mlp.experts, layer_prefix, requested, config, seed, runtime_state, slots)
+            )
+            if layer.mlp.shared_expert is not None:
+                matched.update(
+                    _install_dense_mlp_slots(
+                        layer.mlp.shared_expert,
+                        f"{layer_prefix}.mlp.shared_expert",
+                        requested,
+                        config,
+                        seed,
+                        runtime_state,
+                        slots,
+                    )
+                )
+            continue
         for component, name in enumerate(("gate_proj", "up_proj")):
             if name in requested:
                 matched.add(name)
