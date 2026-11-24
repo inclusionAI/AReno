@@ -1,0 +1,46 @@
+tests/test_qlora.py
+  s_96c85c504cbee2::t_2a9750f1fcaeb0 156,190-195,229-239
+areno/models/qwen3_5/lora.py
+  s_96c85c504cbee2::t_07fa258ee13dce 3,42,46,58
+  s_96c85c504cbee2::t_2c0827455ba9e7 43-45,47-57
+areno/accel/nf4.py
+  s_96c85c504cbee2::t_7e05272c21bd75 100,103-108,114,118-119
+tests/test_qwen35_lora_cpu.py
+  s_96c85c504cbee2::t_2a9750f1fcaeb0 72,74-78,110-111,155-178
+  s_96c85c504cbee2::t_b32362dbce9d3b 179-180
+areno/engine/layers/linear.py
+  s_96c85c504cbee2::t_7e05272c21bd75 315
+areno/adapters/qlora.py
+  s_96c85c504cbee2::t_07fa258ee13dce 14,21-22,26-27,29-38
+  s_96c85c504cbee2::t_2c0827455ba9e7 23-24
+areno/adapters/lora.py
+  s_96c85c504cbee2::t_7e05272c21bd75 123-126,303-305
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_07fa258ee13dce 556,601-607,617,619,636,641-648,689-692,1794
+  s_96c85c504cbee2::t_2c0827455ba9e7 33,618,669-674,683
+  s_96c85c504cbee2::t_bc930b3ce9e5df 652-668,675-682,684-686
+areno/accel/kernels/nf4_moe.py
+  s_96c85c504cbee2::t_2c0827455ba9e7 1,4,98-138,140-145,148-167,169,174-184,186-192
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_a824812c1843c4 330-332,361-363,472,475
+areno/models/qwen3/model.py
+  s_96c85c504cbee2::t_07fa258ee13dce 116-120
+docs/concepts/native-lora.rst
+  s_96c85c504cbee2::t_325dd0e6d5f89b 45-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "237c798a5fddc6522adf37bc0f42c5bb46f46e4c",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": null
+    }
+  }
+}
