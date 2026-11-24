@@ -1,0 +1,21 @@
+areno/engine/runtime/routing_replay.py
+  s_96c85c504cbee2::t_5da773f8f25866 122-126
+tests/test_routing_replay_cpu.py
+  s_96c85c504cbee2::t_eee8433cde30f2 58-73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "33828dad4df656f5b6d2dcb425760b31976a508f",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
