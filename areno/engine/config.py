@@ -68,7 +68,7 @@ class RuntimeConfig:
 
     kv_block_size: int = 256
     attn_backend: Literal["flash", "native"] = "native"
-    compile_model: bool = True
+    compile_model: bool | None = None
     activation_checkpointing: bool = True
     recompute_modules: tuple[str, ...] | str | None = field(default=None, kw_only=True)
     recompute_layers: tuple[int, ...] | str | None = field(default=None, kw_only=True)
@@ -150,8 +150,12 @@ class RuntimeConfig:
         self.attn_backend = "native"
 
     def resolve_compile_model(self, *, model: ModelConfig, devices: list[int]) -> None:
-        """Disable torch.compile when the selected hardware cannot compile the model dtype."""
+        """Resolve the model default and check device support for BF16 compilation."""
 
+        if self.compile_model is None:
+            # Packed training and KV-cache inference can produce different
+            # Inductor fusions. Use native operators directly in both phases.
+            self.compile_model = self.attn_backend != "native"
         if not self.compile_model:
             return
         reason = torch_compile_unsupported_gpu_reason(model, devices)
@@ -397,8 +401,7 @@ class EngineConfig:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:
             raise ValueError("runtime.kv_block_size must be a multiple of 256 for FlashAttention paged KV")
-        # CUDA rollout trainers request R3 by default. Dense checkpoints do
-        # not have router decisions to capture and retain the original path.
+        # Dense checkpoints have no router decisions to capture.
         if self.runtime.rollout_routing_replay and self.model.num_experts is None:
             self.runtime.rollout_routing_replay = False
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)

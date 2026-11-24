@@ -132,6 +132,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "top_p",
             "greedy",
             "eager_decode",
+            "rollout_routing_replay",
             "speculative_draft_tokens",
             "drop_rollout_state",
             "attn_backend",
@@ -423,6 +424,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be positive")
     if args.world_size % args.tp_size != 0:
         raise click.UsageError("--world-size must be divisible by --tp-size")
+    if getattr(args, "rollout_routing_replay", False) and (args.backend != "cuda" or not algorithm.requires_rollout):
+        raise click.UsageError("--rollout-routing-replay requires a CUDA rollout-based algorithm")
     has_rollout_topology = args.rollout_devices is not None or args.rollout_tp_size is not None
     if has_rollout_topology and not algorithm.requires_rollout:
         raise click.UsageError("independent rollout devices are only valid for rollout-based algorithms")
@@ -1027,6 +1030,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     }
     lora = getattr(args, "lora", None)
     algorithm = get_algorithm(args.algo)
+    args.rollout_routing_replay = getattr(args, "rollout_routing_replay", False)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
         return DPOTrainerConfig(
@@ -1259,6 +1263,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             mtp_loss_scale=args.mtp_loss_scale,
+            rollout_routing_replay=args.rollout_routing_replay,
             speculative_draft_tokens=args.speculative_draft_tokens,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
@@ -1343,6 +1348,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         eager_decode=args.eager_decode,
         attn_backend=args.attn_backend,
         mtp_loss_scale=args.mtp_loss_scale,
+        rollout_routing_replay=args.rollout_routing_replay,
         speculative_draft_tokens=args.speculative_draft_tokens,
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
@@ -1481,6 +1487,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "sequence_parallel",
                 "attn_backend",
                 "eager_decode",
+                "rollout_routing_replay",
                 "speculative_draft_tokens",
                 "mtp_loss_scale",
                 "activation_checkpointing",
@@ -2186,6 +2193,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Number of optimizer buckets per persistent disk mmap and flush group.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
+@click.option("--rollout-routing-replay", is_flag=True, help="Replay rollout MoE expert IDs in CUDA policy training.")
 @click.option(
     "--speculative-draft-tokens",
     type=click.IntRange(min=0),

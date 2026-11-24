@@ -421,6 +421,21 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(cfg.runtime.attn_backend, "native")
         self.assertEqual(model.attn_backend, "native")
 
+    def test_native_models_share_compile_defaults_across_training_and_rollout(self):
+        for family in ("bailing_moe_v3", "qwen3_5", "qwen3"):
+            for role in ("train", "rollout"):
+                model = ModelConfig(model_type=family)
+                cfg = EngineConfig(model=model, devices=[0], role=role)
+                self.assertFalse(cfg.runtime.compile_model)
+                self.assertFalse(cfg.runtime.eager_decode)
+
+    def test_native_compile_can_be_enabled_explicitly(self):
+        model = ModelConfig()
+        explicit = RuntimeConfig(compile_model=True)
+        with patch("areno.engine.config.torch_compile_unsupported_gpu_reason", return_value=None):
+            explicit.resolve_compile_model(model=model, devices=[0])
+        self.assertTrue(explicit.compile_model)
+
     def test_runtime_config_disables_compile_for_bf16_on_turing_gpu(self):
         """T4 cannot compile BF16 backward graphs, so training should stay eager."""
         model = ModelConfig(
@@ -698,7 +713,7 @@ class ConfigAndDataTest(unittest.TestCase):
         )
 
         self.assertEqual(cfg.resolved_max_running_prompts(), 256)
-        self.assertTrue(cfg.cuda_config().runtime["rollout_routing_replay"])
+        self.assertFalse(cfg.cuda_config().runtime["rollout_routing_replay"])
 
     def test_rollout_config_respects_explicit_max_running_prompts(self):
         """An explicit max_running_prompts value should pass through unchanged."""
