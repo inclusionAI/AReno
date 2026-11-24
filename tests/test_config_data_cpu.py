@@ -504,6 +504,7 @@ class ConfigAndDataTest(unittest.TestCase):
         runtime = RuntimeConfig(attn_backend="flash")
 
         with (
+            patch("areno.engine.config.find_spec", return_value=object()),
             patch("areno.engine.config.torch.cuda.is_available", return_value=True),
             patch("areno.engine.config.torch.cuda.device_count", return_value=1),
             patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(8, 0)),
@@ -512,6 +513,20 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(cfg.runtime.attn_backend, "flash")
         self.assertEqual(model.attn_backend, "flash")
+
+    def test_missing_optional_flash_package_uses_native_on_supported_gpu(self):
+        model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
+        runtime = RuntimeConfig(attn_backend="flash")
+        with (
+            patch("areno.engine.config.find_spec", return_value=None),
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(8, 0)),
+            self.assertWarnsRegex(RuntimeWarning, "not installed.*attn_backend='native'"),
+        ):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+        self.assertEqual(cfg.runtime.attn_backend, "native")
+        self.assertEqual(model.attn_backend, "native")
 
     def test_runtime_config_falls_back_to_native_on_large_qk_head_dim(self):
         """Gemma-style qk head dim 512 should use native attention instead of flash-attn."""

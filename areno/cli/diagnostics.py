@@ -2,7 +2,7 @@
 
 These commands intentionally avoid importing AReno engine/model modules. They
 only inspect the Python environment and native runtime dependencies: MLX/Metal
-on Apple Silicon, or the CUDA toolchain and compiled extension on Linux.
+on Apple Silicon, or the CUDA/Ascend toolchain and compiled extension on Linux.
 """
 
 from __future__ import annotations
@@ -16,12 +16,16 @@ import sys
 from dataclasses import dataclass
 from importlib import import_module
 from importlib import metadata as importlib_metadata
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
 import click
 
 _ENV_VARS = (
+    "ASCEND_HOME_PATH",
+    "ASCEND_CANN_PACKAGE_PATH",
+    "ASCEND_RT_VISIBLE_DEVICES",
     "CUDA_HOME",
     "CUDA_PATH",
     "CUDA_VISIBLE_DEVICES",
@@ -108,6 +112,23 @@ def collect_env() -> dict[str, Any]:
                     "error": "Import skipped because mlx.core failed to import",
                 }
             report["dependencies"][module] = dep
+    elif report["platform"]["system"] == "Linux" and find_spec("torch_npu") is not None:
+        report["dependencies"] = {
+            module: _dependency_info(distribution, module)
+            for distribution, module in (
+                ("torch", "torch"),
+                ("torch-npu", "torch_npu"),
+                ("flash-linear-attention", "fla"),
+                (None, "areno.accel._areno_accel_npu"),
+            )
+        }
+        try:
+            torch = import_module("torch")
+            available = bool(torch.npu.is_available())
+            count = torch.npu.device_count() if available else 0
+            report["npu"] = {"available": available and count > 0, "device_count": count, "error": None}
+        except Exception as exc:
+            report["npu"] = {"available": False, "device_count": 0, "error": f"{type(exc).__name__}: {exc}"}
     else:
         torch_info = _torch_info()
         cuda_home = _cuda_home()
@@ -180,16 +201,36 @@ def run_checks(report: dict[str, Any]) -> list[CheckResult]:
             platform_ok,
             "Supported platform",
             f"{system} {machine}",
-            "Use Apple Silicon with native arm64 Python for MLX, or Linux with an NVIDIA CUDA GPU. On Windows, use WSL2.",
+            "Use Apple Silicon with native arm64 Python for MLX, or Linux with NVIDIA CUDA / Ascend NPU. On Windows, use WSL2.",
         )
     )
 
     if is_mlx:
         results.extend(_mlx_checks(report))
     elif system == "Linux":
-        results.extend(_cuda_checks(report))
+        results.extend(_npu_checks(report) if "npu" in report else _cuda_checks(report))
     for label, path in report["paths"].items():
         results.append(_writable_path_check(label, path))
+    return results
+
+
+def _npu_checks(report: dict[str, Any]) -> list[CheckResult]:
+    next_step = "Source the CANN environment and run bash scripts/install.sh with its matching PyTorch/torch_npu."
+    results = [
+        _result(
+            bool(dep["imported"]), f"{name} import", dep.get("error") or dep.get("version") or "imported", next_step
+        )
+        for name, dep in report["dependencies"].items()
+    ]
+    npu = report["npu"]
+    results.append(
+        _result(
+            bool(npu["available"]),
+            "NPU availability",
+            npu.get("error") or f"visible_npus={npu['device_count']}",
+            next_step,
+        )
+    )
     return results
 
 
@@ -197,9 +238,9 @@ def _mlx_checks(report: dict[str, Any]) -> list[CheckResult]:
     results: list[CheckResult] = []
     for label in ("mlx", "mlx_lm", "mlx_vlm"):
         dep = report["dependencies"][label]
-        next_step = "Install AReno's MLX dependencies with native arm64 Python: python -m pip install -e ."
+        next_step = "Install AReno's MLX dependencies with native arm64 Python: bash scripts/install.sh"
         if label == "mlx_vlm":
-            next_step = "For multimodal models, install mlx-vlm: python -m pip install -e ."
+            next_step = "For multimodal models, install mlx-vlm: bash scripts/install.sh"
         results.append(
             _result(
                 bool(dep["imported"]),
@@ -287,7 +328,7 @@ def _cuda_checks(report: dict[str, Any]) -> list[CheckResult]:
                 "FAIL",
                 "ARENO_BUILD_EXT",
                 "ARENO_BUILD_EXT=0 skipped the runtime CUDA extension",
-                "Reinstall without ARENO_BUILD_EXT=0 before training or serving: pip install -e . --no-build-isolation",
+                "Reinstall without ARENO_BUILD_EXT=0 before training or serving: bash scripts/install.sh",
             )
         )
     cuda_home = report["cuda"]["cuda_home"]
@@ -306,7 +347,7 @@ def _cuda_checks(report: dict[str, Any]) -> list[CheckResult]:
             accel_imported,
             "areno_accel import",
             accel.get("error", "imported") if not accel["imported"] else "imported",
-            "Reinstall AReno from source with CUDA enabled: pip install -e . --no-build-isolation",
+            "Reinstall AReno from source with CUDA enabled: bash scripts/install.sh",
         )
     )
 
@@ -528,6 +569,12 @@ def _print_env_report(report: dict[str, Any]) -> None:
         click.echo(f"  Metal available: {report['metal']['available']}")
         if report["metal"].get("error"):
             click.echo(f"    {report['metal']['error']}")
+    elif "npu" in report:
+        click.echo("  Backend: NPU")
+        click.echo(f"  NPU available: {report['npu']['available']}")
+        click.echo(f"  Visible NPUs: {report['npu']['device_count']}")
+        if report["npu"].get("error"):
+            click.echo(f"    {report['npu']['error']}")
     else:
         _print_cuda_report(report)
     click.echo("  Dependencies:")
