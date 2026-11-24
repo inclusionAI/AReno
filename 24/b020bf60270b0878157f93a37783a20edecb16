@@ -1,0 +1,26 @@
+areno/models/qwen3/model.py
+  s_96c85c504cbee2::t_959f53e719762c 123,136
+  s_96c85c504cbee2::t_e7171a1686e92e 121-122,124-135,137-149,250,276-282,307-309,322,640
+areno/models/qwen3_5/model.py
+  s_96c85c504cbee2::t_e7171a1686e92e 617-618,654
+areno/models/phi4mm/model.py
+  s_96c85c504cbee2::t_959f53e719762c 170-177,212-219,251-258,897-900,1139-1163,1168-1172
+areno/adapters/config.py
+  s_96c85c504cbee2::t_959f53e719762c 38-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "24b020bf60270b0878157f93a37783a20edecb16",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
