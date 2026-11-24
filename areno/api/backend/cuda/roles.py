@@ -420,6 +420,10 @@ class RoleManager:
             finally:
                 if offload_role is not None:
                     offload_role.offload()
+                elif worker.device.type == "cuda":
+                    worker._drop_rollout_hbm()
+                    worker.model.onload_train_weights(worker.device)
+                    worker._park_cuda_phase_buffers()
 
     def _score_logprob_rows(
         self,

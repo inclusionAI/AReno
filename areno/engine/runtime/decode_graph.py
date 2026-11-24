@@ -39,7 +39,7 @@ def sync_before_graph_capture(device: torch.device, group) -> None:
     accelerator = accelerator_module(device)
     if accelerator is not None:
         accelerator.synchronize(device)
-    if dist.is_available() and dist.is_initialized():
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size(group) > 1:
         if device.type == "cuda":
             dist.barrier(
                 group=group, device_ids=[device.index if device.index is not None else accelerator.current_device()]

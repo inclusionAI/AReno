@@ -187,7 +187,7 @@ def transfer_policy_weights(worker, payload: PolicySyncPayload) -> dict[str, obj
         raise ValueError("policy sync bucket_bytes must be positive")
     started = time.perf_counter()
     published_by_dp = [0] * train_dp_size
-    buffer = getattr(worker, "_policy_sync_buffer", None)
+    buffer = None
 
     for meta, owner in zip(metadata, owners, strict=True):
         if ctx.role == "train" and ctx.dp_rank != owner:
@@ -204,7 +204,6 @@ def transfer_policy_weights(worker, payload: PolicySyncPayload) -> dict[str, obj
             count = min(capacity, layout.numel - offset)
             if buffer is None or buffer.dtype != layout.dtype or buffer.device != ctx.device or buffer.numel() < count:
                 buffer = torch.empty(capacity, dtype=layout.dtype, device=ctx.device)
-                worker._policy_sync_buffer = buffer
             chunk = buffer[:count]
             if ctx.role == "train":
                 layout.read_chunk(offset, chunk, include_replicated=ctx.global_rank == source_rank)

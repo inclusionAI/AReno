@@ -58,6 +58,9 @@ class TrainingManager:
             # onload_state() clears residency policy, so prepare the actor
             # before configuring first-step disk streaming.
             worker._prepare_for_train()
+        if offload_mode == "none" and worker.device.type == "cuda":
+            # Restore moments only after rollout memory has been released.
+            worker.optimizer.onload_state(worker.device)
         if offload_mode != "none":
             # Disk streaming must be active before the first optimizer step;
             # otherwise step zero materializes every bucket on the GPU first.
@@ -87,16 +90,25 @@ class TrainingManager:
                     )
                 )
             return results
+        except BaseException:
+            worker.optimizer.zero_grad(set_to_none=True)
+            raise
         finally:
-            if offload_mode != "none":
+            # CPU or disk owns the optimizer between CUDA phases. The configured
+            # policy above still controls whether buckets stream during the step.
+            idle_mode = "cpu" if offload_mode == "none" and worker.device.type == "cuda" else offload_mode
+            if idle_mode != "none":
                 worker.optimizer.offload_state(
-                    mode=offload_mode,
+                    mode=idle_mode,
                     directory=offload_directory,
                     batch_size=offload_batch_size,
                 )
-                accelerator = accelerator_module(worker.device)
-                if accelerator is not None:
-                    accelerator.empty_cache()
+                if worker.device.type == "cuda":
+                    worker._park_cuda_phase_buffers()
+                else:
+                    accelerator = accelerator_module(worker.device)
+                    if accelerator is not None:
+                        accelerator.empty_cache()
 
     @mst_training_progress()
     def _train_step(

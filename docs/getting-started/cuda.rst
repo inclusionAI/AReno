@@ -93,8 +93,8 @@ The main CUDA controls are:
    Caps active rollout sequences and their KV-cache demand.
 
 ``--drop-rollout-state``
-   Releases completed rollout state at the session boundary rather than
-   retaining reusable cache and graph state for the next rollout.
+   CUDA training releases rollout caches and decode graphs at every session
+   boundary. Requests in the same session reuse these allocations.
 
 ``--activation-checkpointing``
    Recomputes supported decoder activations during backward. It is enabled by

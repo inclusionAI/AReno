@@ -254,9 +254,9 @@ different visible GPUs for rollout:
    Disable decode CUDA graph and run rollout decode eagerly. CUDA only.
 
 ``--drop-rollout-state``
-   Drop completed rollout KV/cache state after each step to save device
-   memory. By default, Areno keeps reusable rollout state between steps for
-   lower setup overhead. Supported by both CUDA and MLX.
+   CUDA reuses KV caches and decode graphs within a rollout session and
+   releases them when the session ends. MLX uses this flag to drop its
+   reusable rollout state after each step.
 
 ``--attn-backend [flash|native]``
    Training and rollout default to ``native``. Select ``flash`` to use
@@ -419,8 +419,9 @@ in its description; flags for other algorithms are ignored.
    previous model mode afterwards.
 
 ``--optimizer-state-offload [none|cpu|disk]``
-   Select CUDA optimizer-state residency. ``none`` keeps state on the training
-   device. ``cpu`` moves state to host memory between train calls. ``disk``
+   Select CUDA optimizer-state residency during training. ``none`` loads
+   state on the device for the optimizer step and moves it to the host
+   at the end of the train call. ``cpu`` uses host-backed state. ``disk``
    stages a bounded bucket group through host memory and stores the state in
    persistent writable raw-mmap files, copying each bucket back only when the
    next optimizer step needs it. Default: ``none``. This option is supported
