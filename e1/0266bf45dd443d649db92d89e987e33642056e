@@ -1,0 +1,21 @@
+areno/engine/config.py
+  s_96c85c504cbee2::t_9aac8b1498eaae 171
+tests/test_bailing_v3_lora_cpu.py
+  s_96c85c504cbee2::t_651c730e87adbe 262-264,266
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e10266bf45dd443d649db92d89e987e33642056e",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
