@@ -54,3 +54,28 @@ def test_selected_logprobs_preserves_batched_inputs_cuda():
         torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-6)
     finally:
         set_tp_context(previous)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA packed logprob gradient")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_packed_gradient_matches_chunk_scatter(dtype):
+    from areno.engine.runtime.logprobs import packed_next_token_logprobs
+
+    previous = get_tp_context()
+    set_tp_context(TPContext(0, 1, torch.device("cuda", 0), None))
+    try:
+        logits = torch.randn(1, 11, 2050, device="cuda", dtype=dtype)[..., ::2].requires_grad_()
+        tokens = torch.randint(1025, (11,), device="cuda")
+        offsets = torch.tensor([0, 1, 4, 11], device="cuda")
+        positions = torch.tensor([1, 2, 4, 5, 6, 7, 8, 9], device="cuda")
+        actual = packed_next_token_logprobs(logits, tokens, offsets, chunk_size=3)
+        expected = torch.cat(
+            [vocab_parallel_selected_logprobs(logits[0, rows], tokens[rows + 1]) for rows in positions.split(3)]
+        )
+        upstream = torch.randn(16, device="cuda")[::2]
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        dx = torch.autograd.grad(actual, logits, upstream)[0]
+        reference = torch.autograd.grad(expected, logits, upstream)[0]
+        torch.testing.assert_close(dx, reference, atol=0, rtol=0)
+    finally:
+        set_tp_context(previous)

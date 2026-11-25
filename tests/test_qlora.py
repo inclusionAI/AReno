@@ -242,3 +242,41 @@ def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters, monk
     expected = torch.autograd.grad(reference(), leaves, grad)
     for got, ref in zip(actual, expected, strict=True):
         torch.testing.assert_close(got, ref, atol=3e-3, rtol=0.04)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA routed NF4 projections")
+def test_nf4_remote_routes_skip_boundary_experts():
+    from types import SimpleNamespace
+
+    from areno.accel.kernels.nf4_moe import routed_adapter_experts
+    from areno.accel.ops import FusedMoeConfig
+    from areno.models.bailing_v3.model import BailingGroupedExperts
+
+    torch.manual_seed(101)
+    shard = SimpleNamespace(local_expert_start=2, local_expert_end=4, local_num_experts=2)
+    ids = torch.tensor([[0, 2], [3, 4], [1, 5], [2, 3]], dtype=torch.int32, device="cuda")
+    x = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weights = torch.rand(4, 2, device="cuda", requires_grad=True)
+    w1 = NF4Weight(torch.randn(2, 128, 64, device="cuda", dtype=x.dtype))
+    w2 = NF4Weight(torch.randn(2, 64, 64, device="cuda", dtype=x.dtype))
+    slot = SimpleNamespace(
+        rank=8,
+        scale=1.0,
+        lora_A=torch.randn(2, 8, 64, device="cuda", dtype=x.dtype, requires_grad=True),
+        lora_B=torch.randn(2, 64, 8, device="cuda", dtype=x.dtype, requires_grad=True),
+    )
+    config = FusedMoeConfig(2, 64, 64, 2, routed_scaling_factor=1.0)
+
+    def project(skip):
+        idx, score = BailingGroupedExperts.local_routes(shard, ids, weights, skip_nonlocal=skip)
+        return routed_adapter_experts(x, w1, w2, idx, score, {"down_proj": slot}, config)
+
+    expected = project(False)
+    actual = project(True)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    dy = torch.randn_like(expected)
+    leaves = (x, weights, slot.lora_A, slot.lora_B)
+    for grad, ref in zip(
+        torch.autograd.grad(actual, leaves, dy), torch.autograd.grad(expected, leaves, dy), strict=True
+    ):
+        torch.testing.assert_close(grad, ref, atol=0, rtol=0)
