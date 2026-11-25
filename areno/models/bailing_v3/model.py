@@ -471,7 +471,7 @@ class BailingSparseMoeBlock(nn.Module):
     def _forward_nf4_moe(self, flat, topk_idx, topk_weight):
         from areno.accel.kernels.nf4_moe import routed_adapter_experts
 
-        local_idx, local_weight = self.experts.local_routes(topk_idx, topk_weight)
+        local_idx, local_weight = self.experts.local_routes(topk_idx, topk_weight, skip_nonlocal=True)
         out = routed_adapter_experts(
             flat,
             self.experts.linear_fc1.quantized_weight,
@@ -616,10 +616,18 @@ class BailingGroupedExperts(nn.Module):
             )
         return all_reduce(out * self.config.routed_scaling_factor)
 
-    def local_routes(self, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def local_routes(
+        self, topk_idx: torch.Tensor, topk_weight: torch.Tensor, *, skip_nonlocal: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Mask routes that miss locally-owned experts and remap ids to 0-based local."""
         local_mask = (topk_idx >= self.local_expert_start) & (topk_idx < self.local_expert_end)
-        local_idx = (topk_idx - self.local_expert_start).clamp(0, self.local_num_experts - 1)
+        local_idx = topk_idx - self.local_expert_start
+        if skip_nonlocal:
+            # NF4 routed projections write zero for the aligner's -1 expert.
+            # Other expert backends require in-range indices even for masked routes.
+            local_idx = local_idx.masked_fill(~local_mask, -1)
+        else:
+            local_idx = local_idx.clamp(0, self.local_num_experts - 1)
         return local_idx, topk_weight * local_mask.to(dtype=topk_weight.dtype)
 
     @torch.no_grad()

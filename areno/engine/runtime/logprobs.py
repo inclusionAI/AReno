@@ -71,6 +71,13 @@ def _chunked_selected_logprobs(
 ) -> torch.Tensor:
     """Run the TP selected-logprob kernel over `positions` in chunks."""
 
+    if (
+        logits_shard.is_cuda
+        and logits_shard.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and torch.is_grad_enabled()
+        and logits_shard.requires_grad
+    ):
+        return _PackedSelectedLogprobs.apply(logits_shard, positions, labels, chunk_size)
     action_count = int(positions.numel())
     selected = torch.empty(action_count, device=logits_shard.device, dtype=torch.float32)
     for start in range(0, action_count, chunk_size):
@@ -317,6 +324,38 @@ def _selected_logprobs_components(
     if world_size > 1:
         dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
     return target - logsumexp, logsumexp, safe_labels, local_mask
+
+
+class _PackedSelectedLogprobs(torch.autograd.Function):
+    """Scatter the packed VJP once, independent of the number of scoring chunks."""
+
+    @staticmethod
+    def forward(ctx, logits, positions, labels, chunk_size):
+        tp = get_tp_context()
+        vocab_start = tp.rank * logits.shape[-1]
+        scores = logits.new_empty(positions.shape, dtype=torch.float32)
+        logsumexp = torch.empty_like(scores)
+        for start in range(0, positions.numel(), chunk_size):
+            rows = slice(start, start + chunk_size)
+            values = logits[0].index_select(0, positions[rows])
+            scores[rows], logsumexp[rows], _, _ = _selected_logprobs_components(
+                values, labels[rows], vocab_start, tp.group, tp.world_size
+            )
+        # Invert the gather on the token axis only. Sequence tails have no
+        # prediction target and receive an exact zero gradient.
+        sites = positions.new_full((logits.shape[1],), -1)
+        sites[positions] = torch.arange(positions.numel(), device=positions.device)
+        ctx.save_for_backward(logits, sites, logsumexp, labels)
+        ctx.vocab_start = vocab_start
+        return scores
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        from areno.engine.runtime._logprob_kernels import packed_logprob_gradient
+
+        logits, sites, logsumexp, labels = ctx.saved_tensors
+        grad = packed_logprob_gradient(logits[0], sites, logsumexp, labels, grad_output, ctx.vocab_start)
+        return grad.unsqueeze(0), None, None, None
 
 
 class _VocabParallelSelectedLogprobs(torch.autograd.Function):
