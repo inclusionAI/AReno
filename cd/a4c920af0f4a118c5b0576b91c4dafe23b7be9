@@ -1,0 +1,27 @@
+areno/engine/runtime/_logprob_kernels.py
+  s_96c85c504cbee2::t_036f54d6a84c13 6,51-100
+areno/engine/runtime/logprobs.py
+  s_96c85c504cbee2::t_8be077deac87c2 74-80,329-360
+tests/test_logprobs_cuda.py
+  s_96c85c504cbee2::t_a3538586a294c3 57-81
+areno/models/bailing_v3/model.py
+  s_96c85c504cbee2::t_630a9e106f0f02 474,619-621,624-630
+tests/test_qlora.py
+  s_96c85c504cbee2::t_652aa54770cb10 245-282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "cda4c920af0f4a118c5b0576b91c4dafe23b7be9",
+  "prompts": {},
+  "sessions": {
+    "s_96c85c504cbee2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a20a2a-852c-75c2-bf96-34f04eeb0bf6",
+        "model": "gpt-6.2-astra"
+      },
+      "human_author": "xsuler <sule.sl@antgroup.com>"
+    }
+  }
+}
