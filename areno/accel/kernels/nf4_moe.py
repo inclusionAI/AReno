@@ -34,6 +34,7 @@ def _nf4_routed_matmul(
     BM: tl.constexpr,
     BN: tl.constexpr,
     BK: tl.constexpr,
+    TRANSPOSE_WEIGHT: tl.constexpr,
 ):
     m, n = tl.program_id(0), tl.program_id(1)
     if m * BM >= tl.load(Used):
@@ -50,7 +51,10 @@ def _nf4_routed_matmul(
                 (rows[:, None] < ROUTES) & (ks[None, :] < K),
                 other=0,
             )
-            indices = expert * N * K + cols[None, :] * K + ks[:, None]
+            if TRANSPOSE_WEIGHT:
+                indices = expert * N * K + ks[:, None] * N + cols[None, :]
+            else:
+                indices = expert * N * K + cols[None, :] * K + ks[:, None]
             mask = (cols[None, :] < N) & (ks[:, None] < K)
             byte = tl.load(Packed + indices // 2, mask, other=0).to(tl.int32)
             code = tl.where(indices % 2 == 0, byte >> 4, byte & 15)
@@ -63,9 +67,11 @@ def _nf4_routed_matmul(
     tl.store(Y + rows[:, None] * N + cols[None, :], acc, (rows[:, None] < ROUTES) & (cols[None, :] < N))
 
 
-def _project(x, weight, routes, top_k, config):
+def _project(x, weight, routes, top_k, config, *, transpose_weight=False):
     sorted_ids, expert_ids, used, ids, _ = routes
     _, n, k = weight.shape
+    if transpose_weight:
+        n, k = k, n
     out = torch.empty((*ids.shape, n), device=x.device, dtype=x.dtype)
     _nf4_routed_matmul[(triton.cdiv(sorted_ids.numel(), config.block_size_m), triton.cdiv(n, config.block_size_n))](
         x,
@@ -88,6 +94,7 @@ def _project(x, weight, routes, top_k, config):
         config.block_size_m,
         config.block_size_n,
         config.block_size_k,
+        transpose_weight,
         num_warps=4,
         num_stages=1,
         enable_fp_fusion=False,
@@ -95,14 +102,113 @@ def _project(x, weight, routes, top_k, config):
     return out
 
 
+@triton.jit
+def _adapter_weight_grad(
+    X,
+    DY,
+    ORDER,
+    BOUNDS,
+    DW,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    COPIES: tl.constexpr,
+    SY0: tl.constexpr,
+    SY1: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    BT: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    out_features = tl.program_id(1) * BN + tl.arange(0, BN)
+    in_features = tl.program_id(2) * BK + tl.arange(0, BK)
+    first = tl.load(BOUNDS + expert)
+    end = tl.load(BOUNDS + expert + 1)
+    acc = tl.zeros((BN, BK), tl.float32)
+    for start in range(first, end, BT):
+        positions = start + tl.arange(0, BT)
+        rows = tl.load(ORDER + positions, positions < end, other=0)
+        x = tl.load(
+            X + (rows[:, None] // COPIES) * K + in_features[None, :],
+            (positions[:, None] < end) & (in_features[None, :] < K),
+            other=0,
+        )
+        dy = tl.load(
+            DY + rows[None, :] * SY0 + out_features[:, None] * SY1,
+            (positions[None, :] < end) & (out_features[:, None] < N),
+            other=0,
+        )
+        acc = tl.dot(dy, x, acc)
+    tl.store(
+        DW + (expert * N + out_features[:, None]) * K + in_features[None, :],
+        acc,
+        (out_features[:, None] < N) & (in_features[None, :] < K),
+    )
+
+
+def _adapter_backward(grad, x, weight, routes, copies, config, need_x, need_weight):
+    sorted_ids, expert_ids, used, ids, weights = routes
+    num_experts, n, k = weight.shape
+    dx = dw = None
+    if need_x:
+        routed_dx = x.new_empty((*ids.shape, k))
+        _invoke_matmul(
+            grad,
+            weight.transpose(1, 2),
+            routed_dx,
+            weights,
+            ids,
+            sorted_ids,
+            expert_ids,
+            used,
+            mul_routed_weight=False,
+            top_k=1,
+            config=config,
+        )
+        dx = _sum_input_grad(routed_dx, copies)
+    if need_weight:
+        # Stable route order matches the grouped GEMM reduction order. Keep
+        # expert offsets on the GPU instead of launching one GEMM per expert.
+        expert_order, route_order = torch.sort(ids.flatten(), stable=True)
+        bounds = torch.searchsorted(expert_order, torch.arange(num_experts + 1, device=ids.device, dtype=ids.dtype))
+        dw = torch.empty_like(weight)
+        block_n = 16 if n <= 16 else 32
+        block_k = 16 if k <= 16 else 32
+        _adapter_weight_grad[(num_experts, triton.cdiv(n, block_n), triton.cdiv(k, block_k))](
+            x,
+            grad,
+            route_order,
+            bounds,
+            dw,
+            n,
+            k,
+            copies,
+            *grad.stride(),
+            block_n,
+            block_k,
+            32,
+        )
+    return dx, dw
+
+
+def _sum_input_grad(routed_dx, copies):
+    if copies == 1:
+        return routed_dx.flatten(0, 1)
+    return routed_dx.sum(1, dtype=torch.float32).to(routed_dx.dtype)
+
+
 class _RoutedLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, routes, copies, config):
+    def forward(ctx, x, weight, routes, copies, config, adapter_projection):
         sorted_ids, expert_ids, used, ids, weights = routes
         ctx.copies = copies
+        ctx.config = config
+        ctx.adapter_projection = adapter_projection
         if isinstance(weight, torch.Tensor):
             ctx.quantized = None
-            ctx.save_for_backward(x, ids, weight)
+            if adapter_projection:
+                ctx.save_for_backward(x, weight, sorted_ids, expert_ids, used, ids, weights)
+            else:
+                ctx.save_for_backward(x, ids, weight)
             out = x.new_empty((*ids.shape, weight.shape[1]))
             _invoke_matmul(
                 x,
@@ -119,15 +225,30 @@ class _RoutedLinear(torch.autograd.Function):
             )
             return out
         ctx.quantized = weight
-        ctx.save_for_backward(x, ids)
+        ctx.save_for_backward(sorted_ids, expert_ids, used, ids)
         return _project(x, weight, routes, copies, config)
 
     @staticmethod
     def backward(ctx, grad):
+        if ctx.quantized is not None:
+            if not ctx.needs_input_grad[0]:
+                return None, None, None, None, None, None
+            sorted_ids, experts, used, ids = ctx.saved_tensors
+            grad = grad.reshape(ids.numel(), ctx.quantized.shape[1])
+            dx = _project(
+                grad, ctx.quantized, (sorted_ids, experts, used, ids, None), 1, ctx.config, transpose_weight=True
+            )
+            return _sum_input_grad(dx, ctx.copies), None, None, None, None, None
+
+        if ctx.adapter_projection:
+            x, weight, *routes = ctx.saved_tensors
+            grad = grad.reshape(-1, weight.shape[1])
+            dx, dw = _adapter_backward(grad, x, weight, routes, ctx.copies, ctx.config, *ctx.needs_input_grad[:2])
+            return dx, dw, None, None, None, None
+
         from areno.accel._extension import extension
 
-        x, ids, *dense = ctx.saved_tensors
-        weight = ctx.quantized.dequantize() if ctx.quantized is not None else dense[0]
+        x, ids, weight = ctx.saved_tensors
         ids = ids.reshape(-1).long()
         order = torch.argsort(ids, stable=True)
         counts = torch.bincount(ids, minlength=weight.shape[0])
@@ -142,12 +263,12 @@ class _RoutedLinear(torch.autograd.Function):
             routed_dx = torch.empty_like(dx)
             routed_dx.index_copy_(0, order, dx)
             dx = routed_dx.view(len(x), ctx.copies, -1).sum(1, dtype=torch.float32).to(x.dtype)
-        return dx if need_dx else None, dw if need_dw else None, None, None, None
+        return dx if need_dx else None, dw if need_dw else None, None, None, None, None
 
 
 def _adapter(x, slot, routes, copies, config):
-    low = _RoutedLinear.apply(x, slot.lora_A, routes, copies, config)
-    return _RoutedLinear.apply(low.reshape(-1, slot.rank), slot.lora_B, routes, 1, config) * slot.scale
+    low = _RoutedLinear.apply(x, slot.lora_A, routes, copies, config, True)
+    return _RoutedLinear.apply(low.reshape(-1, slot.rank), slot.lora_B, routes, 1, config, True) * slot.scale
 
 
 class _SumRoutes(torch.autograd.Function):
@@ -170,11 +291,11 @@ def routed_limited_swiglu_experts(hidden, fc1, fc2, bias1, bias2, ids, weights, 
     ids, weights = ids.int().contiguous(), weights.contiguous()
     sorted_ids, expert_ids, used = _align_block_size(ids, config.block_size_m, config.num_experts)
     routes = sorted_ids, expert_ids, used, ids, weights
-    gate_up = _RoutedLinear.apply(hidden.contiguous(), fc1, routes, ids.shape[1], config)
+    gate_up = _RoutedLinear.apply(hidden.contiguous(), fc1, routes, ids.shape[1], config, False)
     # Fused decode rounds the matmul to the activation dtype before adding the bias.
     gate_up = gate_up + bias1[ids]
     activated = limited_swiglu(gate_up.flatten(0, 1), alpha, limit)
-    down = _RoutedLinear.apply(activated, fc2, routes, 1, config)
+    down = _RoutedLinear.apply(activated, fc2, routes, 1, config, False)
     weighted = (down + bias2[ids]) * weights.unsqueeze(-1).to(down.dtype)
     return _SumRoutes.apply(weighted) * config.routed_scaling_factor
 
@@ -187,7 +308,7 @@ def routed_adapter_experts(hidden, fc1, fc2, ids, weights, slots, config):
     ids, weights = ids.int().contiguous(), weights.contiguous()
     sorted_ids, expert_ids, used = _align_block_size(ids, config.block_size_m, config.num_experts)
     routes = sorted_ids, expert_ids, used, ids, weights
-    gate_up = _RoutedLinear.apply(hidden, fc1, routes, ids.shape[1], config)
+    gate_up = _RoutedLinear.apply(hidden, fc1, routes, ids.shape[1], config, False)
     if "gate_proj" in slots or "up_proj" in slots:
         gate, up = gate_up.chunk(2, dim=-1)
         if "gate_proj" in slots:
@@ -197,7 +318,7 @@ def routed_adapter_experts(hidden, fc1, fc2, ids, weights, slots, config):
         gate_up = torch.cat((gate, up), dim=-1)
     activated = areno_silu_and_mul(gate_up.flatten(0, 1))
     activated = activated * weights.reshape(-1, 1).to(hidden.dtype)
-    expert_out = _RoutedLinear.apply(activated, fc2, routes, 1, config)
+    expert_out = _RoutedLinear.apply(activated, fc2, routes, 1, config, False)
     if "down_proj" in slots:
         expert_out = expert_out + _adapter(activated, slots["down_proj"], routes, 1, config)
     return _SumRoutes.apply(expert_out) * config.routed_scaling_factor
