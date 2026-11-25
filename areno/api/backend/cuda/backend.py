@@ -94,6 +94,7 @@ class CudaBackend(Backend):
         self._rollout_policy_version = 0
         self._policy_sync_lock = Lock()
         self._rollout_session_active = False
+        self._async_overlap = False
         self._policy_sync_bucket_bytes = 64 * 1024 * 1024
         self._pending_policy_sync_metrics: dict[str, float] = {}
         # Per-step wall-time accumulators used to print the
@@ -131,6 +132,7 @@ class CudaBackend(Backend):
         self._rollout_engine = None
         self._separate_rollout = False
         self._rollout_session_active = False
+        self._async_overlap = False
         self._pending_policy_sync_metrics = {}
         for engine in engines:
             engine.close()
@@ -326,6 +328,19 @@ class CudaBackend(Backend):
                     throughput_gbps,
                 )
 
+    def enable_async_overlap(self) -> None:
+        """Experimental: allow train steps during an active rollout session.
+
+        Only valid with a separate rollout engine: rollout generation and
+        optimizer steps then run on disjoint worker sets, policy sync is
+        driven at rollout-session boundaries by the async trainer, and that
+        trainer tracks sample staleness against the synced policy version.
+        """
+
+        if not self._separate_rollout:
+            raise RuntimeError("async rollout/train overlap requires a separate rollout engine (set rollout_devices)")
+        self._async_overlap = True
+
     def rollout_batch(
         self,
         ctx: Context,
@@ -378,6 +393,7 @@ class CudaBackend(Backend):
             len(prompt_tokens),
             n_samples,
             adapter_version=rollout.adapter_version,
+            policy_version=self._rollout_policy_version,
         )
 
     def begin_rollout_session(self, ctx: Context) -> None:
@@ -491,6 +507,7 @@ class CudaBackend(Backend):
             len(prompt_tokens),
             n_samples,
             adapter_version=rollout.adapter_version,
+            policy_version=self._rollout_policy_version,
         )
 
     def train(
@@ -504,7 +521,7 @@ class CudaBackend(Backend):
         engine = self._require_train_engine()
         if not callable(loss_fn):
             raise ValueError("CudaBackend requires a callable loss_fn")
-        if self._separate_rollout and self._rollout_session_active:
+        if self._separate_rollout and self._rollout_session_active and not self._async_overlap:
             raise RuntimeError("cannot update policy weights during an active rollout session")
 
         if engine.config.runtime.decision_head is not None:
