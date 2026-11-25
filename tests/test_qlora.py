@@ -150,7 +150,7 @@ def test_paged_optimizer_matches_nonpaged_and_roundtrips(mode):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("adapters", [False, True])
-def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
+def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters, monkeypatch):
     from types import SimpleNamespace
 
     from areno.accel.kernels.nf4_moe import nf4_experts, routed_adapter_experts
@@ -233,6 +233,11 @@ def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
     training = routed_adapter_experts(x, q1, q2, ids, weights, slots, config)
     torch.testing.assert_close(training, output, atol=0, rtol=0)
     grad = torch.randn_like(training)
+
+    def reject_dense_bank(*args):
+        pytest.fail("routed NF4 backward expanded a full expert bank")
+
+    monkeypatch.setattr(NF4Weight, "dequantize", reject_dense_bank)
     actual = torch.autograd.grad(training, leaves, grad)
     expected = torch.autograd.grad(reference(), leaves, grad)
     for got, ref in zip(actual, expected, strict=True):
