@@ -20,6 +20,17 @@ from areno.cli.train import (
 )
 
 
+def test_training_attention_defaults_agree():
+    from areno.engine.config import RuntimeConfig
+
+    with train_cli.train_command.make_context("train", [], resilient_parsing=True) as ctx:
+        assert ctx.params["attn_backend"] == "native"
+    cfg = TrainerConfig(algo="sft", ckpt="actor", dataset_path="dataset")
+    assert cfg.cuda_config().runtime["attn_backend"] == "native"
+    assert RuntimeConfig().attn_backend == "native"
+    assert replace(cfg, attn_backend="flash").cuda_config().runtime["attn_backend"] == "flash"
+
+
 def test_train_config_requires_ckpt():
     with pytest.raises(UsageError, match="--ckpt is required"):
         _trainer_config_from_options(**_options(ckpt=None, algo="sft"))
@@ -180,6 +191,15 @@ def test_train_config_validates_dpo_positive_fields(field, value, message):
 def test_train_config_validates_ppo_positive_fields(field, value, message):
     with pytest.raises(UsageError, match=message):
         _trainer_config_from_options(**_options(algo="ppo", **{field: value}))
+
+
+def test_cuda_policy_routing_replay_is_opt_in():
+    for enabled in (False, True):
+        opts = _options(algo="gspo", backend="cuda")
+        if enabled:
+            opts["rollout_routing_replay"] = True
+        cfg = _trainer_config_from_options(**opts)
+        assert cfg.cuda_config().runtime["rollout_routing_replay"] is enabled
 
 
 def test_mtp_options_reach_the_engine_runtime():
@@ -408,7 +428,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "reward_fn       none" in summary
     assert "reward_ckpt     reward-model" in summary
     assert "dp_size       4" in summary
-    assert "attn_backend  flash" in summary
+    assert "attn_backend  native" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
     assert re.search(r"(?m)^  max_steps\s+11$", summary)
@@ -419,7 +439,9 @@ def test_training_config_summary_shows_resolved_values_and_warning():
 
 
 def test_training_config_summary_warns_about_native_attention_fallback(monkeypatch):
-    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, world_size=1))
+    cfg = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, world_size=1, attn_backend="flash")
+    )
     monkeypatch.setattr(
         train_cli,
         "flash_attention_unsupported_gpu_reason",
@@ -1074,7 +1096,7 @@ def _options(**overrides):
         eager_decode=False,
         speculative_draft_tokens=0,
         mtp_loss_scale=None,
-        attn_backend="flash",
+        attn_backend="native",
         disable_thinking=False,
         metrics_log_dir=None,
         agent_fn=None,
@@ -1234,3 +1256,32 @@ def test_jev_head_lr_cli_parsing(monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert captured[0].mlx_config().head_lr == 2e-5
+
+
+@pytest.mark.parametrize("backend", ["cuda", "mlx"])
+def test_sgl_jev_flag_selects_label_training_cpu(backend):
+    from areno.api.jev.labels.config import LabelJevTrainerConfig
+
+    config = _trainer_config_from_options(**_options(sgl_jev=True, backend=backend, q4=backend == "mlx"))
+    assert isinstance(config, LabelJevTrainerConfig)
+    assert config.algo == "label_jev"
+    assert config.world_size == config.tp_size == 1
+    if backend == "mlx":
+        assert config.mlx_config().label_jev
+        assert config.mlx_config().quantization_bits == 4
+    else:
+        assert "decision_head" not in config.cuda_config().runtime
+
+
+def test_sgl_jev_rejects_conflicting_algorithm_cpu():
+    with pytest.raises(UsageError, match="another training algorithm"):
+        _trainer_config_from_options(**_options(sgl_jev=True, algo="sft"))
+
+
+def test_sgl_jev_keeps_scalar_head_jev_distinct_cpu():
+    from areno.api.jev import JevTrainerConfig
+
+    original = _trainer_config_from_options(**_options(algo="jev"))
+    label = _trainer_config_from_options(**_options(algo="jev", sgl_jev=True))
+    assert isinstance(original, JevTrainerConfig) and original.algo == "jev"
+    assert label.algo == "label_jev"

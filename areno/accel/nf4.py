@@ -97,21 +97,26 @@ class NF4Weight(nn.Module):
 
 class _NF4Linear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, quantized, bias):
+    def forward(ctx, x, quantized, bias, invariant):
         ctx.quantized = quantized
         ctx.has_bias = bias is not None
-        return F.linear(x, quantized.dequantize(), bias)
+        weight = quantized.dequantize()
+        if invariant and x.is_cuda:
+            from areno.accel.kernels.invariant_linear import InvariantLinear
+
+            return InvariantLinear.apply(x, weight, bias)
+        return F.linear(x, weight, bias)
 
     @staticmethod
     def backward(ctx, grad):
         dx = grad @ ctx.quantized.dequantize() if ctx.needs_input_grad[0] else None
         db = grad.reshape(-1, grad.shape[-1]).sum(0) if ctx.has_bias and ctx.needs_input_grad[2] else None
-        return dx, None, db
+        return dx, None, db, None
 
 
 @torch._dynamo.disable
-def nf4_linear(x, quantized, bias=None):
-    return _NF4Linear.apply(x, quantized, bias)
+def nf4_linear(x, quantized, bias=None, *, invariant=False):
+    return _NF4Linear.apply(x, quantized, bias, invariant)
 
 
 class _NF4GroupedLinear(torch.autograd.Function):

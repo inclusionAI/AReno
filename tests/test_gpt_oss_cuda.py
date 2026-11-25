@@ -59,11 +59,12 @@ def test_tiny_hf_cuda(tmp_path, rope):
     from transformers import GptOssConfig, GptOssForCausalLM
 
     hf = tiny_config()
-    hf["rope_scaling"] = rope
+    hf["rope_scaling"] = rope or {"rope_type": "default"}
     hf["head_dim"] = 64
     hf["max_position_embeddings"] = 256
     ref_config = GptOssConfig(**hf)
     ref_config._attn_implementation = "eager"
+    ref_config._experts_implementation = "eager"
     torch.manual_seed(33)
     ref = GptOssForCausalLM(ref_config).cuda().train()
     ref.save_pretrained(tmp_path)
@@ -157,3 +158,35 @@ def test_gpt_oss_routing_capture_and_checkpoint_replay_cuda():
         torch.testing.assert_close(ids.long(), replay[:, 0].long(), atol=0, rtol=0)
     assert torch.isfinite(mlp.router.weight.grad).all()
     assert mlp.router.weight.grad.abs().sum() > 0
+
+
+def test_gpt_oss_native_experts_match_decode_and_differentiate_all_routes():
+    from areno.models.gpt_oss.model import GptOssExperts
+
+    torch.manual_seed(41)
+    config = GptOssAdapter().config_from_hf({**tiny_config(), "torch_dtype": "bfloat16"})
+    config.attn_backend = "native"
+    config.hidden_size = config.moe_intermediate_size = 256
+    config.num_experts, config.num_experts_per_tok = 8, 4
+    experts = GptOssExperts(config).cuda()
+    for parameter in experts.parameters():
+        torch.nn.init.normal_(parameter, std=0.12)
+    states = torch.randn(37, config.hidden_size, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    logits = torch.randn(37, config.num_experts, device="cuda")
+    scores, ids = logits.topk(config.num_experts_per_tok)
+    weights = scores.softmax(-1).bfloat16().requires_grad_()
+    packed = experts(states, ids, weights)
+    with torch.no_grad():
+        prefill = experts(states[:21], ids[:21], weights[:21])
+        decoded = [experts(states[i : i + 1], ids[i : i + 1], weights[i : i + 1]) for i in range(21, 37)]
+    torch.testing.assert_close(packed, torch.cat([prefill, *decoded]), atol=0, rtol=0)
+
+    # Compare gradients for both biased projections, the input and the router weights
+    # against the existing grouped expert backward at BF16 precision.
+    params = (states, weights, *experts.parameters())
+    grad = torch.randn_like(packed)
+    actual = torch.autograd.grad(packed, params, grad)
+    experts.native_projection = False
+    reference = torch.autograd.grad(experts(states, ids, weights), params, grad)
+    for got, expected in zip(actual, reference, strict=True):
+        torch.testing.assert_close(got.float(), expected.float(), atol=0.05, rtol=0.03)

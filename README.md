@@ -31,11 +31,13 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 - ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
 - 🪶 **Lightweight**: one self-contained train/serve stack with CUDA, Ascend NPU, and Apple Silicon MLX backends.
+- 🎯 **Native attention backend** is the default for CUDA training and rollout. It achieves exact agreement between rollout and training logprobs (`train/logp_abs_diff_mean = 0.0`).
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
 - 🗜️ **QLoRA**: train Qwen3 dense and Bailing-MoE V3 adapters on CUDA with NF4 weights, double quantization, and paged optimizers.
 - 🎯 **JEV**: train a model-independent decision head with backbone LoRA or full parameter updates, including native CUDA QLoRA and 4-bit/8-bit AdamW, then serve typed `choice`, `noul`, and `score` decisions.
+- 🏷️ **SGLang-compatible JEV**: use `areno train --sgl-jev` and `areno serve --sgl-jev` on CUDA or MLX to score label tokens through the existing LM head, then use model-compatible tools to merge LoRA for native SGLang serving. See the [LM-label JEV guide](docs/concepts/jev.rst).
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation

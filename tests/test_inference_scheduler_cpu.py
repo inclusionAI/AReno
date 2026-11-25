@@ -130,6 +130,7 @@ def test_drop_rollout_state_is_deferred_until_agentic_session_end():
         role="rollout",
         runtime=SimpleNamespace(keep_rollout_state=False),
     )
+    worker.device = torch.device("cpu")
     worker._rollout_session_active = False
     worker._rollout_session_infer_weights_ready = False
     events = []
@@ -1083,3 +1084,20 @@ def test_rollout_release_drains_device_before_and_after_storage_teardown(monkeyp
     assert calls == ["sync", "graphs", "infer_weights", "kv_cache", "gc", "sync", "empty"]
     assert worker._infer_cache_spec is None
     assert not worker._train_state_ready
+
+
+def test_cuda_session_releases_rollout_state_even_with_keep_enabled():
+    worker = object.__new__(worker_mod.ArenoWorker)
+    worker.device = torch.device("cuda", 0)
+    worker.config = SimpleNamespace(role="train", runtime=SimpleNamespace(keep_rollout_state=True))
+    worker._rollout_session_active = True
+    worker._rollout_session_infer_weights_ready = True
+    calls = []
+    worker._drop_rollout_hbm = lambda: calls.append("release rollout")
+    worker._prepare_for_train = lambda: calls.append("restore weights")
+    worker._park_cuda_phase_buffers = lambda: calls.append("park buffers")
+    assert not worker._should_drop_rollout_hbm_after_infer()
+    worker.rollout_session_end(None)
+    assert calls == ["release rollout", "restore weights", "park buffers"]
+    assert not worker._rollout_session_active
+    assert not worker._rollout_session_infer_weights_ready

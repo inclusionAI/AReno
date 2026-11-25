@@ -75,3 +75,22 @@ def test_gemma4_hybrid_adapter_loss_and_gradients(qlora):
     for expected, actual in zip(*gradients, strict=True):
         assert torch.isfinite(actual).all() and actual.abs().sum() > 0
         torch.testing.assert_close(actual, expected, atol=2e-4, rtol=1e-2)
+
+
+def test_gemma4_native_per_layer_projection_matches_individual_tokens():
+    from areno.models.gemma4.model import Gemma4ReplicatedLinear
+
+    torch.manual_seed(29)
+    layer = Gemma4ReplicatedLinear(2560, 256, sequence_parallel=False, dtype=torch.bfloat16, invariant=True).cuda()
+    with torch.no_grad():
+        layer.weight.normal_(std=0.02)
+    states = torch.randn(1, 160, 2560, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    packed = layer(states)
+    with torch.no_grad():
+        decoded = torch.cat([layer(states[:, i : i + 1]) for i in range(128, 160)], dim=1)
+    torch.testing.assert_close(packed[:, 128:], decoded, rtol=0, atol=0)
+    grad = torch.randn_like(packed)
+    expected = torch.autograd.grad(F.linear(states, layer.weight), (states, layer.weight), grad)
+    actual = torch.autograd.grad(packed, (states, layer.weight), grad)
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value, reference)

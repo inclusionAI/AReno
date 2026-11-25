@@ -133,14 +133,14 @@ class ConfigAndDataTest(unittest.TestCase):
 
         torch.testing.assert_close(actual, expected)
 
-    def test_native_train_rollout_matching_is_opt_in(self):
+    def test_native_train_rollout_matching_defaults_to_the_selected_backend(self):
         from areno.engine.layers.attention_backend.train import build_train_attention_backend
 
-        default_backend = build_train_attention_backend("native")
-        matching_backend = build_train_attention_backend("native", native_train_matches_rollout=True)
-
-        self.assertFalse(default_backend.native_train_matches_rollout)
-        self.assertTrue(matching_backend.native_train_matches_rollout)
+        self.assertTrue(build_train_attention_backend("native").native_train_matches_rollout)
+        self.assertFalse(build_train_attention_backend("flash").native_train_matches_rollout)
+        self.assertFalse(
+            build_train_attention_backend("native", native_train_matches_rollout=False).native_train_matches_rollout
+        )
 
     def test_model_config_allows_replicated_kv_for_qwen35_vl_moe(self):
         """Qwen3.5-VL-MoE uses replicated KV heads when TP is a multiple of KV heads."""
@@ -421,6 +421,21 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(cfg.runtime.attn_backend, "native")
         self.assertEqual(model.attn_backend, "native")
 
+    def test_native_models_share_compile_defaults_across_training_and_rollout(self):
+        for family in ("bailing_moe_v3", "qwen3_5", "qwen3"):
+            for role in ("train", "rollout"):
+                model = ModelConfig(model_type=family)
+                cfg = EngineConfig(model=model, devices=[0], role=role)
+                self.assertFalse(cfg.runtime.compile_model)
+                self.assertFalse(cfg.runtime.eager_decode)
+
+    def test_native_compile_can_be_enabled_explicitly(self):
+        model = ModelConfig()
+        explicit = RuntimeConfig(compile_model=True)
+        with patch("areno.engine.config.torch_compile_unsupported_gpu_reason", return_value=None):
+            explicit.resolve_compile_model(model=model, devices=[0])
+        self.assertTrue(explicit.compile_model)
+
     def test_runtime_config_disables_compile_for_bf16_on_turing_gpu(self):
         """T4 cannot compile BF16 backward graphs, so training should stay eager."""
         model = ModelConfig(
@@ -489,6 +504,7 @@ class ConfigAndDataTest(unittest.TestCase):
         runtime = RuntimeConfig(attn_backend="flash")
 
         with (
+            patch("areno.engine.config.find_spec", return_value=object()),
             patch("areno.engine.config.torch.cuda.is_available", return_value=True),
             patch("areno.engine.config.torch.cuda.device_count", return_value=1),
             patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(8, 0)),
@@ -497,6 +513,20 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(cfg.runtime.attn_backend, "flash")
         self.assertEqual(model.attn_backend, "flash")
+
+    def test_missing_optional_flash_package_uses_native_on_supported_gpu(self):
+        model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
+        runtime = RuntimeConfig(attn_backend="flash")
+        with (
+            patch("areno.engine.config.find_spec", return_value=None),
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(8, 0)),
+            self.assertWarnsRegex(RuntimeWarning, "not installed.*attn_backend='native'"),
+        ):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+        self.assertEqual(cfg.runtime.attn_backend, "native")
+        self.assertEqual(model.attn_backend, "native")
 
     def test_runtime_config_falls_back_to_native_on_large_qk_head_dim(self):
         """Gemma-style qk head dim 512 should use native attention instead of flash-attn."""
@@ -698,7 +728,7 @@ class ConfigAndDataTest(unittest.TestCase):
         )
 
         self.assertEqual(cfg.resolved_max_running_prompts(), 256)
-        self.assertTrue(cfg.cuda_config().runtime["rollout_routing_replay"])
+        self.assertFalse(cfg.cuda_config().runtime["rollout_routing_replay"])
 
     def test_rollout_config_respects_explicit_max_running_prompts(self):
         """An explicit max_running_prompts value should pass through unchanged."""

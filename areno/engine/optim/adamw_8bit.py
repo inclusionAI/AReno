@@ -207,6 +207,9 @@ class AdamW8bit(AdamWFP32Master):
         for bucket in self.buckets:
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
+        for device in {p.device for p in self.model_params}:
+            _CODEBOOK_CACHE.pop((device, True), None)
+            _CODEBOOK_CACHE.pop((device, False), None)
         self._collective_arenas.clear()
         if mode == "cpu":
             self._cleanup_disk_offload()

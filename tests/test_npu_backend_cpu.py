@@ -166,7 +166,7 @@ def test_npu_initializes_shared_engine_with_tp_dp_and_optimizer(monkeypatch, opt
     assert captured["runtime_config"].activation_checkpointing
     assert not captured["runtime_config"].eager_decode
     assert not captured["runtime_config"].compile_model
-    assert captured["runtime_config"].attn_backend == "flash"
+    assert captured["runtime_config"].attn_backend == "native"
     assert config.runtime == {"activation_checkpointing": True}
     backend.close()
 
@@ -409,7 +409,9 @@ def test_rollout_probe_and_session_sync_use_worker_device(monkeypatch, device_ty
     )
     events.clear()
     group = object()
-    monkeypatch.setattr("areno.engine.worker.get_tp_context", lambda: SimpleNamespace(device=device, group=group))
+    monkeypatch.setattr(
+        "areno.engine.worker.get_tp_context", lambda: SimpleNamespace(device=device, group=group, world_size=2)
+    )
     monkeypatch.setattr("areno.engine.worker.dist.barrier", lambda **kw: events.append(("barrier", kw)))
     worker.rollout_session_sync(None)
     barrier = ("barrier", {"group": group, **({"device_ids": [1]} if device_type == "cuda" else {})})

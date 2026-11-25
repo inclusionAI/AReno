@@ -33,6 +33,7 @@ from areno.api.algorithms import get_algorithm
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
+    OPDTrainerConfig,
     PolicyTrainerConfig,
     PPOTrainerConfig,
     RolloutTrainerConfig,
@@ -85,6 +86,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Basic",
         (
             "algo",
+            "sgl_jev",
+            "dense_reward_weight",
+            "bi_attn",
             "backend",
             "ckpt",
             "base_model_name_or_path",
@@ -128,6 +132,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "top_p",
             "greedy",
             "eager_decode",
+            "rollout_routing_replay",
             "speculative_draft_tokens",
             "drop_rollout_state",
             "attn_backend",
@@ -158,6 +163,8 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lora_dropout",
             "lora_target_modules",
             "lora_adapter_path",
+            "lora_fa",
+            "lora_fa_grad_correction",
             "reference_mode",
             "lr",
             "head_lr",
@@ -201,6 +208,11 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "value_loss_coef",
             "gamma",
             "lam",
+            "teacher_ckpt",
+            "opd_coef",
+            "opd_loss_type",
+            "opd_clip",
+            "opd_teacher_micro_bs",
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval", "export_gguf_path", "gguf_file_type")),
@@ -248,6 +260,14 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     """Build a typed trainer config from Click option values."""
 
     args = SimpleNamespace(**options)
+    if getattr(args, "sgl_jev", False):
+        if args.algo not in {"gspo", "jev", "label_jev"}:
+            raise click.UsageError("--sgl-jev cannot be combined with another training algorithm")
+        args.algo = "label_jev"
+    if getattr(args, "bi_attn", None) is not None and args.algo not in {"label_jev", "sgl-jev-dense"}:
+        raise click.UsageError("--bi-attn requires --sgl-jev, --algo label_jev, or --algo sgl-jev-dense")
+    if getattr(args, "dense_reward_weight", None) is not None and args.algo != "sgl-jev-dense":
+        raise click.UsageError("--dense-reward-weight requires --algo sgl-jev-dense")
     backend = getattr(args, "backend", None)
     if backend is None:
         from areno.api.config import default_backend_type
@@ -281,6 +301,11 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     args.reference_mode = getattr(args, "reference_mode", "independent")
+    args.teacher_ckpt = getattr(args, "teacher_ckpt", None)
+    args.opd_coef = getattr(args, "opd_coef", 1.0)
+    args.opd_loss_type = getattr(args, "opd_loss_type", "pg")
+    args.opd_clip = getattr(args, "opd_clip", 5.0)
+    args.opd_teacher_micro_bs = getattr(args, "opd_teacher_micro_bs", None)
     args.lora = _lora_config_from_options(args)
     if args.lora is not None and args.lora.dropout != 0.0 and args.backend != "mlx":
         raise click.UsageError("nonzero --lora-dropout currently requires --backend mlx")
@@ -364,6 +389,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--tune-max-samples must be positive")
     if (
         algorithm.requires_rollout
+        and algorithm.requires_reward
         and not (smoke_infer or smoke_train)
         and args.reward_fn_path is None
         and args.reward_ckpt is None
@@ -399,6 +425,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be positive")
     if args.world_size % args.tp_size != 0:
         raise click.UsageError("--world-size must be divisible by --tp-size")
+    if getattr(args, "rollout_routing_replay", False) and (args.backend != "cuda" or not algorithm.requires_rollout):
+        raise click.UsageError("--rollout-routing-replay requires a CUDA rollout-based algorithm")
     has_rollout_topology = args.rollout_devices is not None or args.rollout_tp_size is not None
     if has_rollout_topology and not algorithm.requires_rollout:
         raise click.UsageError("independent rollout devices are only valid for rollout-based algorithms")
@@ -475,6 +503,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.lam, "--lam")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
+    if algorithm.name == "opd":
+        if not getattr(args, "teacher_ckpt", None) or not str(args.teacher_ckpt).strip():
+            raise click.UsageError("--teacher-ckpt is required for --algo opd")
+        _require_positive_float(args.opd_coef, "--opd-coef")
+        _require_positive_float(args.opd_clip, "--opd-clip")
+        if args.opd_loss_type not in {"pg", "k3"}:
+            raise click.UsageError("--opd-loss-type must be pg or k3")
+        if getattr(args, "opd_teacher_micro_bs", None) is not None and args.opd_teacher_micro_bs < 1:
+            raise click.UsageError("--opd-teacher-micro-bs must be positive")
     _preflight_task_hooks(args, algorithm)
     try:
         config = _trainer_config_from_args(args)
@@ -513,9 +550,19 @@ def _lora_config_from_options(args):
             target_modules=targets,
             adapter_path=adapter_path,
             qlora=getattr(args, "qlora", False),
+            lora_fa=getattr(args, "lora_fa", False),
+            lora_fa_grad_correction=getattr(args, "lora_fa_grad_correction", False),
         )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
+
+
+def _lora_fa_summary(lora) -> str:
+    if lora is None:
+        return "n/a"
+    if not lora.lora_fa:
+        return "no"
+    return "yes (grad correction)" if lora.lora_fa_grad_correction else "yes"
 
 
 def _parse_cuda_devices(value: str | None, option_name: str) -> list[int] | None:
@@ -627,6 +674,7 @@ def _format_training_config_summary(
                 ("lora_rank", str(config.lora.rank) if config.lora is not None else "disabled"),
                 ("lora_alpha", str(config.lora.alpha) if config.lora is not None else "n/a"),
                 ("lora_dropout", str(config.lora.dropout) if config.lora is not None else "n/a"),
+                ("lora_fa", _lora_fa_summary(config.lora)),
                 (
                     "lora_target_modules",
                     ",".join(config.lora.target_modules) if config.lora is not None else "n/a",
@@ -984,6 +1032,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     }
     lora = getattr(args, "lora", None)
     algorithm = get_algorithm(args.algo)
+    args.rollout_routing_replay = getattr(args, "rollout_routing_replay", False)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
         return DPOTrainerConfig(
@@ -1050,7 +1099,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             reference_mode=args.reference_mode,
             **runtime_options,
         )
-    if algorithm.name in {"sft", "jev"}:
+    if algorithm.name in {"sft", "jev", "label_jev", "sgl-jev-dense"}:
         config = TrainerConfig(
             algo=algorithm.name,
             ckpt=args.ckpt,
@@ -1113,6 +1162,17 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             reference_mode=args.reference_mode,
             **runtime_options,
         )
+        if algorithm.name in {"label_jev", "sgl-jev-dense"}:
+            from areno.api.jev.labels.config import DenseLabelJevTrainerConfig, LabelJevTrainerConfig
+
+            dense_weight = getattr(args, "dense_reward_weight", None)
+            label_config = DenseLabelJevTrainerConfig if algorithm.name == "sgl-jev-dense" else LabelJevTrainerConfig
+            dense_options = {"dense_reward_weight": dense_weight} if dense_weight is not None else {}
+            return label_config(
+                **dense_options,
+                **{field.name: getattr(config, field.name) for field in fields(config)},
+                bi_attn=getattr(args, "bi_attn", None),
+            )
         if algorithm.name == "jev":
             from areno.api.jev import JevTrainerConfig
 
@@ -1141,7 +1201,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             shuffle=getattr(args, "shuffle", False),
         )
     if algorithm.name != "ppo":
-        return PolicyTrainerConfig(
+        # Keep this a static PolicyTrainerConfig(...) call: the
+        # dashboard derives per-flag algorithm applicability by
+        # parsing this function's AST.
+        config = PolicyTrainerConfig(
             algo=algorithm.name,
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
@@ -1204,6 +1267,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             mtp_loss_scale=args.mtp_loss_scale,
+            rollout_routing_replay=args.rollout_routing_replay,
             cut_cross_entropy=args.cut_cross_entropy,
             speculative_draft_tokens=args.speculative_draft_tokens,
             gspo_clip_eps=args.gspo_clip_eps,
@@ -1215,6 +1279,16 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             lora=lora,
             reference_mode=args.reference_mode,
             **runtime_options,
+        )
+        if algorithm.name != "opd":
+            return config
+        return OPDTrainerConfig(
+            **{field.name: getattr(config, field.name) for field in fields(config)},
+            teacher_ckpt=args.teacher_ckpt,
+            opd_coef=args.opd_coef,
+            opd_loss_type=args.opd_loss_type,
+            opd_clip=args.opd_clip,
+            opd_teacher_micro_bs=args.opd_teacher_micro_bs,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -1279,6 +1353,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         eager_decode=args.eager_decode,
         attn_backend=args.attn_backend,
         mtp_loss_scale=args.mtp_loss_scale,
+        rollout_routing_replay=args.rollout_routing_replay,
         cut_cross_entropy=args.cut_cross_entropy,
         speculative_draft_tokens=args.speculative_draft_tokens,
         gspo_clip_eps=args.gspo_clip_eps,
@@ -1332,6 +1407,10 @@ def run(trainer_config: TrainerConfig):
         custom_config=trainer_config.backend_config(),
         score_micro_bs=trainer_config.score_micro_bs,
     )
+    algorithm_loader = getattr(
+        _algorithm_for_cli(trainer_config.algo).resolve_trainer_cls(), "load_training_dataset", None
+    )
+    dataset_options = {"algorithm_loader": algorithm_loader} if algorithm_loader is not None else {}
     dataset = _load_dataset_for_training(
         trainer_config.dataset_path,
         dataset_loader_fn=trainer_config.dataset_loader_fn,
@@ -1339,6 +1418,7 @@ def run(trainer_config: TrainerConfig):
         model_hub=trainer_config.model_hub,
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
+        **dataset_options,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     if isinstance(trainer_config, SFTTrainerConfig) and trainer_config.validation_dataset_path:
@@ -1413,6 +1493,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "sequence_parallel",
                 "attn_backend",
                 "eager_decode",
+                "rollout_routing_replay",
                 "speculative_draft_tokens",
                 "mtp_loss_scale",
                 "cut_cross_entropy",
@@ -1540,6 +1621,7 @@ def _load_dataset_for_training(
     load_dataset,
     load_from_disk,
     model_path: str | None = None,
+    algorithm_loader=None,
 ):
     def default_loader(path):
         return _load_dataset_from_path(
@@ -1564,6 +1646,8 @@ def _load_dataset_for_training(
         ):
             options["model_path"] = model_path
         return loader_fn(dataset_path, **options)
+    if algorithm_loader is not None:
+        return algorithm_loader(dataset_path, default_loader=default_loader)
     return default_loader(dataset_path)
 
 
@@ -1719,6 +1803,22 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
 @click.option(
+    "--dense-reward-weight",
+    default=None,
+    type=click.FloatRange(min=0.0),
+    help="Dense reward coefficient for sgl-jev-dense (defaults to 0.1).",
+)
+@click.option(
+    "--bi-attn/--no-bi-attn",
+    default=None,
+    help="Use bidirectional full attention for LM-label JEV prompts; reload saved mode by default.",
+)
+@click.option(
+    "--sgl-jev",
+    is_flag=True,
+    help="Train SGLang-compatible LM-label JEV (CUDA or MLX); equivalent to --algo label_jev.",
+)
+@click.option(
     "--seed",
     type=click.IntRange(0, 2**32 - 1),
     default=None,
@@ -1778,6 +1878,24 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option(
     "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
+)
+@click.option("--teacher-ckpt", default=None, help="OPD frozen teacher checkpoint. Must share the student tokenizer.")
+@click.option("--opd-coef", type=float, default=1.0, show_default=True, help="OPD distillation loss scale.")
+@click.option(
+    "--opd-loss-type",
+    type=click.Choice(["pg", "k3"]),
+    default="pg",
+    show_default=True,
+    help="OPD objective: clipped dense advantage (pg) or low-variance KL (k3).",
+)
+@click.option(
+    "--opd-clip", type=float, default=5.0, show_default=True, help="OPD dense-advantage clipping range (pg only)."
+)
+@click.option(
+    "--opd-teacher-micro-bs",
+    type=int,
+    default=None,
+    help="OPD teacher scoring microbatch size; defaults to --score-micro-bs.",
 )
 @click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or remote model repo ID.")
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
@@ -1889,7 +2007,10 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--gradient-accumulation-steps",
     type=int,
     default=None,
-    help="Optimizer step interval in microbatches; defaults to accumulating all mini-batches in one train call.",
+    help=(
+        "Optimizer step interval in microbatches; defaults to accumulating all mini-batches in one train call. "
+        "OPD pg expects one update per rollout."
+    ),
 )
 @click.option("--max-prompt-tokens", type=int, default=1024, show_default=True, help="Maximum tokenized prompt length.")
 @click.option(
@@ -1938,6 +2059,19 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter used to initialize native LoRA.")
+@click.option(
+    "--lora-fa",
+    is_flag=True,
+    help=(
+        "Freeze LoRA A and train only B (LoRA-FA); avoids saving full-width adapter inputs for backward. "
+        "Memory savings are significant only with --no-activation-checkpointing."
+    ),
+)
+@click.option(
+    "--lora-fa-grad-correction",
+    is_flag=True,
+    help="With --lora-fa, rescale B gradients by (r/alpha)^2 (A A^T)^-1 (LoRA-FA Theorem 4.1).",
+)
 @click.option(
     "--reference-mode",
     type=click.Choice(["independent", "reuse_actor_base"]),
@@ -2066,6 +2200,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Number of optimizer buckets per persistent disk mmap and flush group.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
+@click.option("--rollout-routing-replay", is_flag=True, help="Replay rollout MoE expert IDs in CUDA policy training.")
 @click.option(
     "--speculative-draft-tokens",
     type=click.IntRange(min=0),
@@ -2090,9 +2225,9 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--attn-backend",
     type=click.Choice(["flash", "native"]),
-    default="flash",
+    default="native",
     show_default=True,
-    help="Attention backend. Use native for slower areno_accel attention consistency diagnostics.",
+    help="Attention backend for training and rollout. Select flash to use FlashAttention.",
 )
 @click.option(
     "--disable-thinking",

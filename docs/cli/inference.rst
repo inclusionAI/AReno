@@ -27,6 +27,18 @@ Serve chat completions.
 
 Options:
 
+``--sgl-jev``
+   Serve SGLang-compatible typed decisions through the existing LM head on
+   CUDA or MLX. Cannot be combined with the scalar-head
+   ``--decision-checkpoint`` option. See :doc:`../concepts/jev`
+   for the distinction from scalar-head JEV.
+
+``--bi-attn / --no-bi-attn``
+   With ``--sgl-jev``, enable bidirectional full attention on CUDA or MLX.
+   By default, restore the checkpoint's attention mode; explicitly disabling
+   it for a bidirectional checkpoint is rejected. Label scoring uses only
+   the prompt, without appending candidate answers.
+
 ``--model-path TEXT``
    Local checkpoint/tokenizer path or remote model repo ID. Required.
 

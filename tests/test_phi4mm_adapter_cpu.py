@@ -594,3 +594,76 @@ def test_phi4mm_tp_construction_uses_compatible_local_shards(tp_size):
     assert model.model.embed_tokens.weight.shape == (32 // tp_size, 64)
     assert model.lm_head.weight.shape == (32 // tp_size, 64)
     assert model.lm_head.weight is model.model.embed_tokens.weight
+
+
+def test_phi4mm_qlora_preserves_checkpoint_modality_adapters():
+    from areno.adapters import LoraConfig
+    from areno.adapters.config import PHI4MM_TARGETS
+    from areno.adapters.lora import initialize_lora
+    from areno.adapters.qlora import initialize_qlora
+
+    config = _tiny_model_config()
+    config.vision_config = dict(
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        image_size=8,
+        patch_size=2,
+        crop_size=8,
+    )
+    config.hf_text_config["vision_lora"] = {"r": 4, "lora_alpha": 8, "dp": 0.0}
+    model = Phi4MMForCausalLM(config)
+    model.configure_multimodal_training(
+        unfreeze_tower=False, unfreeze_projector=False, tower_lr=None, projector_lr=None, base_lr=1e-4
+    )
+    registry = initialize_lora(model, LoraConfig(qlora=True), seed=8)
+    assert registry.config.target_modules == PHI4MM_TARGETS
+    initialize_qlora(model)
+    for layer in model.model.layers:
+        module = layer.self_attn.qkv_proj
+        assert module.weight is None and module.quantized_weight.packed.dtype == torch.uint8
+        assert not module.lora_A["vision"].weight.requires_grad
+        assert "qkv_proj" in module.lora_slots
+    assert {id(p) for p in model.parameters() if p.requires_grad} == {id(p) for p in registry.parameters()}
+
+
+def test_longrope_rollout_selects_short_prefix_and_preserves_later_hidden_states():
+    from areno.models.phi4mm.model import _longrope_rollout_layout
+
+    meta = TrainMeta(
+        packed=True, cu_seqlens=torch.tensor([0, 5, 12, 20]), max_seqlen=8, rollout_prompt_lengths=[4, 6, 2]
+    )
+    source, restore, cu = _longrope_rollout_layout(meta, 4, 4)
+    assert cu.tolist() == [0, 5, 12, 20, 24, 28]
+    assert source.tolist() == list(range(20)) + list(range(4)) + list(range(12, 16))
+    assert restore.tolist() == list(range(20, 24)) + list(range(4, 12)) + list(range(24, 28)) + list(range(16, 20))
+    torch.testing.assert_close(source[restore], torch.arange(20))
+
+
+def test_phi_mst_replays_vision_and_speech_masks_for_each_tile(cpu_reference_kernels):
+    from areno.engine.runtime.mst import mini_sequence_forward
+    from areno.models.phi4mm.model import Phi4MMDecoderLayer
+
+    config = _tiny_model_config()
+    config.vision_config = {}
+    config.audio_config = {}
+    for adapter in ("vision", "speech"):
+        config.hf_text_config[f"{adapter}_lora"] = {"r": 4, "lora_alpha": 8, "dp": 0.0}
+    layer = Phi4MMDecoderLayer(config, 0)
+    torch.manual_seed(17)
+    for parameter in layer.mlp.parameters():
+        torch.nn.init.uniform_(parameter, -0.1, 0.1)
+    vision = torch.tensor([[True, True, False, False, False]])
+    speech = torch.tensor([[False, False, True, True, False]])
+    layer.set_lora_masks(vision, speech)
+    states = torch.randn(1, 5, config.hidden_size, requires_grad=True)
+    direct = layer.mlp(states)
+    expected = torch.autograd.grad(direct.square().sum(), (states, *layer.mlp.parameters()))
+    tiled = mini_sequence_forward(layer._masked_mlp, states, vision.flatten(), speech.flatten(), chunk_size=2)
+    actual = torch.autograd.grad(tiled.square().sum(), (states, *layer.mlp.parameters()))
+    torch.testing.assert_close(tiled, direct)
+    for grad, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(grad, reference)
+    for proj in (layer.mlp.gate_up_proj, layer.mlp.down_proj):
+        assert proj.vision_lora_mask is vision and proj.speech_lora_mask is speech

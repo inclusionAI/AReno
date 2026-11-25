@@ -30,6 +30,7 @@ from areno.engine.layers.linear import (
     RowParallelLinear,
     _shard_range,
     mark_tensor_parallel_parameter,
+    projection_dtype,
 )
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
@@ -249,6 +250,7 @@ class Qwen35GatedDeltaNet(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
         ctx = get_tp_context()
+        self.native_delta = config.attn_backend == "native"
         self.layer_idx = layer_idx
         self.num_key_heads = config.linear_num_key_heads
         self.num_value_heads = config.linear_num_value_heads
@@ -305,7 +307,13 @@ class Qwen35GatedDeltaNet(nn.Module):
         query, key = query_key.split((self.local_key_heads, self.local_key_heads), dim=2)
         value = value.view(batch, seqlen, self.local_value_heads, self.head_v_dim)
         z = z.view(batch, seqlen, self.local_value_heads, self.head_v_dim)
-        if infer_meta is not None:
+        if hidden_states.is_cuda and self.native_delta:
+            from areno.accel.native_delta import native_delta
+
+            out = native_delta(
+                query, key, value, a_gate, b_gate, self.A_log, self.dt_bias, train_meta, infer_meta, self.state_cache
+            )
+        elif infer_meta is not None:
             out = self._forward_infer(query, key, value, a_gate, b_gate, infer_meta)
         else:
             g = -self.A_log.float().exp().view(1, 1, -1) * F.softplus(
@@ -331,6 +339,10 @@ class Qwen35GatedDeltaNet(nn.Module):
         if x.shape[0] != 1:
             raise ValueError("packed ARENO causal-conv expects flattened packed input with batch size 1")
         log_once("qwen35_gdn_areno_packed_conv", "using ARENO packed causal-conv training kernel")
+        if x.is_cuda and self.native_delta and x.shape[1] >= 64:
+            from areno.accel.kernels.native_delta_conv import native_packed_conv
+
+            return native_packed_conv(x, self.conv1d_weight, cu_seqlens)
         return _areno_packed_depthwise_causal_conv1d_silu_no_compile(x, self.conv1d_weight, cu_seqlens)
 
     def _causal_conv_dense(self, x: torch.Tensor) -> torch.Tensor:
@@ -356,23 +368,44 @@ class Qwen35GatedDeltaNet(nn.Module):
         if infer_meta.mode == "prefill":
             if infer_meta.cu_seqlens is None:
                 raise RuntimeError("Qwen3.5 GDN prefill requires cu_seqlens")
-            return self._causal_conv_infer_prefill(x, infer_meta.cu_seqlens, slots)
+            return self._causal_conv_infer_prefill(x, infer_meta.cu_seqlens, slots, infer_meta.cache_seqlens)
         raise ValueError(f"unsupported inference mode: {infer_meta.mode}")
 
     @torch._dynamo.disable
     def _causal_conv_infer_prefill(
-        self, x: torch.Tensor, cu_seqlens: torch.Tensor, slots: torch.Tensor
+        self, x: torch.Tensor, cu_seqlens: torch.Tensor, slots: torch.Tensor, cached_prefix: torch.Tensor | None = None
     ) -> torch.Tensor:
         out = torch.empty_like(x)
         cu = cu_seqlens.to(device=x.device, dtype=torch.long)
+        history_size = self.conv_kernel_size - 1
         for idx, slot in enumerate(slots):
             start, end = int(cu[idx].item()), int(cu[idx + 1].item())
-            segment = x[:, start:end]
-            out[:, start:end] = self._causal_conv_dense(segment)
-            tail = segment.reshape(-1, x.shape[-1])[-(self.conv_kernel_size - 1) :]
-            cache = torch.zeros(x.shape[-1], self.conv_kernel_size - 1, device=x.device, dtype=self.conv_cache.dtype)
-            cache[:, -tail.shape[0] :] = tail.transpose(0, 1).to(dtype=self.conv_cache.dtype)
-            self.conv_cache[slot] = cache
+            if start == end:
+                continue
+            history = None
+            if cached_prefix is not None:
+                history = self.conv_cache[slot].T.unsqueeze(0).to(dtype=x.dtype)
+                history = history * (cached_prefix[idx] > 0).to(dtype=x.dtype)
+            # The dense conv also returns an FP32 preactivation workspace. Bound
+            # its lifetime to a tile, keeping the exact left convolution halo.
+            tile = 1024 if self.native_delta else end - start
+            for left in range(start, end, tile):
+                right = min(end, left + tile)
+                source = x[:, max(start, left - history_size) : right]
+                missing = max(0, history_size - (left - start))
+                if missing and history is not None:
+                    source = torch.cat((history[:, -missing:], source), dim=1)
+                out[:, left:right] = self._causal_conv_dense(source)[:, -(right - left) :]
+            if history_size:
+                tail = x[:, max(start, end - history_size) : end]
+                if tail.shape[1] < history_size:
+                    padding = (
+                        x.new_zeros((1, history_size - tail.shape[1], x.shape[-1]))
+                        if history is None
+                        else history[:, tail.shape[1] :]
+                    )
+                    tail = torch.cat((padding, tail), dim=1)
+                self.conv_cache[slot] = tail[0].T
         return out
 
     def _forward_train(
@@ -520,6 +553,7 @@ class Qwen35MoeMLP(nn.Module):
         super().__init__()
         if config.num_experts is None:
             raise ValueError("qwen3_5_moe requires num_experts")
+        self.native_backend = config.attn_backend == "native"
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
@@ -564,7 +598,13 @@ class Qwen35MoeMLP(nn.Module):
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
         with sequence_parallel_region(False):
-            logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
+            gate_input = flat.to(dtype=self.gate.dtype)
+            if self.native_backend and flat.is_cuda:
+                from areno.accel.kernels.invariant_linear import InvariantLinear
+
+                logits = InvariantLinear.apply(gate_input, self.gate, None)
+            else:
+                logits = _areno_linear_no_compile(gate_input, self.gate)
             log_once("qwen35_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3.5-MoE")
             topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
             topk_idx, topk_weight = resolve_softmax_routes(
@@ -574,7 +614,9 @@ class Qwen35MoeMLP(nn.Module):
                 topk_weight,
                 renormalize=self.norm_topk_prob,
             )
-            if self.training:
+            if flat.is_cuda and self.experts.use_native_kernels(self.native_backend):
+                out = self.experts.native_forward(flat, topk_idx, topk_weight, self._fused_moe_config)
+            elif self.training:
                 out = tokenwise_forward(
                     self.experts,
                     flat.to(dtype=self.experts.gate_up_weight.dtype),
@@ -591,17 +633,28 @@ class Qwen35MoeMLP(nn.Module):
             shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
             shared = tokenwise_forward(
                 self.shared_expert,
-                shared_input.to(dtype=self.shared_expert.gate_proj.weight.dtype),
+                shared_input.to(dtype=projection_dtype(self.shared_expert.gate_proj)),
                 train_meta=train_meta,
             )
             if self.shared_expert_gate is not None:
                 gate_input = shared_input.to(dtype=self.shared_expert_gate.dtype)
-                shared = shared * torch.sigmoid(F.linear(gate_input, self.shared_expert_gate.unsqueeze(0)))
+                weight = self.shared_expert_gate.unsqueeze(0)
+                if self.native_backend and gate_input.is_cuda:
+                    from areno.accel.kernels.invariant_linear import InvariantLinear
+
+                    gate = InvariantLinear.apply(gate_input, weight, None)
+                else:
+                    gate = F.linear(gate_input, weight)
+                shared = shared * torch.sigmoid(gate)
             out = out + shared
         return out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
+        if self.experts.use_native_kernels(self.native_backend) and (
+            self.native_backend or getattr(self.experts, "quantized_gate_up", None) is not None
+        ):
+            return
         self._infer_w1_weight = self._updated_infer_weight(
             self._infer_w1_weight,
             self.experts.gate_up_weight.detach().to(dtype=self.experts.gate_up_weight.dtype).contiguous(),
@@ -1703,7 +1756,7 @@ class Qwen35VLAdapter(Qwen35Adapter):
         return save_qwen35_vl_weights(model, output_path, source_path)
 
 
-class Qwen35MoeAdapter(ModelAdapter):
+class Qwen35MoeAdapter(Qwen35Adapter):
     name = "qwen3_5_moe"
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:

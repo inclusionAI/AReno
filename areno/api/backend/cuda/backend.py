@@ -35,7 +35,9 @@ from areno.api.backend.cuda.checkpoint import save_checkpoint
 from areno.api.backend.cuda.generation import rollout_options
 from areno.api.backend.cuda.losses import dispatch_loss
 from areno.api.backend.cuda.training import (
+    annotate_opd_token_mean_packs,
     annotate_sft_token_mean_packs,
+    is_opd_loss_fn,
     is_sft_loss_fn,
     make_train_pack,
     pad_token_id,
@@ -102,8 +104,8 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev"}),
-            model_roles=frozenset({"actor", "ref", "reward", "critic"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "jev", "label_jev", "sgl-jev-dense", "opd"}),
+            model_roles=frozenset({"actor", "ref", "reward", "critic", "teacher"}),
             multimodal=True,
             distributed=True,
             custom_loss=True,
@@ -523,19 +525,59 @@ class CudaBackend(Backend):
         # forward worker can call it without having to know about the loss API.
         packs = []
         is_sft = is_sft_loss_fn(loss_fn)
-        sft_target_counts = [] if is_sft else None
+        is_opd = is_opd_loss_fn(loss_fn)
+        token_counts = [] if is_sft or is_opd else None
         for seqs in train_microbatches(batch_data, mini_bs):
             pack = make_train_pack(seqs)
+            if engine.config.model.model_type == "phi4mm" and any(seq.logprobs for seq in seqs):
+                # A real rollout may have used both sides of the LongRoPE cache boundary.
+                pack["rollout_prompt_lengths"] = [
+                    (
+                        seq.prompt_len
+                        if seq.prompt_len is not None
+                        else next(
+                            (i for i, flag in enumerate(pack["prompt_mask"][row].tolist()) if not flag), len(seq.tokens)
+                        )
+                    )
+                    if seq.logprobs
+                    else -1
+                    for row, seq in enumerate(seqs)
+                ]
             pack["_loss_fn"] = loss_fn
+            label_features = [seq.features.get("label_jev") if isinstance(seq.features, dict) else None for seq in seqs]
+            if any(feature is not None for feature in label_features):
+                if not all(feature is not None for feature in label_features):
+                    raise ValueError("label questions cannot be mixed with other training rows")
+                if engine.config.tp_size != 1:
+                    raise ValueError("label JEV initially requires TP=1")
+                pack.pop("features", None)
+                pack["_label_questions"] = label_features
+                modes = {bool(feature.get("bi_attn", False)) for feature in label_features}
+                if len(modes) != 1:
+                    raise ValueError("cannot mix causal and bidirectional label rows")
+                pack["_bi_attn"] = modes.pop()
             packs.append(pack)
-            if is_sft:
-                sft_target_counts.append(sft_target_token_count(seqs))
+            if is_sft or is_opd:
+                token_counts.append(sft_target_token_count(seqs))
         if is_sft:
             annotate_sft_token_mean_packs(
                 packs,
-                sft_target_counts,
+                token_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
+        elif is_opd:
+            annotate_opd_token_mean_packs(
+                packs,
+                token_counts,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+            )
+        if packs and "_label_questions" in packs[0]:
+            group_size = len(packs) if gradient_accumulation_steps is None else max(1, int(gradient_accumulation_steps))
+            for start in range(0, len(packs), group_size):
+                group = packs[start : start + group_size]
+                count = sum(len(pack["_label_questions"]) for pack in group)
+                for pack in group:
+                    pack["_label_weight"] = len(pack["_label_questions"]) * len(group) / count
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
         if self._separate_rollout and any(bool(stats.stepped) for stats in stats_list):
             adapter_versions = [stats.adapter_version for stats in stats_list if stats.adapter_version is not None]
@@ -553,6 +595,10 @@ class CudaBackend(Backend):
         if stats_list and stats_list[-1].adapter_version is not None:
             result["adapter_version"] = stats_list[-1].adapter_version
         result.update(metrics)
+        for name in ("label_peak_allocated_bytes", "label_peak_reserved_bytes"):
+            values = [row[name] for row in metric_rows if name in row]
+            if values:
+                result[name] = max(values)
         result.update(self._pending_policy_sync_metrics)
         self._pending_policy_sync_metrics = {}
         if self._step_e2e_start is not None:

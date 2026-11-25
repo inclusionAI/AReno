@@ -119,6 +119,11 @@ def resolve_sigmoid_routes(
         replayed_ids, replay_mask = replayed
         scores = torch.sigmoid(logits.float().gather(-1, replayed_ids))
         replayed_weight = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1.0e-20)
+        # When replay selects the same experts, retain the fused router's
+        # forward rounding while differentiating the selected sigmoid weights.
+        same_route = (replayed_ids == topk_idx).all(dim=-1, keepdim=True)
+        matched_weight = topk_weight.detach() + (replayed_weight - replayed_weight.detach())
+        replayed_weight = torch.where(same_route, matched_weight, replayed_weight)
         topk_idx = replayed_ids
         topk_weight = torch.where(replay_mask.unsqueeze(-1), replayed_weight, topk_weight)
     _capture_ids(state, layer_slot, topk_idx)

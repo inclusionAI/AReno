@@ -14,6 +14,7 @@ def _row_logsumexp_kernel(
     ROW_STRIDE: tl.constexpr,
     COL_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
+    LOCAL_SUM: tl.constexpr,
 ):
     row = tl.program_id(0)
     columns = tl.arange(0, BLOCK)
@@ -26,10 +27,12 @@ def _row_logsumexp_kernel(
             other=-float("inf"),
         ).to(tl.float32)
         total += tl.sum(tl.exp(values - maximum), 0)
-    tl.store(OUTPUT + row, maximum + tl.log(total))
+    tl.store(OUTPUT + row, total if LOCAL_SUM else maximum + tl.log(total))
 
 
-def row_logsumexp(logits: torch.Tensor, maximum: torch.Tensor, vocab_chunk_size: int) -> torch.Tensor:
+def row_logsumexp(
+    logits: torch.Tensor, maximum: torch.Tensor, vocab_chunk_size: int, *, local_sum: bool = False
+) -> torch.Tensor:
     output = torch.empty_like(maximum, dtype=torch.float32)
     block = min(triton.next_power_of_2(logits.shape[-1]), 1 << (vocab_chunk_size.bit_length() - 1))
     _row_logsumexp_kernel[(logits.shape[0],)](
@@ -40,6 +43,7 @@ def row_logsumexp(logits: torch.Tensor, maximum: torch.Tensor, vocab_chunk_size:
         logits.stride(0),
         logits.stride(1),
         block,
+        local_sum,
         num_warps=4 if block <= 1024 else 8,
     )
     return output

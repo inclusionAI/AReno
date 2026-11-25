@@ -25,6 +25,7 @@ class TrainMeta:
     cu_seqlens: torch.Tensor | None = None
     max_seqlen: int | None = None
     packed: bool = False
+    bi_attn: bool = False
     sequence_parallel: bool = False
     activation_checkpointing: bool = False
     num_padding_tokens: int = 0
@@ -33,6 +34,7 @@ class TrainMeta:
     mtp_enabled: bool = False
     mst_chunk_size: int = 0
     recompute_policy: RecomputePolicy | None = None
+    rollout_prompt_lengths: list[int] | None = None
 
 
 @dataclass(slots=True)

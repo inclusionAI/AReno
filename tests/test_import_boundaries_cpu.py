@@ -6,6 +6,7 @@ import textwrap
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 
 def test_public_api_imports_do_not_load_engine_heavy_modules():
@@ -63,7 +64,7 @@ def test_cuda_worker_configures_torch_runtime_before_model_build(monkeypatch):
 
     monkeypatch.setattr(worker_mod, "_configure_torch_runtime", lambda: events.append("configure_torch"))
     monkeypatch.setattr(worker_mod, "configure_unified_memory_budget", lambda device: events.append("configure_memory"))
-    monkeypatch.setattr(worker_mod, "get_tp_context", lambda: SimpleNamespace(device="cuda:0"))
+    monkeypatch.setattr(worker_mod, "get_tp_context", lambda: SimpleNamespace(device=torch.device("cuda:0")))
     monkeypatch.setattr(worker_mod, "build_model_on_device", build_model)
 
     with pytest.raises(ModelBuildReached):

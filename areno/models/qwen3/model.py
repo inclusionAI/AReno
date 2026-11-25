@@ -113,6 +113,40 @@ class Qwen3MoeExperts(nn.Module):
         mark_tensor_parallel_parameter(self.gate_up_weight, True, sequence_parallel=False, tp_grad_allreduce=False)
         mark_tensor_parallel_parameter(self.down_weight, True, sequence_parallel=False, tp_grad_allreduce=False)
 
+    @property
+    def compute_dtype(self):
+        packed = getattr(self, "quantized_gate_up", None)
+        return packed.compute_dtype if packed is not None else self.gate_up_weight.dtype
+
+    def use_native_kernels(self, native_backend):
+        return self.compute_dtype in (torch.bfloat16, torch.float16) and (
+            native_backend or getattr(self, "quantized_gate_up", None) is not None or self.has_active_lora()
+        )
+
+    def native_forward(self, flat, topk_idx, topk_weight, config):
+        from areno.accel.kernels.fused_moe import NativeSiluExperts, fused_experts
+
+        flat = flat.to(dtype=self.compute_dtype)
+        ids, weights = self.local_routes(topk_idx, topk_weight)
+        packed = getattr(self, "quantized_gate_up", None)
+        slots = self.lora_slots if self.has_active_lora() else {}
+        if packed is not None or slots:
+            from areno.accel.kernels.nf4_moe import routed_adapter_experts
+
+            w1, w2 = (packed, self.quantized_down) if packed is not None else (self.gate_up_weight, self.down_weight)
+            out = routed_adapter_experts(flat, w1, w2, ids, weights, slots, config)
+        else:
+            args = (
+                flat,
+                self.gate_up_weight,
+                self.down_weight,
+                weights,
+                ids.int(),
+                config,
+            )
+            out = NativeSiluExperts.apply(*args) if self.training else fused_experts(*args)
+        return all_reduce(out)
+
     def install_lora_component(self, component: str, slot: nn.Module) -> None:
         """Attach one grouped canonical adapter before optimizer construction."""
 
@@ -213,6 +247,7 @@ class Qwen3MoeMLP(nn.Module):
         super().__init__()
         if config.num_experts is None:
             raise ValueError("qwen3_moe requires num_experts")
+        self.native_backend = config.attn_backend == "native"
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
@@ -238,7 +273,13 @@ class Qwen3MoeMLP(nn.Module):
             hidden_states = gather_from_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(False):
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-            logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
+            gate_input = flat.to(dtype=self.gate.dtype)
+            if self.native_backend and flat.is_cuda:
+                from areno.accel.kernels.invariant_linear import InvariantLinear
+
+                logits = InvariantLinear.apply(gate_input, self.gate, None)
+            else:
+                logits = _areno_linear_no_compile(gate_input, self.gate)
             log_once("qwen3_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3-MoE")
             topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
             return resolve_softmax_routes(
@@ -263,7 +304,9 @@ class Qwen3MoeMLP(nn.Module):
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
         with sequence_parallel_region(False):
-            if self.training or self.experts.has_lora():
+            if flat.is_cuda and self.experts.use_native_kernels(self.native_backend):
+                out = self.experts.native_forward(flat, topk_idx, topk_weight, self._fused_moe_config)
+            elif self.training or self.experts.has_lora():
                 out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
             else:
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight)
@@ -276,7 +319,7 @@ class Qwen3MoeMLP(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
-        if self.experts.has_lora():
+        if self.experts.has_lora() or self.experts.use_native_kernels(self.native_backend):
             self.clear_infer_weights()
             return
         self._infer_w1_weight = self._updated_infer_weight(
@@ -594,6 +637,7 @@ class Qwen3MoeAdapter(ModelAdapter):
     """Adapter for Qwen3 MoE checkpoints (for example Qwen3-30B-A3B)."""
 
     name = "qwen3_moe"
+    supports_qlora = True
 
     @property
     def lora_initializer(self):

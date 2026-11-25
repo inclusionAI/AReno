@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from areno.accel.attention import areno_varlen_causal_attention
+from areno.accel.attention import TILED_HEAD_DIMS, areno_varlen_causal_attention
 from areno.engine.layers.attention_backend.common import (
     AttnBackend,
     build_attention_call,
@@ -58,10 +58,12 @@ class TrainAttentionBackend(nn.Module, ABC):
 class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
     """FlashAttention backend shared by padded and varlen packed training."""
 
-    def __init__(self, attn_backend: AttnBackend = "flash", *, native_train_matches_rollout: bool = False):
+    def __init__(self, attn_backend: AttnBackend = "flash", *, native_train_matches_rollout: bool | None = None):
         super().__init__()
         self.attn_backend = attn_backend
-        self.native_train_matches_rollout = native_train_matches_rollout
+        self.native_train_matches_rollout = (
+            attn_backend == "native" if native_train_matches_rollout is None else native_train_matches_rollout
+        )
 
     def forward(
         self,
@@ -72,7 +74,42 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
         window_size: tuple[int, int] | None = None,
         softmax_scale: float | None = None,
     ) -> torch.Tensor:
+        if (
+            self.attn_backend == "native"
+            and self.native_train_matches_rollout
+            and q.is_cuda
+            and q.dtype == k.dtype == v.dtype == torch.bfloat16
+            and q.shape[-1] in TILED_HEAD_DIMS
+            and k.shape[-1] == q.shape[-1]
+            and v.shape[-1] <= q.shape[-1]
+            and q.shape[-2] % k.shape[-2] == 0
+            and k.shape[-2] == v.shape[-2]
+            and meta is not None
+            and meta.cu_seqlens is not None
+            and not meta.bi_attn
+        ):
+            from areno.accel.kernels.native_attention import PackedAttention, tiled_forward
+
+            window = _native_window_left(window_size or (-1, -1))
+            forward = (
+                PackedAttention.apply
+                if torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v))
+                else tiled_forward
+            )
+            out = forward(
+                q.reshape(-1, *q.shape[-2:]).contiguous(),
+                k.reshape(-1, *k.shape[-2:]).contiguous(),
+                v.reshape(-1, *v.shape[-2:]).contiguous(),
+                meta.cu_seqlens.contiguous(),
+                -1 if window is None else window,
+                q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale,
+            )
+            return out.view(*q.shape[:-1], v.shape[-1])
         call = build_attention_call(q, k, v, window_size, softmax_scale)
+        # Sliding attention and recurrent/linear layers keep their existing semantics.
+        causal = not (getattr(meta, "bi_attn", False) and call.window_size == (-1, -1))
+        if not causal and use_native_attention(self.attn_backend, call.q):
+            return call.trim_value_dim(_bidirectional_train(call.q, call.k, call.v, meta, call.softmax_scale))
         if use_native_attention(self.attn_backend, call.q):
             use_kernel = q.device.type == "npu" or (self.native_train_matches_rollout and q.is_cuda)
             native_fn = _native_train_areno if use_kernel else _native_train
@@ -100,7 +137,7 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
                 cu_seqlens_k=meta.cu_seqlens,
                 max_seqlen_q=meta.max_seqlen,
                 max_seqlen_k=meta.max_seqlen,
-                causal=True,
+                causal=causal,
                 window_size=flat_call.window_size,
                 softmax_scale=flat_call.softmax_scale,
             )
@@ -113,7 +150,7 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
             call.q,
             call.k,
             call.v,
-            causal=True,
+            causal=causal,
             window_size=call.window_size,
             softmax_scale=call.softmax_scale,
         )
@@ -121,9 +158,9 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
 
 
 def build_train_attention_backend(
-    attn_backend: AttnBackend = "flash", *, native_train_matches_rollout: bool = False
+    attn_backend: AttnBackend = "native", *, native_train_matches_rollout: bool | None = None
 ) -> TrainAttentionBackend:
-    """Build the default FlashAttention training backend."""
+    """Build the selected training attention backend."""
 
     return FlashAttnTrainAttentionBackend(
         attn_backend=attn_backend,
@@ -318,3 +355,31 @@ def _causal_window_mask(
     if window_size[0] >= 0:
         mask = mask & (cols >= rows - int(window_size[0]))
     return mask.view(1, 1, q_len, k_len)
+
+
+def _bidirectional_train(q, k, v, meta, softmax_scale):
+    """Full prompt SDPA, isolated by packed boundaries and bounded query chunks."""
+
+    def sequence(qi, ki, vi):
+        ki = expand_kv_heads(ki, qi.shape[-2])
+        vi = expand_kv_heads(vi, qi.shape[-2])
+        qs, ks, vs = (x.transpose(0, 1).unsqueeze(0) for x in (qi, ki, vi))
+        with _sdpa_math_kernel():
+            chunks = [
+                F.scaled_dot_product_attention(
+                    qs[:, :, start : start + _SDPA_MATH_QUERY_CHUNK],
+                    ks,
+                    vs,
+                    is_causal=False,
+                    scale=softmax_scale,
+                )
+                for start in range(0, qi.shape[0], _SDPA_MATH_QUERY_CHUNK)
+            ]
+        return torch.cat(chunks, dim=2).squeeze(0).transpose(0, 1)
+
+    if meta.cu_seqlens is not None:
+        cu = meta.cu_seqlens.detach().cpu().tolist()
+        qf, kf, vf = (x.reshape(-1, x.shape[-2], x.shape[-1]) for x in (q, k, v))
+        out = torch.cat([sequence(qf[a:b], kf[a:b], vf[a:b]) for a, b in zip(cu[:-1], cu[1:], strict=True) if b > a])
+        return out.reshape(q.shape[0], q.shape[1], q.shape[2], v.shape[-1])
+    return torch.stack([sequence(qi, ki, vi) for qi, ki, vi in zip(q, k, v, strict=True)])

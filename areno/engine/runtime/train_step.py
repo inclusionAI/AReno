@@ -64,6 +64,8 @@ def _train_meta(
         cu_seqlens=cu_seqlens.to(device=tokens.device, dtype=torch.int32),
         max_seqlen=int(data_pack.get("train_max_seqlen", 0)),
         packed=True,
+        rollout_prompt_lengths=data_pack.get("rollout_prompt_lengths"),
+        bi_attn=bool(data_pack.get("_bi_attn", False)),
         sequence_parallel=sequence_parallel,
         activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
         recompute_policy=data_pack.get("_recompute_policy"),

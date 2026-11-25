@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from areno.engine.parallel.collectives import (
     scatter_to_sequence_parallel_region,
     sequence_parallel_region,
 )
+from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.models.base import CausalLMOutput, ModelAdapter
@@ -167,6 +169,14 @@ def _lora_config(config: ModelConfig, adapter: str) -> tuple[int, float, float] 
     return rank, alpha / rank, dropout
 
 
+def _modality_projection(linear, x, native):
+    if native and x.is_cuda:
+        from areno.accel.kernels.invariant_linear import InvariantLinear
+
+        return InvariantLinear.apply(x, linear.weight, linear.bias)
+    return linear(x)
+
+
 class _Phi4MMColumnLoRA(MergedColumnParallelLinear):
     def __init__(self, in_features: int, out_features: tuple[int, ...], config: ModelConfig):
         super().__init__(in_features, out_features, bias=False)
@@ -201,8 +211,14 @@ class _Phi4MMColumnLoRA(MergedColumnParallelLinear):
             mask = getattr(self, f"{adapter}_lora_mask")
             if mask is None:
                 continue
-            dropped = F.dropout(full_input, p=self.lora_dropouts[adapter], training=self.training)
-            delta = self.lora_B[adapter](self.lora_A[adapter](dropped)) * self.lora_scales[adapter]
+            dropped = F.dropout(
+                full_input,
+                p=self.lora_dropouts[adapter],
+                training=self.training and not getattr(self, "frozen_modality_lora", False),
+            )
+            native = getattr(self, "native_projection", False)
+            latent = _modality_projection(self.lora_A[adapter], dropped, native)
+            delta = _modality_projection(self.lora_B[adapter], latent, native) * self.lora_scales[adapter]
             output = output + delta * mask.to(device=delta.device, dtype=delta.dtype).unsqueeze(-1)
         return output
 
@@ -234,9 +250,14 @@ class _Phi4MMRowLoRA(RowParallelLinear):
             mask = getattr(self, f"{adapter}_lora_mask")
             if mask is None:
                 continue
-            dropped = F.dropout(x, p=self.lora_dropouts[adapter], training=self.training)
-            latent = all_reduce(self.lora_A[adapter](dropped))
-            delta = self.lora_B[adapter](latent) * self.lora_scales[adapter]
+            dropped = F.dropout(
+                x,
+                p=self.lora_dropouts[adapter],
+                training=self.training and not getattr(self, "frozen_modality_lora", False),
+            )
+            native = getattr(self, "native_projection", False)
+            latent = all_reduce(_modality_projection(self.lora_A[adapter], dropped, native))
+            delta = _modality_projection(self.lora_B[adapter], latent, native) * self.lora_scales[adapter]
             delta = delta * mask.to(device=delta.device, dtype=delta.dtype).unsqueeze(-1)
             if is_sequence_parallel_active():
                 delta = scatter_to_sequence_parallel_region(delta)
@@ -265,7 +286,7 @@ def _validated_longrope(hf_config: dict[str, Any], rotary_dim: int) -> dict[str,
         factors = rope[key]
         if not isinstance(factors, list) or len(factors) != expected_factors:
             raise ValueError(f"Phi4MM {key} must contain {expected_factors} values")
-        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 for value in factors):
+        if any(isinstance(value, bool) or not isinstance(value, int | float) or value <= 0 for value in factors):
             raise ValueError(f"Phi4MM {key} values must be positive numbers")
         normalized[key] = tuple(float(value) for value in factors)
     return normalized
@@ -495,6 +516,17 @@ class Phi4MMAttention(CausalSelfAttention):
                     self.rope.original_max_position_embeddings,
                 ),
             )
+        if (
+            train_meta is not None
+            and train_meta.cu_seqlens is not None
+            and train_meta.rollout_prompt_lengths is not None
+        ):
+            ends = train_meta.cu_seqlens[1:].long() - 1
+            long_rows = (position_ids.reshape(-1)[ends] + 1) > self.rope.original_max_position_embeddings
+            owners = torch.bucketize(
+                torch.arange(position_ids.numel(), device=q.device), train_meta.cu_seqlens[1:-1], right=True
+            )
+            return self.rope(q, k, position_ids, use_long_factor=long_rows[owners].view_as(position_ids))
         sequence_length = _phi4mm_longrope_sequence_length(
             position_ids,
             train_meta,
@@ -525,18 +557,22 @@ class Phi4MMDecoderLayer(nn.Module):
                 module.vision_lora_mask = vision
                 module.speech_lora_mask = speech
 
-    def _masked_mlp(self, hidden_states: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # The mask is token-aligned state: slice and checkpoint it together
-        # with activations rather than reusing the full-sequence module mask.
-        gate_mask = self.mlp.gate_up_proj.vision_lora_mask
-        down_mask = self.mlp.down_proj.vision_lora_mask
+    def _masked_mlp(self, hidden_states: torch.Tensor, *masks: torch.Tensor) -> torch.Tensor:
+        # MST replays each tile during backward. Both modality adapters must
+        # see only the token rows in that tile.
+        gate, down = self.mlp.gate_up_proj, self.mlp.down_proj
+        names = [name for name in ("vision_lora_mask", "speech_lora_mask") if getattr(gate, name) is not None]
+        full_masks = [(getattr(gate, name), getattr(down, name)) for name in names]
         try:
-            self.mlp.gate_up_proj.vision_lora_mask = mask.view(hidden_states.shape[:-1])
-            self.mlp.down_proj.vision_lora_mask = mask.view(hidden_states.shape[:-1])
+            for name, mask in zip(names, masks, strict=True):
+                tile_mask = mask.view(hidden_states.shape[:-1])
+                setattr(gate, name, tile_mask)
+                setattr(down, name, tile_mask)
             return self.mlp(hidden_states)
         finally:
-            self.mlp.gate_up_proj.vision_lora_mask = gate_mask
-            self.mlp.down_proj.vision_lora_mask = down_mask
+            for name, (gate_mask, down_mask) in zip(names, full_masks, strict=True):
+                setattr(gate, name, gate_mask)
+                setattr(down, name, down_mask)
 
     def forward(
         self,
@@ -550,13 +586,16 @@ class Phi4MMDecoderLayer(nn.Module):
         hidden_states = residual + self.self_attn(hidden_states, position_ids, train_meta, infer_meta)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        mask = getattr(self.mlp.gate_up_proj, "vision_lora_mask", None)
         if infer_meta is not None or not getattr(train_meta, "mst_chunk_size", 0):
             # In SP the projection owns a full-sequence mask even though its
             # input is sharded. Preserve that layout on the original path.
             return residual + self.mlp(hidden_states)
-        mlp_fn = self.mlp if mask is None else self._masked_mlp
-        token_args = () if mask is None else (mask.reshape(-1),)
+        token_args = tuple(
+            mask.reshape(-1)
+            for name in ("vision_lora_mask", "speech_lora_mask")
+            if (mask := getattr(self.mlp.gate_up_proj, name, None)) is not None
+        )
+        mlp_fn = self._masked_mlp if token_args else self.mlp
         return residual + tokenwise_forward(
             mlp_fn,
             hidden_states,
@@ -564,6 +603,36 @@ class Phi4MMDecoderLayer(nn.Module):
             train_meta=train_meta,
             infer_meta=infer_meta,
         )
+
+
+def _longrope_rollout_layout(meta, boundary, tp_size):
+    """Append short-cache prefixes for rows whose rollout crossed the factor switch."""
+    if meta is None or meta.rollout_prompt_lengths is None or (meta.max_seqlen or 0) <= boundary:
+        return None
+    offsets = meta.cu_seqlens.tolist()
+    starts = [
+        start
+        for prompt, start, end in zip(meta.rollout_prompt_lengths, offsets, offsets[1:])
+        if 0 <= prompt <= boundary and end - start > boundary
+    ]
+    if not starts:
+        return None
+    device = meta.cu_seqlens.device
+    total = offsets[-1]
+    original = torch.arange(total, device=device)
+    restore = original.clone()
+    prefix = torch.arange(boundary, device=device)
+    sources = [original]
+    for start in starts:
+        sources.append(prefix + start)
+        restore[start : start + boundary] = offsets[-1] + prefix
+        offsets.append(offsets[-1] + boundary)
+    # Preserve the worker's sequence-parallel divisibility with isolated padding tokens.
+    pad = -offsets[-1] % tp_size
+    if pad:
+        sources.append(original.new_zeros(pad))
+        offsets.extend(range(offsets[-1] + 1, offsets[-1] + pad + 1))
+    return torch.cat(sources), restore, meta.cu_seqlens.new_tensor(offsets)
 
 
 class Phi4MMModel(nn.Module):
@@ -602,11 +671,26 @@ class Phi4MMModel(nn.Module):
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
         vision_lora_mask, speech_lora_mask = self._lora_masks(input_ids, features, train_meta, infer_meta)
-        for layer in self.layers:
-            layer.set_lora_masks(vision_lora_mask, speech_lora_mask)
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
+        tp = get_tp_context()
+        layout = _longrope_rollout_layout(
+            train_meta,
+            self.layers[0].self_attn.rope.original_max_position_embeddings,
+            tp.world_size if use_sequence_parallel else 1,
+        )
+        if layout is not None:
+            source, restore, offsets = layout
+            hidden_states = hidden_states.index_select(1, source)
+            position_ids = position_ids.index_select(1, source)
+            if vision_lora_mask is not None:
+                vision_lora_mask = vision_lora_mask.index_select(1, source)
+            if speech_lora_mask is not None:
+                speech_lora_mask = speech_lora_mask.index_select(1, source)
+            train_meta = replace(train_meta, cu_seqlens=offsets)
+        for layer in self.layers:
+            layer.set_lora_masks(vision_lora_mask, speech_lora_mask)
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
@@ -620,7 +704,13 @@ class Phi4MMModel(nn.Module):
                     train_meta=train_meta,
                     infer_meta=infer_meta,
                 )
-            return self.norm(hidden_states)
+            hidden_states = self.norm(hidden_states)
+        if layout is not None:
+            if use_sequence_parallel:
+                hidden_states = gather_from_sequence_parallel_region(hidden_states)
+                restore = restore.chunk(tp.world_size)[tp.rank]
+            hidden_states = hidden_states.index_select(1, restore)
+        return hidden_states
 
     def _lora_masks(
         self,
@@ -875,6 +965,10 @@ class Phi4MMLMHead(VocabParallelLMHead):
             else copy_to_tensor_parallel_region(hidden_states)
         )
         with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+            if getattr(self, "native_projection", False) and hidden_states.is_cuda:
+                from areno.accel.kernels.invariant_linear import InvariantLinear
+
+                return InvariantLinear.apply(hidden_states.float(), self.weight.float(), None)
             return F.linear(hidden_states.float(), self.weight.float())
 
 
@@ -1113,10 +1207,40 @@ class Phi4MMForCausalLM(nn.Module):
         return found
 
 
+def _initialize_phi4mm_lora(model, requested, config, seed, runtime_state, slots):
+    from areno.adapters.lora import _install_merged_slot, _install_row_slot
+
+    if model._train_multimodal_tower or model._train_multimodal_projector:
+        raise ValueError("Phi4MM native LoRA requires a frozen media tower and projector")
+    matched = set()
+    for index, layer in enumerate(model.model.layers):
+        for parent, name, indices in (
+            ("self_attn", "qkv_proj", (0, 1, 2)),
+            ("self_attn", "o_proj", None),
+            ("mlp", "gate_up_proj", (0, 1)),
+            ("mlp", "down_proj", None),
+        ):
+            projection = getattr(getattr(layer, parent), name)
+            projection.frozen_modality_lora = True
+            if name in requested:
+                path = f"layers.{index}.{parent}.{name}"
+                if indices is None:
+                    _install_row_slot(path, projection, config, seed, runtime_state, slots)
+                else:
+                    _install_merged_slot(path, projection, indices, config, seed, runtime_state, slots)
+                matched.add(name)
+    return matched
+
+
 class Phi4MMAdapter(ModelAdapter):
     """Translate the official Phi-4-Multimodal config into AReno semantics."""
 
     name = "phi4mm"
+    supports_qlora = True
+
+    @property
+    def lora_initializer(self):
+        return _initialize_phi4mm_lora
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         return str(hf_config.get("model_type", "")).lower() == self.name

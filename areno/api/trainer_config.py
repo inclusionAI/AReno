@@ -11,6 +11,7 @@ critic warmup window.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -87,7 +88,7 @@ class TrainerConfig:
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
-    attn_backend: str = "flash"
+    attn_backend: str = "native"
     # Opt-in auxiliary MTP loss for checkpoints that ship MTP layers; None keeps
     # the layers unbuilt unless speculative decoding needs them.
     mtp_loss_scale: float | None = None
@@ -321,6 +322,7 @@ class SFTTrainerConfig(TrainerConfig):
 class RolloutTrainerConfig(TrainerConfig):
     """Sampling/rollout settings used by online RL trainers."""
 
+    rollout_routing_replay: bool = field(default=False, kw_only=True)
     # Rollout speculative decoding with the checkpoint's MTP layer: draft this
     # many tokens per step and verify them in one target forward. 0 disables it.
     speculative_draft_tokens: int = 0
@@ -371,9 +373,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "mtp_loss_scale": self.mtp_loss_scale,
                 "cut_cross_entropy": self.cut_cross_entropy,
                 "speculative_draft_tokens": self.speculative_draft_tokens,
-                # R3 is the default CUDA path for rollout-based MoE training.
-                # EngineConfig disables it again when the checkpoint is dense.
-                "rollout_routing_replay": True,
+                "rollout_routing_replay": self.rollout_routing_replay,
             },
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -407,6 +407,36 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     reward_fn_path: str | None = None
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
+
+
+@dataclass(slots=True)
+class OPDTrainerConfig(PolicyTrainerConfig):
+    """On-policy distillation configuration.
+
+    OPD needs rollout but no reward function: the dense training signal comes
+    from a frozen teacher scoring the tokens the student just sampled.
+    """
+
+    teacher_ckpt: str | None = None
+    opd_coef: float = 1.0
+    opd_loss_type: Literal["pg", "k3"] = "pg"
+    opd_clip: float = 5.0
+    opd_teacher_micro_bs: int | None = None
+
+    def __post_init__(self) -> None:
+        # Zero-arg super() breaks under @dataclass(slots=True); the intermediate
+        # parents define no __post_init__, so call the base directly.
+        TrainerConfig.__post_init__(self)
+        if not self.teacher_ckpt or not self.teacher_ckpt.strip():
+            raise ValueError("teacher_ckpt is required for --algo opd")
+        if self.opd_loss_type not in {"pg", "k3"}:
+            raise ValueError("opd_loss_type must be 'pg' or 'k3'")
+        if not math.isfinite(self.opd_coef) or self.opd_coef <= 0:
+            raise ValueError("opd_coef must be a finite positive number")
+        if not math.isfinite(self.opd_clip) or self.opd_clip <= 0:
+            raise ValueError("opd_clip must be a finite positive number")
+        if self.opd_teacher_micro_bs is not None and self.opd_teacher_micro_bs < 1:
+            raise ValueError("opd_teacher_micro_bs must be positive")
 
 
 @dataclass(slots=True)

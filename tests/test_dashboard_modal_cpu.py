@@ -200,7 +200,7 @@ def test_plan_defaults_image_fee_and_edit_add_remove(flow):
     assert preview["image"].startswith("ghcr.io/inclusionai/areno@sha256:")
     assert preview["estimate"]["planned_cost"] == "14.4"
     params = preview["workflow"]["stages"][0]["params"]
-    assert params["adam_4bit"] is True and params["attn_backend"] == "flash"
+    assert params["adam_4bit"] is True and params["attn_backend"] == "native"
     params["lr"] = 0.0002
     params["max_steps"] = 25
     revised = flow.revise(preview["id"], preview["workflow"])

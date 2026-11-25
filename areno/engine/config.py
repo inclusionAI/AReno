@@ -12,6 +12,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 from typing import Any, Literal
 
 import torch
@@ -67,8 +68,8 @@ class RuntimeConfig:
     """Runtime allocation config for rollout decode and device graphs."""
 
     kv_block_size: int = 256
-    attn_backend: Literal["flash", "native"] = "flash"
-    compile_model: bool = True
+    attn_backend: Literal["flash", "native"] = "native"
+    compile_model: bool | None = None
     activation_checkpointing: bool = True
     recompute_modules: tuple[str, ...] | str | None = field(default=None, kw_only=True)
     recompute_layers: tuple[int, ...] | str | None = field(default=None, kw_only=True)
@@ -156,8 +157,12 @@ class RuntimeConfig:
         self.attn_backend = "native"
 
     def resolve_compile_model(self, *, model: ModelConfig, devices: list[int]) -> None:
-        """Disable torch.compile when the selected hardware cannot compile the model dtype."""
+        """Resolve the model default and check device support for BF16 compilation."""
 
+        if self.compile_model is None:
+            # Packed training and KV-cache inference can produce different
+            # Inductor fusions. Use native operators directly in both phases.
+            self.compile_model = self.attn_backend != "native"
         if not self.compile_model:
             return
         reason = torch_compile_unsupported_gpu_reason(model, devices)
@@ -174,7 +179,7 @@ class RuntimeConfig:
     def resolve_eager_decode(self, *, model: ModelConfig, lora: LoraConfig | None) -> None:
         """Use eager decode when routed-expert adapters lack a fused rollout path."""
 
-        if self.eager_decode or lora is None:
+        if self.eager_decode or lora is None or model.dtype in (torch.float16, torch.bfloat16):
             return
         if model.model_type == "qwen3_moe" and {
             "gate_proj",
@@ -280,7 +285,7 @@ class ModelConfig:
     linear_value_head_dim: int = 128
     linear_num_key_heads: int = 16
     linear_num_value_heads: int = 16
-    attn_backend: Literal["flash", "native"] = "flash"
+    attn_backend: Literal["flash", "native"] = "native"
 
     def validate_tp(self, tp_size: int) -> None:
         """Validate tensor-parallel divisibility required by local kernels."""
@@ -403,8 +408,7 @@ class EngineConfig:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:
             raise ValueError("runtime.kv_block_size must be a multiple of 256 for FlashAttention paged KV")
-        # CUDA rollout trainers request R3 by default. Dense checkpoints do
-        # not have router decisions to capture and retain the original path.
+        # Dense checkpoints have no router decisions to capture.
         if self.runtime.rollout_routing_replay and self.model.num_experts is None:
             self.runtime.rollout_routing_replay = False
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
@@ -443,7 +447,7 @@ def flash_attention_unsupported_model_reason(model: ModelConfig) -> str | None:
 
 
 def flash_attention_unsupported_gpu_reason(devices: list[int] | None = None) -> str | None:
-    """Return a user-facing reason when visible GPUs cannot run flash-attn."""
+    """Return a reason when visible GPUs lack flash-attn hardware or its optional package."""
 
     if not torch.cuda.is_available():
         return None
@@ -464,9 +468,11 @@ def flash_attention_unsupported_gpu_reason(devices: list[int] | None = None) -> 
         except Exception:
             name = f"cuda:{device}"
         unsupported.append(f"{name} cc {major}.{minor}")
-    if not unsupported:
-        return None
-    return ", ".join(unsupported)
+    if unsupported:
+        return ", ".join(unsupported)
+    if find_spec("flash_attn") is None:
+        return "optional flash-attn package is not installed; install with bash scripts/install.sh --flash"
+    return None
 
 
 def torch_compile_unsupported_gpu_reason(model: ModelConfig, devices: list[int] | None = None) -> str | None:

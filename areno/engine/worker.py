@@ -16,7 +16,10 @@ to the matching public method.
 from __future__ import annotations
 
 import gc
+import os
 import queue
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -66,6 +69,12 @@ class ArenoWorker:
         self.config = config
         ctx = get_tp_context()
         self.device = ctx.device
+        if self.device.type == "cuda":
+            # FLA's process-wide identity cache otherwise retains packed training
+            # tensors across rollout. A spawned worker may already have imported FLA.
+            os.environ["FLA_DISABLE_TENSOR_CACHE"] = "1"
+            if (fla_utils := sys.modules.get("fla.utils")) is not None:
+                fla_utils.FLA_DISABLE_TENSOR_CACHE = True
         configure_unified_memory_budget(self.device)
         # Build the actor model directly on the shard's device, then wrap in
         # torch.compile so subsequent forward calls use the compiled graph.
@@ -90,6 +99,8 @@ class ArenoWorker:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
             load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
+        if self.adapter_registry is not None and config.role == "train":
+            self.adapter_registry.install_lora_fa_grad_correction()
         opt = config.optimizer
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
@@ -165,6 +176,7 @@ class ArenoWorker:
         self._infer_cache_spec: tuple[int, int, int, int, int] | None = None
         self._train_state_ready = False
         self._actor_on_device = True
+        self._idle_buffers: list[tuple[torch.nn.Module, str]] | None = None
         # Agentic rollouts issue one inference request per tool-call turn. Keep
         # rollout-only state resident for the whole explicit session and apply
         # drop-rollout-state once at ROLLOUT_SESSION_END, not after every turn.
@@ -173,7 +185,6 @@ class ArenoWorker:
         self._current_request_ids: list[int | None] = []
         self._policy_sync_plan = None
         self._policy_sync_metadata = None
-        self._policy_sync_buffer = None
         self._loaded_policy_version = 0
         self.inference = InferenceManager(self)
         self.roles = RoleManager(self)
@@ -181,6 +192,8 @@ class ArenoWorker:
         if config.role == "train" and config.train_loss_fn is None:
             raise ValueError("ArenoEngine requires train_loss_fn")
         self.loss_fn = config.train_loss_fn
+        if self.device.type == "cuda" and config.role == "train":
+            self._park_cuda_phase_buffers()
 
     def handle(self, cmd: Command):
         """Dispatch a `Command` to the matching method on this worker."""
@@ -236,17 +249,17 @@ class ArenoWorker:
         del payload
         if self.config.role == "rollout":
             self._prepare_policy_receive()
-        else:
-            self._prepare_actor_onloaded()
+            return policy_plan_metadata(self)
+        with self._actor_for_weight_io():
             self.model.onload_train_weights(self.device)
-        return policy_plan_metadata(self)
+            return policy_plan_metadata(self)
 
     def publish_policy(self, payload: PolicySyncPayload) -> dict[str, object]:
         """Publish authoritative train shards to the rollout partition."""
 
-        self._prepare_actor_onloaded()
-        self.model.onload_train_weights(self.device)
-        return transfer_policy_weights(self, payload)
+        with self._actor_for_weight_io():
+            self.model.onload_train_weights(self.device)
+            return transfer_policy_weights(self, payload)
 
     @torch.no_grad()
     def receive_policy(self, payload: PolicySyncPayload) -> dict[str, object]:
@@ -512,7 +525,7 @@ class ArenoWorker:
         accelerator = accelerator_module(self.device)
         if accelerator is not None:
             accelerator.synchronize(self.device)
-        if ctx.group is not None:
+        if ctx.group is not None and ctx.world_size > 1:
             if ctx.device.type == "cuda":
                 dist.barrier(
                     group=ctx.group,
@@ -528,10 +541,12 @@ class ArenoWorker:
 
         del payload
         try:
-            if not self.config.runtime.keep_rollout_state:
+            if not self.config.runtime.keep_rollout_state or self.device.type == "cuda":
                 self._drop_rollout_hbm()
             if self.config.role == "train":
                 self._prepare_for_train()
+            if self.device.type == "cuda":
+                self._park_cuda_phase_buffers()
         finally:
             self._rollout_session_active = False
             self._rollout_session_infer_weights_ready = False
@@ -552,18 +567,25 @@ class ArenoWorker:
 
     def _prepare_for_train(self) -> None:
         """Ensure the actor is on-device and train weights are loaded."""
+        # Direct engine calls and cache probes can bypass ROLLOUT_SESSION_END.
+        if self.device.type == "cuda" and self._infer_cache_spec is not None:
+            self._drop_rollout_hbm()
         self._prepare_actor_onloaded()
         self.model.onload_train_weights(self.device)
         self._train_state_ready = True
 
     def _prepare_actor_onloaded(self) -> None:
-        """Move the actor model + optimizer state back to `device` if offloaded."""
+        """Restore the actor. CUDA optimizer state belongs to the training step."""
+        if self.device.type == "cuda" and self._idle_buffers is not None:
+            with torch.inference_mode(False), torch.no_grad():
+                _move_buffer_storage(self._idle_buffers, self.device)
+            self._idle_buffers = None
         if self._actor_on_device:
             return
         with torch.inference_mode(False), torch.no_grad():
             self.model.to(self.device)
             self.model.onload_train_weights(self.device)
-            if self.optimizer is not None:
+            if self.optimizer is not None and self.device.type != "cuda":
                 mode, directory, batch_size = self._optimizer_offload_options()
                 if mode == "disk":
                     # Keep mmap-backed state out of HBM. The optimizer step loads
@@ -576,6 +598,50 @@ class ArenoWorker:
                 else:
                     self.optimizer.onload_state(self.device)
         self._actor_on_device = True
+
+    def _park_cuda_phase_buffers(self) -> None:
+        """Keep checkpoint weights resident and park the actor's derived tables."""
+        if self._idle_buffers is not None:
+            return
+        self._train_state_ready = False
+        self._policy_sync_plan = None  # a plan can own views of the old device buffers
+        self._policy_sync_metadata = None
+        keep = {p.untyped_storage() for p in self.model.parameters() if p.is_cuda}
+        modules = list(self.model.modules())
+        for module in modules:
+            keep.update(
+                buf.untyped_storage()
+                for name, buf in module.named_buffers(recurse=False)
+                if buf.is_cuda and name not in module._non_persistent_buffers_set
+            )
+        slots = [
+            (module, name)
+            for module in modules
+            for name, buf in module.named_buffers(recurse=False, remove_duplicate=False)
+            if name in module._non_persistent_buffers_set
+            and buf.is_cuda
+            and buf.numel()
+            and buf.untyped_storage() not in keep
+        ]
+        with torch.inference_mode(False), torch.no_grad():
+            _move_buffer_storage(slots, torch.device("cpu"))
+        self._idle_buffers = slots
+        torch.cuda.synchronize(self.device)
+        clear_workspaces = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+        if clear_workspaces is not None:
+            clear_workspaces()
+        torch.cuda.empty_cache()
+
+    @contextmanager
+    def _actor_for_weight_io(self):
+        """Checkpoint and publisher operations return the actor to its prior residency."""
+        was_idle = self.device.type == "cuda" and self._idle_buffers is not None
+        self._prepare_actor_onloaded()
+        try:
+            yield
+        finally:
+            if was_idle:
+                self._park_cuda_phase_buffers()
 
     def _prepare_actor_for_inference(self) -> None:
         """Materialize actor inference weights without retaining source expert tiles."""
@@ -627,6 +693,9 @@ class ArenoWorker:
     def _release_decode_graphs(self) -> None:
         """Drop captured decode CUDA graphs and release their cached memory."""
 
+        # Routing replay and speculative prefill can retain graph-owned tensors.
+        self._last_routing_capture = None
+        self._last_prefill_draft = None
         self._decode_graphs.clear()
         self._verify_graphs.clear()
         self._draft_graphs.clear()
@@ -716,37 +785,53 @@ class ArenoWorker:
 
     def save_checkpoint(self, payload: SaveCheckpointPayload) -> dict | None:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""
-        self._prepare_actor_onloaded()
-        path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
-        if self.config.runtime.decision_head is not None:
-            from areno.api.backend.cuda.decision import save_head
+        with self._actor_for_weight_io():
+            path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
+            if self.config.runtime.decision_head is not None:
+                from areno.api.backend.cuda.decision import save_head
 
-            save_head(self, payload.path)
-        return {"path": path} if path is not None else None
+                save_head(self, payload.path)
+            return {"path": path} if path is not None else None
 
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
         """Write the native adapter in standard PEFT format."""
 
         if self.adapter_registry is None:
             raise RuntimeError("export_adapter requires native LoRA")
-        self._prepare_actor_onloaded()
-        path = export_peft_adapter(
-            self.adapter_registry,
-            payload.path,
-            base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
-        )
-        if self.config.runtime.decision_head is not None:
-            from areno.api.backend.cuda.decision import save_head
+        with self._actor_for_weight_io():
+            path = export_peft_adapter(
+                self.adapter_registry,
+                payload.path,
+                base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
+            )
+            if self.config.runtime.decision_head is not None:
+                from areno.api.backend.cuda.decision import save_head
 
-            save_head(self, payload.path)
-        return {"path": path} if path is not None else None
+                save_head(self, payload.path)
+            return {"path": path} if path is not None else None
 
     def export_gguf(self, payload: ExportGGUFPayload) -> dict | None:
         from areno.export.cuda import export_worker
 
-        self._prepare_actor_onloaded()
-        path = export_worker(self, payload.output_dir, payload.file_type)
-        return {"path": path} if path is not None else None
+        with self._actor_for_weight_io():
+            path = export_worker(self, payload.output_dir, payload.file_type)
+            return {"path": path} if path is not None else None
+
+
+def _move_buffer_storage(slots, device: torch.device) -> None:
+    """Move registered tensor views together, preserving offsets, strides and aliases."""
+    storages = {}
+    views = {}
+    for module, name in slots:
+        tensor = module._buffers[name]
+        if tensor not in views:
+            source = tensor.untyped_storage()
+            if source not in storages:
+                storages[source] = source.to(device=device)
+            views[tensor] = torch.empty(0, dtype=tensor.dtype, device=device).set_(
+                storages[source], tensor.storage_offset(), tensor.size(), tensor.stride()
+            )
+        setattr(module, name, views[tensor])
 
 
 def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -> bool:

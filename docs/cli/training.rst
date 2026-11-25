@@ -43,6 +43,33 @@ Basic
 
 Inputs, dataset loader, the algorithm and run length, and device counts.
 
+``--sgl-jev``
+   Train SGLang-compatible LM-label JEV on CUDA or MLX, equivalent to
+   ``--algo label_jev``. Uses the existing LM head without a scalar decision
+   head. See :doc:`../concepts/jev`.
+
+``--algo sgl-jev-dense``
+   Train CUDA LM-label JEV with teacher cross-entropy and Brier supervision, plus
+   a differentiable Capability proxy. Each question supplies
+   ``capability: {"tier": "standard", "gold": "<candidate name>"}``.
+   Other tiers are ``easy``, ``hard`` and ``judge``. Choice questions may
+   also provide a ``gold_probs`` map. The proxy uses chance-adjusted correct-label
+   probability for choice, a smooth 80% decision gate for noul, and normalized
+   expected-grade error for score. It also rewards probability quality through
+   Brier-style and ranked probability terms. The official score is computed
+   separately by the evaluator.
+
+``--dense-reward-weight FLOAT``
+   For ``--algo sgl-jev-dense``, multiply the proxy reward by this value before
+   subtracting it from teacher cross-entropy plus half the teacher Brier loss.
+   Defaults to 0.1.
+
+``--bi-attn / --no-bi-attn``
+   With ``--sgl-jev``, ``--algo label_jev``, or CUDA ``--algo sgl-jev-dense``,
+   enable bidirectional full attention. Linear, recurrent, and sliding-window
+   layers keep their attention behavior. The checkpoint records this mode and restores it on resume.
+   Existing checkpoints default to causal attention.
+
 ``--ckpt TEXT``
    Actor model/tokenizer checkpoint path or remote model repo ID.
 
@@ -106,7 +133,7 @@ per-algorithm loader contracts.
 ``--algo TEXT``
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
 
-Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
+Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``, ``opd``.
 
 ``--epochs INTEGER``
    Number of dataset epochs to train. Default: ``10``.
@@ -169,10 +196,16 @@ signal.
    training engine to the rollout engine. Default: ``64`` MiB.
    CUDA only. MLX does not copy policy weights to a second rollout model.
 
-R3 is enabled automatically for sparse-MoE RL training on CUDA. AReno records
-each token's expert ids during rollout and reuses those ids in the policy
-training forward while recomputing routing weights from the current router
-logits. Dense models and the MLX backend retain their original paths.
+With the native CUDA attention backend, all model families use the same
+uncompiled model operators during rollout and training by default. Decode
+still uses CUDA Graphs. SDK callers can override the model compilation policy
+with the runtime setting ``compile_model``.
+
+``--rollout-routing-replay``
+   Enable routing replay (R3) for sparse MoE rollout training on CUDA.
+   By default each forward selects its own experts. With R3 enabled, the policy
+   training forward uses the expert IDs recorded during rollout and weights
+   them using the current router logits.
 
 For example, the following uses four visible GPUs for training and two
 different visible GPUs for rollout:
@@ -227,17 +260,14 @@ different visible GPUs for rollout:
    Disable decode CUDA graph and run rollout decode eagerly. CUDA only.
 
 ``--drop-rollout-state``
-   Drop completed rollout KV/cache state after each step to save device
-   memory. By default, Areno keeps reusable rollout state between steps for
-   lower setup overhead. Supported by both CUDA and MLX.
+   CUDA reuses KV caches and decode graphs within a rollout session and
+   releases them when the session ends. MLX uses this flag to drop its
+   reusable rollout state after each step.
 
 ``--attn-backend [flash|native]``
-   Attention backend. Default: ``flash``. Use ``native`` to run without
-   ``flash-attn`` on the areno_accel native compatibility path. AReno
-   automatically falls back to ``native`` on flash-attn-unsupported GPUs such
-   as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
-   supported GPUs.
-   CUDA only; MLX uses its model-native attention implementation.
+   Training and rollout default to ``native``. Select ``flash`` to use
+   FlashAttention on a supported GPU and model. MLX uses its own attention
+   implementation.
 
 ``--disable-thinking``
    Pass ``enable_thinking=False`` to tokenizer chat templates when supported.
@@ -395,8 +425,9 @@ in its description; flags for other algorithms are ignored.
    previous model mode afterwards.
 
 ``--optimizer-state-offload [none|cpu|disk]``
-   Select CUDA optimizer-state residency. ``none`` keeps state on the training
-   device. ``cpu`` moves state to host memory between train calls. ``disk``
+   Select CUDA optimizer-state residency during training. ``none`` loads
+   state on the device for the optimizer step and moves it to the host
+   at the end of the train call. ``cpu`` uses host-backed state. ``disk``
    stages a bounded bucket group through host memory and stores the state in
    persistent writable raw-mmap files, copying each bucket back only when the
    next optimizer step needs it. Default: ``none``. This option is supported
@@ -541,6 +572,21 @@ in its description; flags for other algorithms are ignored.
 
 ``--lam FLOAT``
    PPO GAE lambda. Default: ``0.95``.
+
+``--teacher-ckpt TEXT``
+   OPD frozen teacher checkpoint. Must share the student tokenizer.
+
+``--opd-coef FLOAT``
+   OPD distillation loss scale. Default: ``1.0``.
+
+``--opd-loss-type [pg|k3]``
+   OPD objective: clipped dense advantage or low-variance KL. Default: ``pg``.
+
+``--opd-clip FLOAT``
+   OPD dense-advantage clipping range for ``pg``. Default: ``5.0``.
+
+``--opd-teacher-micro-bs INTEGER``
+   OPD teacher scoring microbatch size. Defaults to ``--score-micro-bs``.
 
 Checkpoint
 ~~~~~~~~~~
@@ -762,6 +808,26 @@ game loop.
      - .. image:: ../../examples/agentic/duelgrid/images/train_after.gif
           :alt: Gemma-E2B-it after DuelGrid training
           :width: 260px
+
+OPD
+~~~
+
+On-Policy Distillation samples with the student and scores those exact tokens
+with a frozen teacher. No reward function is required for training:
+
+.. code-block:: bash
+
+   areno train \
+     --algo opd \
+     --ckpt Qwen/Qwen3-0.6B-Base \
+     --teacher-ckpt Qwen/Qwen3-0.6B \
+     --dataset-path gsm8k:main \
+     --dataset-loader-fn examples/math/dataset_loader.py \
+     --tp-size 1 \
+     --world-size 1 \
+     --batch-size 1 --n-samples 2 --mini-bs 1 \
+     --max-prompt-tokens 256 --max-new-tokens 256 \
+     --max-steps 20
 
 Help
 ----

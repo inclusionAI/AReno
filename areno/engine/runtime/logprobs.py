@@ -169,6 +169,20 @@ def packed_next_token_logprobs_from_hidden(
     if cut_cross_entropy:
         return _cut_cross_entropy_logprobs(flat_hidden, positions, labels, lm_head, logit_softcap)
     cap = float(logit_softcap or 0.0)
+    if recompute and not cap and getattr(lm_head, "native_projection", False) and torch.is_grad_enabled():
+        from areno.engine.layers.vocab import VocabParallelLMHead
+
+        if (
+            type(lm_head) is VocabParallelLMHead
+            and flat_hidden.is_cuda
+            and get_tp_context().world_size == 1
+            and not lm_head._forward_hooks
+            and not lm_head._forward_pre_hooks
+            and getattr(lm_head, "quantized_weight", None) is None
+        ):
+            return _NativePackedLogprobs.apply(
+                flat_hidden.index_select(0, positions).to(lm_head.weight.dtype), lm_head.weight, labels, chunk_size
+            )
     projection_parameters = None
     if torch.is_grad_enabled() and lm_head.weight.dtype in (torch.bfloat16, torch.float16):
         projection_dtype = lm_head(flat_hidden[:0].to(lm_head.weight.dtype).unsqueeze(0)).dtype
@@ -288,40 +302,10 @@ def _selected_logprobs_components_forward(
 ) -> torch.Tensor:
     """Forward-only selected logprobs without materializing full-vocab probs."""
 
-    labels = labels.to(device=logits_shard.device, dtype=torch.long)
-    local_vocab = logits_shard.shape[-1]
-    local_labels = labels - int(vocab_start)
-    local_mask = (local_labels >= 0) & (local_labels < local_vocab)
-
-    local_max = logits_shard.max(dim=-1).values.float()
-    global_max = local_max.clone()
-    if world_size > 1:
-        dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
-
-    if (
-        world_size == 1
-        and logits_shard.ndim == 2
-        and logits_shard.device.type == "cuda"
-        and logits_shard.dtype != torch.float64
-    ):
-        from areno.engine.runtime._logprob_kernels import row_logsumexp
-
-        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
-    else:
-        exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
-        for start in range(0, local_vocab, vocab_chunk_size):
-            end = min(start + vocab_chunk_size, local_vocab)
-            exp_sum += torch.exp(logits_shard[..., start:end].float() - global_max.unsqueeze(-1)).sum(dim=-1)
-        if world_size > 1:
-            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
-        logsumexp = global_max + exp_sum.log()
-
-    safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
-    target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
-    target = target.masked_fill(~local_mask, 0.0)
-    if world_size > 1:
-        dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
-    return target - logsumexp
+    scores, _, _, _ = _selected_logprobs_components(
+        logits_shard, labels, vocab_start, group, world_size, vocab_chunk_size=vocab_chunk_size
+    )
+    return scores
 
 
 def _selected_logprobs_components(
@@ -354,15 +338,16 @@ def _selected_logprobs_components(
     if world_size > 1:
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
 
-    if (
-        world_size == 1
-        and logits_shard.ndim == 2
-        and logits_shard.device.type == "cuda"
-        and logits_shard.dtype != torch.float64
-    ):
+    if logits_shard.ndim == 2 and logits_shard.is_cuda and logits_shard.dtype != torch.float64:
         from areno.engine.runtime._logprob_kernels import row_logsumexp
 
-        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+        if world_size == 1:
+            logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+        else:
+            # Reduce each vocab shard in the same order for a decode row and a packed batch.
+            exp_sum = row_logsumexp(logits_shard, global_max, vocab_chunk_size, local_sum=True)
+            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
+            logsumexp = exp_sum.log_().add_(global_max)
     else:
         exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
         for start in range(0, local_vocab, vocab_chunk_size):
@@ -428,3 +413,57 @@ class _VocabParallelSelectedLogprobs(torch.autograd.Function):
             (local_mask.to(dtype=grad.dtype) * grad_output.to(dtype=grad.dtype)).unsqueeze(-1),
         )
         return grad, None, None, None, None
+
+
+class _NativePackedLogprobs(torch.autograd.Function):
+    """Tile the native head by token in forward and by vocabulary in backward."""
+
+    @staticmethod
+    def forward(ctx, hidden, weight, labels, chunk_size):
+        from areno.accel.kernels.invariant_linear import InvariantLinear
+
+        scores = hidden.new_empty(labels.shape, dtype=torch.float32)
+        lse = torch.empty_like(scores)
+        for start in range(0, labels.numel(), chunk_size):
+            rows = slice(start, start + chunk_size)
+            logits = InvariantLinear.apply(hidden[rows], weight, None)
+            scores[rows], lse[rows], _, _ = _selected_logprobs_components(logits, labels[rows], 0, None, 1)
+            del logits
+        ctx.save_for_backward(hidden, weight, labels, lse)
+        return scores
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        from areno.accel.kernels.invariant_linear import InvariantLinear
+
+        hidden, weight, labels, lse = ctx.saved_tensors
+        # Prompt logprobs commonly have zero loss weight. Their derivatives are
+        # identically zero. Gather active positions once for all vocab tiles.
+        active = grad_output.nonzero().flatten()
+        x, g, norm, target = (v.index_select(0, active) for v in (hidden, grad_output, lse, labels))
+        need_x, need_w = ctx.needs_input_grad[:2]
+        dx = torch.zeros_like(hidden) if need_x else None
+        dw = torch.empty_like(weight) if need_w else None
+        if not active.numel():
+            return dx, dw.zero_() if need_w else None, None, None
+        tile = 2048
+        dactive = torch.zeros_like(x, dtype=torch.float32) if need_x else None
+        for col in range(0, weight.shape[0], tile):
+            w = weight[col : col + tile]
+            grad_w = torch.zeros_like(w, dtype=torch.float32) if need_w else None
+            for row in range(0, active.numel(), 2048):
+                r = slice(row, row + 2048)
+                logits = InvariantLinear.apply(x[r], w, None)
+                dl = ((logits.float() - norm[r, None]).exp() * -g[r, None]).to(w.dtype)
+                local = target[r] - col
+                idx = local.clamp(0, w.shape[0] - 1)
+                dl.scatter_add_(1, idx[:, None], ((local == idx) * g[r]).to(w.dtype)[:, None])
+                if need_x:
+                    dactive[r].add_((dl @ w).float())
+                if need_w:
+                    grad_w.add_((dl.T @ x[r]).float())
+            if need_w:
+                dw[col : col + tile].copy_(grad_w)
+        if need_x:
+            dx.index_copy_(0, active, dactive.to(hidden.dtype))
+        return dx, dw, None, None
