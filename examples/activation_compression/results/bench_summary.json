@@ -1,0 +1,408 @@
+{
+  "warmup_steps": 2,
+  "sft": {
+    "q06_ckpt_mb64_bf16": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_ckpt_mb64_bf16",
+          "measured_steps": 12,
+          "median_step_time_s": 2.0619608722627163,
+          "min_step_time_s": 1.94451788906008,
+          "max_step_time_s": 2.2573989862576127,
+          "median_optimizer_step_time_s": 0.028013864997774363,
+          "max_train_peak_allocated_gib": 14.409238338470459,
+          "max_train_peak_reserved_gib": 15.146484375,
+          "max_optimizer_peak_allocated_gib": 12.415822505950928,
+          "max_optimizer_peak_reserved_gib": 15.146484375,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": []
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 2.0619608722627163,
+      "max_train_peak_allocated_gib": 14.409238338470459,
+      "max_train_peak_reserved_gib": 15.146484375
+    },
+    "q06_ckpt_mb64_actc": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_ckpt_mb64_actc",
+          "measured_steps": 12,
+          "median_step_time_s": 2.055359035730362,
+          "min_step_time_s": 1.9652201747521758,
+          "max_step_time_s": 2.2714489875361323,
+          "median_optimizer_step_time_s": 0.027812446001917124,
+          "max_train_peak_allocated_gib": 14.412410259246826,
+          "max_train_peak_reserved_gib": 15.216796875,
+          "max_optimizer_peak_allocated_gib": 12.41792345046997,
+          "max_optimizer_peak_reserved_gib": 15.216796875,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": [],
+          "saved_activations_gib": {
+            "saved_bytes": 0.5950584411621094,
+            "stored_bytes": 0.43924248218536377,
+            "packed_bytes": 0.18467330932617188,
+            "scale_bytes": 0.023084163665771484,
+            "outlier_bytes": 0.005773186683654785,
+            "kept_bytes": 0.22571182250976562,
+            "workspace_bytes": 0.020519256591796875
+          },
+          "stored_fraction": 0.7381501731318822,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.004003668062488831,
+            "noise_floor": 0.0010680910150180241,
+            "reference_drift": 0.001003199582386953,
+            "calibration_error": 0.007756537460168266,
+            "held_out_error": 0.007104221563201131,
+            "predicted_error": 0.01359063522678656,
+            "plan_rounds": 3.0,
+            "plan_stored_fraction": 0.7381508620689655,
+            "plan_slots_8bit": 18.0,
+            "plan_slots_4bit": 0.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 11.0,
+            "calibration_passes": 70.0,
+            "calibration_s": 60.88236509170383,
+            "calibration_peak_allocated_bytes": 9700759552.0
+          },
+          "calibration_step_time_s": 64.91271536517888
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 2.055359035730362,
+      "max_train_peak_allocated_gib": 14.412410259246826,
+      "max_train_peak_reserved_gib": 15.216796875,
+      "train_peak_allocated_change_gib": 0.0031719207763671875,
+      "step_time_rel_change": -0.003201727356305195
+    },
+    "q06_ckpt_mb256_bf16": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_ckpt_mb256_bf16",
+          "measured_steps": 12,
+          "median_step_time_s": 8.691158875823021,
+          "min_step_time_s": 8.134690115228295,
+          "max_step_time_s": 9.015838084742427,
+          "median_optimizer_step_time_s": 0.0280525297857821,
+          "max_train_peak_allocated_gib": 17.939199924468994,
+          "max_train_peak_reserved_gib": 19.390625,
+          "max_optimizer_peak_allocated_gib": 12.423795700073242,
+          "max_optimizer_peak_reserved_gib": 19.390625,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": []
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 8.691158875823021,
+      "max_train_peak_allocated_gib": 17.939199924468994,
+      "max_train_peak_reserved_gib": 19.390625,
+      "train_peak_allocated_change_gib": 3.529961585998535,
+      "step_time_rel_change": 3.214996992782738
+    },
+    "q06_ckpt_mb256_actc": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_ckpt_mb256_actc",
+          "measured_steps": 12,
+          "median_step_time_s": 8.729589800350368,
+          "min_step_time_s": 8.138262830674648,
+          "max_step_time_s": 8.989110751077533,
+          "median_optimizer_step_time_s": 0.027937432751059532,
+          "max_train_peak_allocated_gib": 16.96920108795166,
+          "max_train_peak_reserved_gib": 17.931640625,
+          "max_optimizer_peak_allocated_gib": 12.426026821136475,
+          "max_optimizer_peak_reserved_gib": 17.931640625,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": [],
+          "saved_activations_gib": {
+            "saved_bytes": 2.454864978790283,
+            "stored_bytes": 1.398059643805027,
+            "packed_bytes": 1.2062698602676392,
+            "scale_bytes": 0.1534290611743927,
+            "outlier_bytes": 0.03836072236299515,
+            "kept_bytes": 0.0,
+            "workspace_bytes": 0.08465051651000977
+          },
+          "stored_fraction": 0.5695057205504854,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.0030074530621989485,
+            "noise_floor": 0.0016196099837628012,
+            "reference_drift": 0.001737535784645613,
+            "calibration_error": 0.0071102938139462404,
+            "held_out_error": 0.007218131435316292,
+            "predicted_error": 0.014716176734177699,
+            "plan_rounds": 4.0,
+            "plan_stored_fraction": 0.5695057980150171,
+            "plan_slots_8bit": 28.0,
+            "plan_slots_4bit": 1.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 0.0,
+            "calibration_passes": 81.0,
+            "calibration_s": 329.70222293492407,
+            "calibration_peak_allocated_bytes": 10990583808.0
+          },
+          "calibration_step_time_s": 346.41325534228235
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 8.729589800350368,
+      "max_train_peak_allocated_gib": 16.96920108795166,
+      "max_train_peak_reserved_gib": 17.931640625,
+      "train_peak_allocated_change_gib": 2.559962749481201,
+      "step_time_rel_change": 3.233635040208524
+    },
+    "q06_ckpt_mb512_bf16": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_ckpt_mb512_bf16",
+          "measured_steps": 12,
+          "median_step_time_s": 17.281277772504836,
+          "min_step_time_s": 16.227105450816453,
+          "max_step_time_s": 17.884519084356725,
+          "median_optimizer_step_time_s": 0.02793571026995778,
+          "max_train_peak_allocated_gib": 22.680975914001465,
+          "max_train_peak_reserved_gib": 27.681640625,
+          "max_optimizer_peak_allocated_gib": 12.416167736053467,
+          "max_optimizer_peak_reserved_gib": 27.681640625,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": []
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 17.281277772504836,
+      "max_train_peak_allocated_gib": 22.680975914001465,
+      "max_train_peak_reserved_gib": 27.681640625,
+      "train_peak_allocated_change_gib": 8.271737575531006,
+      "step_time_rel_change": 7.380992095907731
+    },
+    "q06_ckpt_mb512_actc": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_ckpt_mb512_actc",
+          "measured_steps": 12,
+          "median_step_time_s": 17.40390664804727,
+          "min_step_time_s": 16.532823053188622,
+          "max_step_time_s": 18.023139930330217,
+          "median_optimizer_step_time_s": 0.028052152134478092,
+          "max_train_peak_allocated_gib": 20.770316123962402,
+          "max_train_peak_reserved_gib": 22.951171875,
+          "max_optimizer_peak_allocated_gib": 12.427036762237549,
+          "max_optimizer_peak_reserved_gib": 22.951171875,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": [],
+          "saved_activations_gib": {
+            "saved_bytes": 4.823192596435547,
+            "stored_bytes": 2.7052531838417053,
+            "packed_bytes": 2.3284378051757812,
+            "scale_bytes": 0.3014495372772217,
+            "outlier_bytes": 0.07536584138870239,
+            "kept_bytes": 0.0,
+            "workspace_bytes": 0.16631698608398438
+          },
+          "stored_fraction": 0.5608843374991423,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.0029083623502463326,
+            "noise_floor": 0.001757890049044427,
+            "reference_drift": 0.001864684457468564,
+            "calibration_error": 0.008436472523943774,
+            "held_out_error": 0.008869014551152613,
+            "predicted_error": 0.01368609343031147,
+            "plan_rounds": 5.0,
+            "plan_stored_fraction": 0.5608843675379553,
+            "plan_slots_8bit": 27.0,
+            "plan_slots_4bit": 2.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 0.0,
+            "calibration_passes": 91.0,
+            "calibration_s": 752.9046543808654,
+            "calibration_peak_allocated_bytes": 15903182336.0
+          },
+          "calibration_step_time_s": 786.5667482735589
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 17.40390664804727,
+      "max_train_peak_allocated_gib": 20.770316123962402,
+      "max_train_peak_reserved_gib": 22.951171875,
+      "train_peak_allocated_change_gib": 6.361077785491943,
+      "step_time_rel_change": 7.440464066104655
+    },
+    "q06_nockpt_mb64_bf16": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_nockpt_mb64_bf16",
+          "measured_steps": 12,
+          "median_step_time_s": 1.6961783738806844,
+          "min_step_time_s": 1.6148711265996099,
+          "max_step_time_s": 1.8659401815384626,
+          "median_optimizer_step_time_s": 0.028047659900039434,
+          "max_train_peak_allocated_gib": 21.957303047180176,
+          "max_train_peak_reserved_gib": 24.7109375,
+          "max_optimizer_peak_allocated_gib": 12.56988525390625,
+          "max_optimizer_peak_reserved_gib": 24.7109375,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": []
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 1.6961783738806844,
+      "max_train_peak_allocated_gib": 21.957303047180176,
+      "max_train_peak_reserved_gib": 24.7109375,
+      "train_peak_allocated_change_gib": 7.548064708709717,
+      "step_time_rel_change": -0.1773954604582949
+    },
+    "q06_nockpt_mb64_actc": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q06_nockpt_mb64_actc",
+          "measured_steps": 12,
+          "median_step_time_s": 1.7431198447011411,
+          "min_step_time_s": 1.6799285607412457,
+          "max_step_time_s": 1.9778418019413948,
+          "median_optimizer_step_time_s": 0.028075640089809895,
+          "max_train_peak_allocated_gib": 21.0086989402771,
+          "max_train_peak_reserved_gib": 22.748046875,
+          "max_optimizer_peak_allocated_gib": 12.414307117462158,
+          "max_optimizer_peak_reserved_gib": 22.748046875,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": [],
+          "saved_activations_gib": {
+            "saved_bytes": 2.318675994873047,
+            "stored_bytes": 1.596983015537262,
+            "packed_bytes": 0.5078516006469727,
+            "scale_bytes": 0.0833594799041748,
+            "outlier_bytes": 0.020847618579864502,
+            "kept_bytes": 0.98492431640625,
+            "workspace_bytes": 0.020519256591796875
+          },
+          "stored_fraction": 0.6887478251492616,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.0039345858348859624,
+            "noise_floor": 0.0009930377350507939,
+            "reference_drift": 0.0009547930359893656,
+            "calibration_error": 0.008261259140299472,
+            "held_out_error": 0.007814028558546472,
+            "predicted_error": 0.015249002980492898,
+            "plan_rounds": 3.0,
+            "plan_stored_fraction": 0.6887484636184857,
+            "plan_slots_8bit": 34.0,
+            "plan_slots_4bit": 31.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 48.0,
+            "calibration_passes": 325.0,
+            "calibration_s": 228.07476203050464,
+            "calibration_peak_allocated_bytes": 14428059648.0
+          },
+          "calibration_step_time_s": 232.2997070318088
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 1.7431198447011411,
+      "max_train_peak_allocated_gib": 21.0086989402771,
+      "max_train_peak_reserved_gib": 22.748046875,
+      "train_peak_allocated_change_gib": 6.599460601806641,
+      "step_time_rel_change": -0.15463000867309928
+    },
+    "q17_ckpt_mb256_bf16": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q17_ckpt_mb256_bf16",
+          "measured_steps": 12,
+          "median_step_time_s": 18.56640758505091,
+          "min_step_time_s": 17.478197569958866,
+          "max_step_time_s": 19.15980411041528,
+          "median_optimizer_step_time_s": 0.07343487069010735,
+          "max_train_peak_allocated_gib": 41.28043794631958,
+          "max_train_peak_reserved_gib": 44.2578125,
+          "max_optimizer_peak_allocated_gib": 31.65387487411499,
+          "max_optimizer_peak_reserved_gib": 44.2578125,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": []
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 18.56640758505091,
+      "max_train_peak_allocated_gib": 41.28043794631958,
+      "max_train_peak_reserved_gib": 44.2578125,
+      "train_peak_allocated_change_gib": 26.87119960784912,
+      "step_time_rel_change": 8.004248254564041
+    },
+    "q17_ckpt_mb256_actc": {
+      "seeds": [
+        {
+          "run": "examples/activation_compression/results/bench/q17_ckpt_mb256_actc",
+          "measured_steps": 12,
+          "median_step_time_s": 18.660066255368292,
+          "min_step_time_s": 17.43565592635423,
+          "max_step_time_s": 19.13074284698814,
+          "median_optimizer_step_time_s": 0.07344501372426748,
+          "max_train_peak_allocated_gib": 39.130396366119385,
+          "max_train_peak_reserved_gib": 41.990234375,
+          "max_optimizer_peak_allocated_gib": 31.652175426483154,
+          "max_optimizer_peak_reserved_gib": 41.990234375,
+          "initial_val_loss": null,
+          "final_val_loss": null,
+          "val_curve": [],
+          "saved_activations_gib": {
+            "saved_bytes": 4.909729957580566,
+            "stored_bytes": 2.6268182545900345,
+            "packed_bytes": 2.243238687515259,
+            "scale_bytes": 0.3068581223487854,
+            "outlier_bytes": 0.0767214447259903,
+            "kept_bytes": 0.0,
+            "workspace_bytes": 0.16930103302001953
+          },
+          "stored_fraction": 0.5350229619297958,
+          "plan_misses": 0.0,
+          "calibration": {
+            "baseline_nondeterminism": 0.0020098505575655208,
+            "noise_floor": 0.000609016577882238,
+            "reference_drift": 0.0007011754694848564,
+            "calibration_error": 0.008000448143194595,
+            "held_out_error": 0.007907613215827329,
+            "predicted_error": 0.012327155479591689,
+            "plan_rounds": 3.0,
+            "plan_stored_fraction": 0.5350230393943274,
+            "plan_slots_8bit": 24.0,
+            "plan_slots_4bit": 5.0,
+            "plan_slots_2bit": 0.0,
+            "plan_slots_16bit": 0.0,
+            "calibration_passes": 97.0,
+            "calibration_s": 851.1148810749874,
+            "calibration_peak_allocated_bytes": 22559486464.0
+          },
+          "calibration_step_time_s": 886.5697016930208
+        }
+      ],
+      "final_val_loss_mean": null,
+      "final_val_loss_std": null,
+      "median_step_time_s": 18.660066255368292,
+      "max_train_peak_allocated_gib": 39.130396366119385,
+      "max_train_peak_reserved_gib": 41.990234375,
+      "train_peak_allocated_change_gib": 24.721158027648926,
+      "step_time_rel_change": 8.049670392092095
+    }
+  }
+}

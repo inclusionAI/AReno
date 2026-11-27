@@ -56,6 +56,7 @@ backend-only view.
 | Add or change an algorithm or loss | `areno/api/algorithms.py`, `areno/api/trainers/`, and `areno/api/loss_fns/` | `tests/test_algorithms_cpu.py` and `tests/test_losses_rewards_cpu.py` |
 | Add or change a model family | `areno/models/base.py`, `areno/models/registry.py`, then the closest family under `areno/models/` | `tests/test_registry_cpu.py` and `tests/test_registry_discovery_cpu.py` |
 | Change agentic rollout behavior | `areno/api/agentic.py`, then a matching task under `examples/agentic/` | `tests/test_agentic_cpu.py` and the matching example test |
+| Change saved-activation compression | `areno/engine/runtime/activation_compression.py`, hooked in by `TrainingManager` in `areno/engine/training.py` | `tests/test_activation_compression_cpu.py` and `tests/test_activation_compression_cuda.py` |
 
 ## Tests, examples, and skills
 
