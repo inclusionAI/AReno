@@ -217,6 +217,7 @@ class TrainingManager:
                     # tokenwise block schedule; widening it would regress memory.
                     chunk_size=output_chunk_size,
                     recompute=output_recompute is not False,
+                    response_mask=data_pack["packed_response_mask"] if data_pack.get("_score_only_response") else None,
                 )
             else:
                 logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])

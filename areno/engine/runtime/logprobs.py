@@ -142,6 +142,7 @@ def packed_next_token_logprobs_from_hidden(
     logit_softcap: float | None = None,
     chunk_size: int = 256,
     recompute: bool = True,
+    response_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Score packed tokens with optional vocabulary-projection checkpointing.
 
@@ -178,9 +179,18 @@ def packed_next_token_logprobs_from_hidden(
             and not lm_head._forward_pre_hooks
             and getattr(lm_head, "quantized_weight", None) is None
         ):
-            return _NativePackedLogprobs.apply(
+            if response_mask is not None:
+                # Built-in GRPO ignores prompt sites in both loss and metrics.
+                # Preserve its packed action axis while projecting only responses.
+                rows = response_mask.nonzero().flatten()
+                positions = positions.index_select(0, rows)
+                labels = labels.index_select(0, rows)
+            scores = _NativePackedLogprobs.apply(
                 flat_hidden.index_select(0, positions).to(lm_head.weight.dtype), lm_head.weight, labels, chunk_size
             )
+            if response_mask is not None:
+                return selected.zero_().index_copy_(0, rows, scores)
+            return scores
     projection_parameters = None
     if torch.is_grad_enabled() and lm_head.weight.dtype in (torch.bfloat16, torch.float16):
         projection_dtype = lm_head(flat_hidden[:0].to(lm_head.weight.dtype).unsqueeze(0)).dtype

@@ -19,6 +19,7 @@ from areno.engine.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
     mark_tensor_parallel_parameter,
+    projection_device,
 )
 from areno.engine.parallel.context import get_tp_context
 
@@ -84,13 +85,14 @@ class LoraSlot(nn.Module):
             not self.row_parallel and self.local_out_features * ctx.world_size > self.global_out_features
         )
         self._runtime_state = runtime_state
+        device = projection_device(base_weight)
         self.lora_A = nn.Parameter(
-            torch.empty(self.rank, self.local_in_features, device=base_weight.device, dtype=base_weight.dtype)
+            torch.empty(self.rank, self.local_in_features, device=device, dtype=base_weight.dtype)
         )
         self.lora_B = nn.Parameter(
-            torch.empty(self.local_out_features, self.rank, device=base_weight.device, dtype=base_weight.dtype)
+            torch.empty(self.local_out_features, self.rank, device=device, dtype=base_weight.dtype)
         )
-        self.register_buffer("scale", torch.tensor(config.scale, device=base_weight.device, dtype=torch.float32))
+        self.register_buffer("scale", torch.tensor(config.scale, device=device, dtype=torch.float32))
         if row_parallel:
             mark_tensor_parallel_parameter(self.lora_A, True, sequence_parallel=True)
             mark_tensor_parallel_parameter(self.lora_B, False, sequence_parallel=True, tp_grad_allreduce=True)
@@ -156,12 +158,13 @@ class RoutedExpertLoraSlot(nn.Module):
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self._runtime_state = runtime_state
+        device = projection_device(base_weight)
         self.lora_A = nn.Parameter(
             torch.empty(
                 self.local_num_experts,
                 self.rank,
                 self.in_features,
-                device=base_weight.device,
+                device=device,
                 dtype=base_weight.dtype,
             )
         )
@@ -170,11 +173,11 @@ class RoutedExpertLoraSlot(nn.Module):
                 self.local_num_experts,
                 self.out_features,
                 self.rank,
-                device=base_weight.device,
+                device=device,
                 dtype=base_weight.dtype,
             )
         )
-        self.register_buffer("scale", torch.tensor(config.scale, device=base_weight.device, dtype=torch.float32))
+        self.register_buffer("scale", torch.tensor(config.scale, device=device, dtype=torch.float32))
         mark_tensor_parallel_parameter(self.lora_A, True, sequence_parallel=False, tp_grad_allreduce=False)
         mark_tensor_parallel_parameter(self.lora_B, True, sequence_parallel=False, tp_grad_allreduce=False)
         self._reset_parameters(seed)

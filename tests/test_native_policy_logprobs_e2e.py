@@ -10,6 +10,30 @@ from areno.api import CudaConfig, SamplingParams, TrainSequence
 from areno.api.algorithms import grpo_loss_fn
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires native CUDA LM head")
+@pytest.mark.parametrize("active", [[], [1, 3]])
+def test_response_only_native_head_matches_masked_dense_gradients(active):
+    from areno.engine.layers.vocab import VocabParallelLMHead
+    from areno.engine.runtime.logprobs import packed_next_token_logprobs_from_hidden
+
+    torch.manual_seed(17)
+    head = VocabParallelLMHead(32, 64, dtype=torch.float32).cuda()
+    head.native_projection = True
+    hidden = torch.randn(1, 6, 32, device="cuda", requires_grad=True)
+    tokens = torch.tensor([[1, 2, 3, 4, 5, 6]], device="cuda")
+    cu = torch.tensor([0, 3, 6], device="cuda")
+    mask = torch.zeros(4, device="cuda", dtype=torch.bool)
+    mask[active] = True
+    dense = packed_next_token_logprobs_from_hidden(hidden, tokens, cu, head)
+    sparse = packed_next_token_logprobs_from_hidden(hidden, tokens, cu, head, response_mask=mask)
+    torch.testing.assert_close(sparse, dense.masked_fill(~mask, 0))
+    inputs = (hidden, head.weight)
+    expected = torch.autograd.grad(dense[mask].sum(), inputs)
+    actual = torch.autograd.grad(sparse.sum(), inputs)
+    for got, want in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got, want)
+
+
 @pytest.mark.parametrize("model_env", ["ARENO_E2E_LING_MODEL", "ARENO_E2E_MINICPM5_1B_MODEL"])
 def test_native_rollout_matches_train_logprobs(model_env, tmp_path):
     model_path = os.getenv(model_env)

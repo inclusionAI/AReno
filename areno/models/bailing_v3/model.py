@@ -80,6 +80,7 @@ from areno.engine.layers.linear import (
     mark_tensor_parallel_parameter,
     native_projection,
     projection_dtype,
+    projection_weight,
 )
 from areno.engine.layers.norm import GroupRMSNormSigmoidGate, RMSNorm
 from areno.engine.layers.rotary import PartialRotaryEmbedding
@@ -93,6 +94,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, should_checkpoint_layer
 from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
@@ -719,7 +721,7 @@ class ArenoGroupedLinear(nn.Module):
         self.num_gemms = num_gemms
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(num_gemms, out_features, in_features, dtype=dtype))
+        self.weight = projection_weight(num_gemms, out_features, in_features, dtype=dtype)
 
     def forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor | Sequence[int]) -> torch.Tensor:
         quantized = getattr(self, "quantized_weight", None)
@@ -1955,6 +1957,8 @@ class BailingMTPLayer(BailingDecoderLayer):
 class BailingMoeV3ForCausalLM(nn.Module):
     """Top-level Bailing-MoE V3 causal LM."""
 
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -2013,6 +2017,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -2024,8 +2029,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
             # SP shards the sequence dim before entering the layer stack.
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            for layer in self.layers:
-                hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
+            with decoder_activation_offload(hidden_states, train_meta, legacy_bailing_v3=True):
+                for layer in self.layers:
+                    hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
             mtp_logits_shard = None
             if self.mtp_layers is not None and train_meta is not None and train_meta.mtp_enabled:
@@ -2048,15 +2054,14 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 if self.lm_head.weight.dtype == torch.float32:
                     mtp_hidden = mtp_hidden.float()
                 mtp_logits_shard = self.lm_head(mtp_hidden)
-            if defer_lm_head:
-                # The caller projects the trunk hidden states in chunks; MTP
-                # logits are still returned so the MTP loss stays active.
-                return CausalLMOutput(logits_shard=None, hidden_states=hidden_states, mtp_logits_shard=mtp_logits_shard)
-            logits_input = hidden_states
-            if self.lm_head.weight.dtype == torch.float32:
-                logits_input = hidden_states.float()
             return CausalLMOutput(
-                logits_shard=self.lm_head(logits_input),
+                logits_shard=project_lm_head(
+                    self.lm_head,
+                    hidden_states,
+                    defer=defer_lm_head,
+                    logits_indices=logits_indices,
+                    dtype=torch.float32 if not defer_lm_head and self.lm_head.weight.dtype == torch.float32 else None,
+                ),
                 hidden_states=hidden_states,
                 mtp_logits_shard=mtp_logits_shard,
             )

@@ -67,6 +67,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_softmax_routes
@@ -645,6 +646,8 @@ class Gemma4DecoderLayer(nn.Module):
 class Gemma4ForCausalLM(nn.Module):
     """Top-level Gemma4 model orchestrating PLE, KV sharing, and the LM head."""
 
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -856,6 +859,7 @@ class Gemma4ForCausalLM(nn.Module):
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -873,33 +877,36 @@ class Gemma4ForCausalLM(nn.Module):
         with sequence_parallel_region(use_sequence_parallel):
             # Cache K/V tensors that the tail KV-shared layers will consume.
             shared_kv_by_layer: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-            for layer_idx, layer in enumerate(self.layers):
-                # Slice out the current layer's PLE slot if PLE is active.
-                per_layer_input = per_layer_inputs[:, :, layer_idx, :] if per_layer_inputs is not None else None
-                shared_kv = None
-                shared_idx = layer.self_attn.kv_shared_layer_index
-                if shared_idx is not None:
-                    shared_kv = shared_kv_by_layer.get(shared_idx)
-                if shared_kv is None and not getattr(layer, "handles_activation_checkpointing", False):
-                    hidden_states, kv_for_share = checkpoint_layer(
-                        layer,
-                        hidden_states,
-                        position_ids,
-                        per_layer_input,
-                        shared_kv,
-                        train_meta,
-                        infer_meta,
-                        train_meta=train_meta,
-                        infer_meta=infer_meta,
-                    )
-                else:
-                    hidden_states, kv_for_share = layer(
-                        hidden_states, position_ids, per_layer_input, shared_kv, train_meta, infer_meta
-                    )
-                if kv_for_share is not None:
-                    shared_kv_by_layer[layer_idx] = kv_for_share
+            with decoder_activation_offload(hidden_states, train_meta):
+                for layer_idx, layer in enumerate(self.layers):
+                    # Slice out the current layer's PLE slot if PLE is active.
+                    per_layer_input = per_layer_inputs[:, :, layer_idx, :] if per_layer_inputs is not None else None
+                    shared_kv = None
+                    shared_idx = layer.self_attn.kv_shared_layer_index
+                    if shared_idx is not None:
+                        shared_kv = shared_kv_by_layer.get(shared_idx)
+                    if shared_kv is None and not getattr(layer, "handles_activation_checkpointing", False):
+                        hidden_states, kv_for_share = checkpoint_layer(
+                            layer,
+                            hidden_states,
+                            position_ids,
+                            per_layer_input,
+                            shared_kv,
+                            train_meta,
+                            infer_meta,
+                            train_meta=train_meta,
+                            infer_meta=infer_meta,
+                        )
+                    else:
+                        hidden_states, kv_for_share = layer(
+                            hidden_states, position_ids, per_layer_input, shared_kv, train_meta, infer_meta
+                        )
+                    if kv_for_share is not None:
+                        shared_kv_by_layer[layer_idx] = kv_for_share
             hidden_states = self.norm(hidden_states)
-            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            logits_shard = project_lm_head(
+                self.lm_head, hidden_states, defer=defer_lm_head, logits_indices=logits_indices
+            )
             if logits_shard is not None and self.final_logit_softcapping:
                 # Gemma uses tanh-based logit softcap to limit extreme values.
                 cap = float(self.final_logit_softcapping)

@@ -9,6 +9,7 @@ groups consumed by the worker cluster.
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -355,7 +356,7 @@ class EngineConfig:
 
             if not _adapter(self.model.model_type).supports_qlora:
                 raise ValueError(f"QLoRA is not supported for {self.model.model_type}")
-            self.optimizer.paged = True
+            self.optimizer.paged = os.getenv("ARENO_QLORA_DISABLE_PAGING") != "1"
         if self.sequence_parallel is not None:
             self.model.sequence_parallel = bool(self.sequence_parallel)
         self.model.validate_tp(self.tp_size)

@@ -27,6 +27,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.models.base import CausalLMOutput, ModelAdapter
@@ -694,16 +695,17 @@ class Phi4MMModel(nn.Module):
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            for layer in self.layers:
-                hidden_states = checkpoint_layer(
-                    layer,
-                    hidden_states,
-                    position_ids,
-                    train_meta,
-                    infer_meta,
-                    train_meta=train_meta,
-                    infer_meta=infer_meta,
-                )
+            with decoder_activation_offload(hidden_states, train_meta):
+                for layer in self.layers:
+                    hidden_states = checkpoint_layer(
+                        layer,
+                        hidden_states,
+                        position_ids,
+                        train_meta,
+                        infer_meta,
+                        train_meta=train_meta,
+                        infer_meta=infer_meta,
+                    )
             hidden_states = self.norm(hidden_states)
         if layout is not None:
             if use_sequence_parallel:
@@ -975,6 +977,8 @@ class Phi4MMLMHead(VocabParallelLMHead):
 class Phi4MMForCausalLM(nn.Module):
     """Phi-4-Multimodal causal LM with a truly tied vocab-parallel head."""
 
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         if not config.tie_word_embeddings:
@@ -1106,11 +1110,14 @@ class Phi4MMForCausalLM(nn.Module):
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         with sequence_parallel_region(use_sequence_parallel):
             hidden_states = self.model(input_ids, position_ids, train_meta, infer_meta, features)
-            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            logits_shard = project_lm_head(
+                self.lm_head, hidden_states, defer=defer_lm_head, logits_indices=logits_indices
+            )
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     def set_kv_caches(

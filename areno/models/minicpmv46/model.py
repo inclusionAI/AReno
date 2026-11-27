@@ -44,6 +44,7 @@ from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
 from areno.engine.parallel.collectives import scatter_to_sequence_parallel_region, sequence_parallel_region
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.models._shared.dynamo_wrappers import (
@@ -809,6 +810,8 @@ class MiniCPMDecoderLayer(nn.Module):
 class MiniCPMV46ForCausalLM(nn.Module):
     """MiniCPM-V-4.6 language model with an AReno-owned vision path."""
 
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -916,6 +919,7 @@ class MiniCPMV46ForCausalLM(nn.Module):
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -931,18 +935,21 @@ class MiniCPMV46ForCausalLM(nn.Module):
             # Split sequence dim across TP ranks before entering the SP region.
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            for layer in self.layers:
-                hidden_states = checkpoint_layer(
-                    layer,
-                    hidden_states,
-                    position_ids,
-                    train_meta,
-                    infer_meta,
-                    train_meta=train_meta,
-                    infer_meta=infer_meta,
-                )
+            with decoder_activation_offload(hidden_states, train_meta):
+                for layer in self.layers:
+                    hidden_states = checkpoint_layer(
+                        layer,
+                        hidden_states,
+                        position_ids,
+                        train_meta,
+                        infer_meta,
+                        train_meta=train_meta,
+                        infer_meta=infer_meta,
+                    )
             hidden_states = self.norm(hidden_states)
-            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            logits_shard = project_lm_head(
+                self.lm_head, hidden_states, defer=defer_lm_head, logits_indices=logits_indices
+            )
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     @torch._dynamo.disable

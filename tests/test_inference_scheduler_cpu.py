@@ -67,6 +67,36 @@ class _FakeInferenceManager(InferenceManager):
         return next_tokens + 1, torch.zeros_like(next_tokens, dtype=torch.float32) - float(sample_step)
 
 
+@pytest.mark.parametrize("preselect", [False, True])
+def test_prefill_head_selection_reaches_sampling_and_cache_only_paths(preselect):
+    class Model:
+        supports_prefill_logits_indices = preselect
+
+        def __call__(self, input_ids, **kwargs):
+            if kwargs.get("defer_lm_head"):
+                assert preselect
+                return SimpleNamespace(logits_shard=None)
+            logits = torch.nn.functional.one_hot(input_ids, num_classes=8).float()
+            if preselect:
+                logits = logits[:, kwargs["logits_indices"]]
+            return SimpleNamespace(logits_shard=logits)
+
+    worker = SimpleNamespace(model=Model(), device=torch.device("cpu"), config=SimpleNamespace(
+        runtime=SimpleNamespace(rollout_routing_replay=False), model=SimpleNamespace(vocab_size=8), tp_size=1
+    ))
+    manager = InferenceManager(worker)
+    payload = SimpleNamespace(
+        input_ids=torch.tensor([1, 3, 6, 2]), position_ids=torch.arange(4), raw={}, next_input_ids=None,
+        infer_meta=SimpleNamespace(captured_routing=None), sample_indices=torch.tensor([1, 3]),
+        sampling_params=SamplingParams(temperature=0.0), return_logprobs=True, eos_token_id=None, sample_step=0,
+    )
+    tokens, logprobs = manager._infer_next_token_tensor(payload)
+    assert tokens.tolist() == [3, 2]
+    assert torch.isfinite(logprobs).all()
+    payload.sample_indices = torch.empty(0, dtype=torch.long)
+    manager._run_prefill_payload(payload)
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_long_prompt_prefill_is_bounded_without_shortening_rows(asynchronous):
     """Keep long-context activations bounded while consuming every prompt token."""

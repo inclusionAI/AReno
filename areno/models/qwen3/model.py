@@ -37,7 +37,7 @@ from areno.engine.checkpoints.common import (
 )
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
-from areno.engine.layers.linear import mark_tensor_parallel_parameter
+from areno.engine.layers.linear import mark_tensor_parallel_parameter, projection_weight
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
@@ -49,6 +49,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer, tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_softmax_routes
@@ -103,11 +104,11 @@ class Qwen3MoeExperts(nn.Module):
         self.local_expert_end = self.local_expert_start + self.local_num_experts
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size
-        self.gate_up_weight = nn.Parameter(
-            torch.empty(self.local_num_experts, 2 * self.intermediate_size, self.hidden_size, dtype=config.dtype)
+        self.gate_up_weight = projection_weight(
+            self.local_num_experts, 2 * self.intermediate_size, self.hidden_size, dtype=config.dtype
         )
-        self.down_weight = nn.Parameter(
-            torch.empty(self.local_num_experts, self.hidden_size, self.intermediate_size, dtype=config.dtype)
+        self.down_weight = projection_weight(
+            self.local_num_experts, self.hidden_size, self.intermediate_size, dtype=config.dtype
         )
         self.lora_slots = nn.ModuleDict()
         mark_tensor_parallel_parameter(self.gate_up_weight, True, sequence_parallel=False, tp_grad_allreduce=False)
@@ -410,6 +411,8 @@ class Qwen3MoeDecoderLayer(QwenDecoderLayer):
 class Qwen3ForCausalLM(nn.Module):
     """Top-level Qwen3 causal LM with vocab-parallel embedding/LM head."""
 
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -428,6 +431,7 @@ class Qwen3ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             # Default to monotonic 0..S-1 positions broadcast across the batch.
@@ -438,21 +442,24 @@ class Qwen3ForCausalLM(nn.Module):
             # Split sequence dim across TP ranks before entering the SP region.
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            for layer in self.layers:
-                if getattr(layer, "checkpoint_internally", False):
-                    hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
-                else:
-                    hidden_states = checkpoint_layer(
-                        layer,
-                        hidden_states,
-                        position_ids,
-                        train_meta,
-                        infer_meta,
-                        train_meta=train_meta,
-                        infer_meta=infer_meta,
-                    )
+            with decoder_activation_offload(hidden_states, train_meta):
+                for layer in self.layers:
+                    if getattr(layer, "checkpoint_internally", False):
+                        hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
+                    else:
+                        hidden_states = checkpoint_layer(
+                            layer,
+                            hidden_states,
+                            position_ids,
+                            train_meta,
+                            infer_meta,
+                            train_meta=train_meta,
+                            infer_meta=infer_meta,
+                        )
             hidden_states = self.norm(hidden_states)
-            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            logits_shard = project_lm_head(
+                self.lm_head, hidden_states, defer=defer_lm_head, logits_indices=logits_indices
+            )
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     def set_kv_caches(

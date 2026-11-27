@@ -88,6 +88,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.decoder import decoder_activation_offload, project_lm_head
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
@@ -1140,6 +1141,8 @@ class BailingDecoderLayer(nn.Module):
 class BailingMoeLinearV2ForCausalLM(nn.Module):
     """Top-level Bailing-MoE-Linear-V2 causal LM."""
 
+    supports_prefill_logits_indices = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -1155,6 +1158,7 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         defer_lm_head: bool = False,
+        logits_indices: torch.Tensor | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -1164,11 +1168,15 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
             # SP shards the sequence dim before entering the layer stack.
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
-            for layer in self.layers:
-                hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
+            with decoder_activation_offload(hidden_states, train_meta):
+                for layer in self.layers:
+                    hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
             return CausalLMOutput(
-                logits_shard=None if defer_lm_head else self.lm_head(hidden_states), hidden_states=hidden_states
+                logits_shard=project_lm_head(
+                    self.lm_head, hidden_states, defer=defer_lm_head, logits_indices=logits_indices
+                ),
+                hidden_states=hidden_states,
             )
 
     def set_kv_caches(
